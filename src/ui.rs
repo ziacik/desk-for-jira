@@ -892,9 +892,8 @@ fn rebuild_editor(
     ui: &Ui,
     state: &Rc<RefCell<State>>,
     editor: &gtk::Window,
-    reorder: &ColumnReorderContext,
+    controls: &ColumnOrderControls,
 ) {
-    reorder.active.borrow_mut().take();
     clear_box(rows);
     let (columns, statuses, projects) = {
         let s = state.borrow();
@@ -933,37 +932,18 @@ fn rebuild_editor(
         heading.set_ellipsize(gtk::pango::EllipsizeMode::End);
         header.append(&heading);
 
-        for (up, icon, tooltip) in [
-            (true, "go-previous-symbolic", "Move column left"),
-            (false, "go-next-symbolic", "Move column right"),
-        ] {
-            let destination = if up {
-                position.checked_sub(1).and_then(|i| visible.get(i)).copied()
-            } else {
-                visible.get(position + 1).copied()
-            };
-            let button = gtk::Button::builder().icon_name(icon).build();
-            button.set_tooltip_text(Some(tooltip));
-            button.set_sensitive(destination.is_some());
-            header.append(&button);
-            let ui = ui.clone();
+        // Selecting the card only changes the selection in the persistent toolbar.
+        // Moving is exclusively handled by the toolbar's fixed-position arrows.
+        let choose = gtk::Button::with_label("Select");
+        choose.set_tooltip_text(Some("Select this column in the fixed move toolbar"));
+        header.append(&choose);
+        {
+            let controls = controls.clone();
             let state = state.clone();
-            let rows = rows.clone();
-            let anchor = column.statuses[0].clone();
-            let reorder = reorder.clone();
-            button.connect_clicked(move |button| {
-                let Some(card) = button.parent().and_then(|header| header.parent())
-                else { return; };
-                if move_editor_column(&rows, &ui, &state, &card, &anchor, up)
-                    && let Some(press) = reorder.last_press.get()
-                {
-                    *reorder.active.borrow_mut() = Some(ColumnReorderSession {
-                        reference: anchor.clone(),
-                        card,
-                        left: up,
-                        press,
-                    });
-                }
+            let reference = column.statuses[0].clone();
+            choose.connect_clicked(move |_| {
+                *controls.selected.borrow_mut() = Some(reference.clone());
+                update_column_order_controls(&controls, &state);
             });
         }
         card.append(&header);
@@ -999,7 +979,7 @@ fn rebuild_editor(
             let rows = rows.clone();
             let editor = editor.clone();
             let anchor = column.statuses[0].clone();
-            let reorder = reorder.clone();
+            let controls = controls.clone();
             rename.connect_clicked(move |_| {
                 let renamed = {
                     let mut s = state.borrow_mut();
@@ -1008,7 +988,7 @@ fn rebuild_editor(
                     index.is_some_and(|index| s.settings.rename_column(index, &name.text()))
                 };
                 if renamed {
-                    refresh_column_editor(&ui, &state, &rows, &editor, &reorder);
+                    refresh_column_editor(&ui, &state, &rows, &editor, &controls);
                 }
             });
         }
@@ -1041,12 +1021,12 @@ fn rebuild_editor(
                 let state = state.clone();
                 let rows = rows.clone();
                 let editor = editor.clone();
-                let reorder = reorder.clone();
+                let controls = controls.clone();
                 separate.connect_clicked(move |_| {
                     state.borrow_mut().settings.move_status(
                         &status.reference(), None, &status.name
                     );
-                    refresh_column_editor(&ui, &state, &rows, &editor, &reorder);
+                    refresh_column_editor(&ui, &state, &rows, &editor, &controls);
                 });
             }
             card.append(&status_row);
@@ -1064,7 +1044,7 @@ fn rebuild_editor(
             let rows = rows.clone();
             let editor = editor.clone();
             let anchor = column.statuses[0].clone();
-            let reorder = reorder.clone();
+            let controls = controls.clone();
             add.connect_clicked(move |_| {
                 let target = {
                     let s = state.borrow();
@@ -1072,7 +1052,7 @@ fn rebuild_editor(
                         .position(|column| column.statuses.contains(&anchor))
                 };
                 if let Some(target) = target {
-                    show_add_status_picker(&ui, &state, &rows, &editor, target, &reorder);
+                    show_add_status_picker(&ui, &state, &rows, &editor, target, &controls);
                 }
             });
         }
@@ -1085,35 +1065,7 @@ fn rebuild_editor(
         empty.add_css_class("dim-label");
         rows.append(&empty);
     }
-}
-
-fn update_editor_positions(rows: &gtk::Box, state: &Rc<RefCell<State>>) {
-    let s = state.borrow();
-    let columns = &s.settings.columns;
-    let projects = &s.settings.projects;
-    let visible: Vec<_> = columns.iter()
-        .filter(|column| column.statuses.iter()
-            .any(|status| projects.contains(&status.project_key)))
-        .collect();
-
-    let mut child = rows.first_child();
-    for (position, column) in visible.iter().enumerate() {
-        let Some(card) = child else { break; };
-        let Some(header) = card.first_child() else { break; };
-        let Some(heading) = header.first_child().and_downcast::<gtk::Label>()
-        else { break; };
-        let Some(left) = heading.next_sibling().and_downcast::<gtk::Button>()
-        else { break; };
-        let Some(right) = left.next_sibling().and_downcast::<gtk::Button>()
-        else { break; };
-
-        heading.set_label(&format!(
-            "{}. {}", position + 1, column_label(column, columns, projects)
-        ));
-        left.set_sensitive(position > 0);
-        right.set_sensitive(position + 1 < visible.len());
-        child = card.next_sibling();
-    }
+    update_column_order_controls(controls, state);
 }
 
 fn show_add_status_picker(
