@@ -928,6 +928,7 @@ fn rebuild_editor(
             let rows = rows.clone();
             let editor = editor.clone();
             let anchor = column.statuses[0].clone();
+            let reorder = reorder.clone();
             rename.connect_clicked(move |_| {
                 let renamed = {
                     let mut s = state.borrow_mut();
@@ -936,7 +937,7 @@ fn rebuild_editor(
                     index.is_some_and(|index| s.settings.rename_column(index, &name.text()))
                 };
                 if renamed {
-                    refresh_column_editor(&ui, &state, &rows, &editor);
+                    refresh_column_editor(&ui, &state, &rows, &editor, &reorder);
                 }
             });
         }
@@ -969,11 +970,12 @@ fn rebuild_editor(
                 let state = state.clone();
                 let rows = rows.clone();
                 let editor = editor.clone();
+                let reorder = reorder.clone();
                 separate.connect_clicked(move |_| {
                     state.borrow_mut().settings.move_status(
                         &status.reference(), None, &status.name
                     );
-                    refresh_column_editor(&ui, &state, &rows, &editor);
+                    refresh_column_editor(&ui, &state, &rows, &editor, &reorder);
                 });
             }
             card.append(&status_row);
@@ -991,6 +993,7 @@ fn rebuild_editor(
             let rows = rows.clone();
             let editor = editor.clone();
             let anchor = column.statuses[0].clone();
+            let reorder = reorder.clone();
             add.connect_clicked(move |_| {
                 let target = {
                     let s = state.borrow();
@@ -998,7 +1001,7 @@ fn rebuild_editor(
                         .position(|column| column.statuses.contains(&anchor))
                 };
                 if let Some(target) = target {
-                    show_add_status_picker(&ui, &state, &rows, &editor, target);
+                    show_add_status_picker(&ui, &state, &rows, &editor, target, &reorder);
                 }
             });
         }
@@ -1048,6 +1051,7 @@ fn show_add_status_picker(
     rows: &gtk::Box,
     editor: &gtk::Window,
     target: usize,
+    reorder: &ColumnReorderContext,
 ) {
     let (columns, mut candidates, projects) = {
         let s = state.borrow();
@@ -1122,11 +1126,12 @@ fn show_add_status_picker(
         let rows = rows.clone();
         let editor = editor.clone();
         let picker = picker.clone();
+        let reorder = reorder.clone();
         add.connect_clicked(move |_| {
             state.borrow_mut().settings.move_status(
                 &status.reference(), Some(target), &status.name
             );
-            refresh_column_editor(&ui, &state, &rows, &editor);
+            refresh_column_editor(&ui, &state, &rows, &editor, &reorder);
             picker.close();
         });
     }
@@ -1165,6 +1170,7 @@ fn confirm_column_reset(
     state: &Rc<RefCell<State>>,
     rows: &gtk::Box,
     editor: &gtk::Window,
+    reorder: &ColumnReorderContext,
 ) {
     let dialog = gtk::Window::builder()
         .title("Reset board columns?")
@@ -1204,10 +1210,11 @@ fn confirm_column_reset(
         let rows = rows.clone();
         let editor = editor.clone();
         let dialog = dialog.clone();
+        let reorder = reorder.clone();
         reset.connect_clicked(move |_| {
             let statuses = state.borrow().statuses.clone();
             state.borrow_mut().settings.reset_columns(&statuses);
-            refresh_column_editor(&ui, &state, &rows, &editor);
+            refresh_column_editor(&ui, &state, &rows, &editor, &reorder);
             dialog.close();
         });
     }
@@ -1219,10 +1226,11 @@ fn refresh_column_editor(
     state: &Rc<RefCell<State>>,
     rows: &gtk::Box,
     editor: &gtk::Window,
+    reorder: &ColumnReorderContext,
 ) {
     save_settings(ui, state);
     render_board(ui, &state.borrow());
-    rebuild_editor(rows, ui, state, editor);
+    rebuild_editor(rows, ui, state, editor, reorder);
 }
 
 fn save_settings(ui: &Ui, state: &Rc<RefCell<State>>) {
@@ -1444,6 +1452,13 @@ fn show_error(ui: &Ui, error: &str) {
 #[cfg(test)]
 mod scope_tests {
     use super::*;
+
+    #[test]
+    fn stationary_clicks_select_the_same_move_session() {
+        assert!(same_click_position((280.0, 510.0), (280.0, 510.0)));
+        assert!(same_click_position((280.0, 510.0), (281.0, 508.0)));
+        assert!(!same_click_position((280.0, 510.0), (280.0, 485.0)));
+    }
 
     #[test]
     fn board_scope_uses_server_side_jql() {
