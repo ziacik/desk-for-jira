@@ -85,6 +85,7 @@ pub struct ProjectStatus {
     pub id: String,
     pub name: String,
     pub category: Option<StatusCategory>,
+    pub workflow_order: Option<usize>,
 }
 
 fn parse_status_category(value: &Value) -> Option<StatusCategory> {
@@ -243,6 +244,7 @@ impl JiraClient {
                             id: id.to_owned(),
                             name: name.to_owned(),
                             category: status.get("statusCategory").and_then(parse_status_category),
+                            workflow_order: None,
                         });
                     }
                 }
@@ -269,7 +271,52 @@ impl JiraClient {
                 }
             }
         }
+        if self.account.mode == AuthMode::Cloud {
+            for key in keys {
+                let workflow_order = self.project_workflow_order(key);
+                for status in statuses.iter_mut().filter(|s| &s.project_key == key) {
+                    status.workflow_order = workflow_order.get(status.id.as_str()).copied();
+                }
+            }
+        }
         Ok(statuses)
+    }
+
+    // Optional best-effort workflow metadata. Many Jira users have browse access
+    // but lack View (read-only) workflow permission; never block the board on it.
+    fn project_workflow_order(&self, key: &str) -> std::collections::HashMap<String, usize> {
+        let project = self.read_json(self.http.get(
+            self.url(&format!("/rest/api/3/project/{key}"))
+        ));
+        let Some(project_id) = project.ok()
+            .and_then(|p| p.get("id").and_then(Value::as_str).map(str::to_owned))
+        else { return std::collections::HashMap::new(); };
+
+        let mut result = std::collections::HashMap::new();
+        let mut start = 0usize;
+        for _ in 0..10 {
+            let page = self.read_json(self.http.get(
+                self.url("/rest/api/3/workflows/search")
+            ).query(&[
+                ("projectId", project_id.as_str()),
+                ("startAt", &start.to_string()),
+                ("maxResults", "100"),
+                ("isActive", "true"),
+            ]));
+            let Ok(page) = page else { break; };
+            for (id, position) in parse_workflow_status_order(&page) {
+                result.entry(id).and_modify(|old: &mut usize| {
+                    *old = (*old).min(position);
+                }).or_insert(position);
+            }
+            let count = page.get("values").and_then(Value::as_array)
+                .map_or(0, Vec::len);
+            if count == 0 || page.get("isLast").and_then(Value::as_bool) == Some(true) {
+                break;
+            }
+            start += count;
+        }
+        result
     }
 
     pub fn project_issues(&self, keys: &[String], scope: Option<&str>) -> Result<Vec<Issue>> {
@@ -286,6 +333,106 @@ impl JiraClient {
         self.search_issues(&jql)
     }
 
+}
+
+/// Derive ordering from actual workflow transitions; no status-name guesses.
+/// When transitions do not give a total order, use the workflow diagram's x layout.
+fn parse_workflow_status_order(
+    response: &Value,
+) -> std::collections::HashMap<String, usize> {
+    use std::collections::{HashMap, HashSet, VecDeque};
+
+    let references: HashMap<&str, &str> = response.get("statuses")
+        .and_then(Value::as_array).into_iter().flatten()
+        .filter_map(|status| Some((
+            status.get("statusReference")?.as_str()?,
+            status.get("id")?.as_str()?,
+        )))
+        .collect();
+    let mut result = HashMap::new();
+    let Some(workflows) = response.get("values").and_then(Value::as_array)
+        .or_else(|| response.get("workflows").and_then(Value::as_array))
+    else { return result; };
+
+    for workflow in workflows {
+        let Some(workflow_statuses) = workflow.get("statuses").and_then(Value::as_array)
+        else { continue; };
+        let mut layout: Vec<(String, f64)> = workflow_statuses.iter()
+            .filter(|status| status.get("deprecated").and_then(Value::as_bool) != Some(true))
+            .filter_map(|status| Some((
+                status.get("statusReference")?.as_str()?.to_owned(),
+                status.get("layout").and_then(|v| v.get("x"))
+                    .and_then(Value::as_f64).unwrap_or(f64::MAX),
+            )))
+            .collect();
+        layout.sort_by(|a, b| a.1.total_cmp(&b.1));
+        let known: HashSet<_> = layout.iter().map(|(reference, _)| reference.as_str()).collect();
+        let mut incoming = HashSet::new();
+        let mut graph: HashMap<String, Vec<String>> = HashMap::new();
+        let mut initial = Vec::new();
+
+        for transition in workflow.get("transitions").and_then(Value::as_array)
+            .into_iter().flatten()
+        {
+            let Some(to) = transition.get("toStatusReference").and_then(Value::as_str)
+            else { continue; };
+            if !known.contains(to) { continue; }
+            match transition.get("type").and_then(Value::as_str) {
+                Some("INITIAL") => initial.push(to.to_owned()),
+                Some("DIRECTED") => {
+                    for link in transition.get("links").and_then(Value::as_array)
+                        .into_iter().flatten()
+                    {
+                        if let Some(from) = link.get("fromStatusReference").and_then(Value::as_str)
+                            && known.contains(from)
+                            && from != to
+                        {
+                            graph.entry(from.to_owned()).or_default().push(to.to_owned());
+                            incoming.insert(to.to_owned());
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        if initial.is_empty() {
+            initial.extend(layout.iter()
+                .filter(|(status, _)| !incoming.contains(status))
+                .map(|(status, _)| status.clone()));
+        }
+        if initial.is_empty() {
+            initial.extend(layout.first().map(|(status, _)| status.clone()));
+        }
+        let mut distances = HashMap::new();
+        let mut queue = VecDeque::new();
+        for root in initial {
+            if distances.insert(root.clone(), 0usize).is_none() {
+                queue.push_back(root);
+            }
+        }
+        while let Some(current) = queue.pop_front() {
+            let distance = distances[&current];
+            for next in graph.get(&current).into_iter().flatten() {
+                if !distances.contains_key(next) {
+                    distances.insert(next.clone(), distance + 1);
+                    queue.push_back(next.clone());
+                }
+            }
+        }
+        layout.sort_by(|a, b| {
+            distances.get(&a.0).copied().unwrap_or(usize::MAX)
+                .cmp(&distances.get(&b.0).copied().unwrap_or(usize::MAX))
+                .then_with(|| a.1.total_cmp(&b.1))
+        });
+        for (position, (reference, _)) in layout.iter().enumerate() {
+            if let Some(id) = references.get(reference.as_str()) {
+                result.entry((*id).to_owned())
+                    .and_modify(|old: &mut usize| *old = (*old).min(position))
+                    .or_insert(position);
+            }
+        }
+    }
+    result
 }
 
 fn parse_project(data: &Value) -> Option<Project> {
@@ -367,6 +514,57 @@ mod tests {
         c.base_url = "https://jira.example.com/".into();
         assert!(c.validate().is_ok());
         assert_eq!(c.base_url, "https://jira.example.com");
+    }
+
+    #[test]
+    fn derives_order_from_transition_graph_even_with_localized_statuses() {
+        let response = json!({
+            "statuses": [
+                {"id": "3", "statusReference": "done", "name": "Fertig"},
+                {"id": "1", "statusReference": "todo", "name": "Čaká"},
+                {"id": "2", "statusReference": "progress", "name": "Rieši sa"}
+            ],
+            "values": [{
+                "statuses": [
+                    {"statusReference": "done", "layout": {"x": 0}},
+                    {"statusReference": "progress", "layout": {"x": 300}},
+                    {"statusReference": "todo", "layout": {"x": 600}}
+                ],
+                "transitions": [
+                    {"type": "INITIAL", "toStatusReference": "todo"},
+                    {"type": "DIRECTED", "toStatusReference": "progress",
+                        "links": [{"fromStatusReference": "todo"}]},
+                    {"type": "DIRECTED", "toStatusReference": "done",
+                        "links": [{"fromStatusReference": "progress"}]},
+                    {"type": "DIRECTED", "toStatusReference": "progress",
+                        "links": [{"fromStatusReference": "done"}]}
+                ]
+            }]
+        });
+        let result = parse_workflow_status_order(&response);
+        assert_eq!(result.get("1"), Some(&0));
+        assert_eq!(result.get("2"), Some(&1));
+        assert_eq!(result.get("3"), Some(&2));
+    }
+
+    #[test]
+    fn workflow_order_falls_back_to_diagram_layout_without_directed_transitions() {
+        let response = json!({
+            "statuses": [
+                {"id": "20", "statusReference": "b"},
+                {"id": "10", "statusReference": "a"}
+            ],
+            "values": [{
+                "statuses": [
+                    {"statusReference": "b", "layout": {"x": 300}},
+                    {"statusReference": "a", "layout": {"x": 100}}
+                ],
+                "transitions": []
+            }]
+        });
+        let result = parse_workflow_status_order(&response);
+        assert_eq!(result.get("10"), Some(&0));
+        assert_eq!(result.get("20"), Some(&1));
     }
 
     #[test]
