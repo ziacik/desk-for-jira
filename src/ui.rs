@@ -145,7 +145,7 @@ fn build_ui(app: &adw::Application) {
     let manage_projects_button = gtk::Button::with_label("Choose projects…");
     manage_projects_button.set_sensitive(false);
     sidebar.append(&manage_projects_button);
-    let manage_columns_button = gtk::Button::with_label("Configure columns…");
+    let manage_columns_button = gtk::Button::with_label("Edit columns…");
     manage_columns_button.set_sensitive(false);
     sidebar.append(&manage_columns_button);
     let status = gtk::Label::new(Some("Connecting to keyring…"));
