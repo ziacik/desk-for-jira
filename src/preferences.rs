@@ -129,7 +129,7 @@ mod tests {
         board.reconcile(&[art.clone(), afb.clone()]);
         board.move_status(&afb.reference(), Some(0), &afb.name);
         board.projects = vec!["ART".into()];
-        board.reconcile(&[art.clone()]);
+        board.reconcile(std::slice::from_ref(&art));
         assert_eq!(board.columns[0].statuses.len(), 2);
         board.projects.push("AFB".into());
         board.reconcile(&[art, afb]);
