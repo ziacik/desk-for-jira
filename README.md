@@ -8,6 +8,7 @@ A native GNOME desktop client with **one unified board across your Jira projects
 - Credentials securely stored in the desktop keyring via Secret Service / oo7
 - Select any combination of accessible Jira projects (for example ART and AFB)
 - Load issues using JQL across those projects, with **Mine** (default), **Unassigned**, and **All** filters
+- Hide columns with no issues in the current scope or search; keep all workflow statuses configurable in **Edit columns**
 - Build columns from the projects' real workflow statuses, independent of Jira's configured boards
 - Automatically suggest left-to-right status order on first load and **Reset columns**, using the actual Jira workflow transition graph (when permitted) and the status categories
 - Configure columns as a clear ordered list: select a column in the fixed toolbar (or from its card) and click the fixed left/right arrows repeatedly without moving the mouse; rename it, add Jira statuses from other columns, or separate a status into its own column
