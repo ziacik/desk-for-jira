@@ -389,7 +389,7 @@ fn wire_actions(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>) {
             ui.center_title.set_text("My board");
             ui.mine_filter.set_active(true);
             show_empty(&ui.board_box, "Not connected", "Connect to Jira to view issues.");
-            close_issue_details(ui);
+            close_issue_details(&ui);
             let sender = sender.clone();
             thread::spawn(move || {
                 let _ = sender.send(Event::Disconnected(id, secrets::delete().map_err(|e| e.to_string())));
@@ -1420,7 +1420,8 @@ fn render_board(ui: &Ui, state: &State) {
         show_empty(&ui.board_box, "No matching issues", "No issues match the current filter or search.");
         return;
     }
-    if let Some(key) = ui.selected_issue.borrow().clone()
+    let selected_key = ui.selected_issue.borrow().clone();
+    if let Some(key) = selected_key
         && !groups.iter().any(|(_, issues)| issues.iter().any(|issue| issue.key == key))
     {
         close_issue_details(ui);
@@ -1480,13 +1481,15 @@ fn render_board(ui: &Ui, state: &State) {
         column.append(&collapsed);
 
         {
-            let ui = ui.clone();
+            let collapsed_columns = ui.collapsed_columns.clone();
             let name = name.clone();
-            let column = column.clone();
-            let expanded = expanded.clone();
-            let collapsed = collapsed.clone();
+            let column = column.downgrade();
+            let expanded = expanded.downgrade();
+            let collapsed = collapsed.downgrade();
             collapse.connect_clicked(move |_| {
-                ui.collapsed_columns.borrow_mut().insert(name.clone());
+                let (Some(column), Some(expanded), Some(collapsed)) =
+                    (column.upgrade(), expanded.upgrade(), collapsed.upgrade()) else { return };
+                collapsed_columns.borrow_mut().insert(name.clone());
                 expanded.set_visible(false);
                 collapsed.set_visible(true);
                 column.set_width_request(48);
@@ -1494,12 +1497,14 @@ fn render_board(ui: &Ui, state: &State) {
             });
         }
         {
-            let ui = ui.clone();
-            let column = column.clone();
-            let expanded = expanded.clone();
-            let collapsed = collapsed.clone();
+            let collapsed_columns = ui.collapsed_columns.clone();
+            let column = column.downgrade();
+            let expanded = expanded.downgrade();
+            let collapsed = collapsed.downgrade();
             expand.connect_clicked(move |_| {
-                ui.collapsed_columns.borrow_mut().remove(&name);
+                let (Some(column), Some(expanded), Some(collapsed)) =
+                    (column.upgrade(), expanded.upgrade(), collapsed.upgrade()) else { return };
+                collapsed_columns.borrow_mut().remove(&name);
                 collapsed.set_visible(false);
                 expanded.set_visible(true);
                 column.set_width_request(280);
@@ -1568,17 +1573,19 @@ fn issue_button(issue: &Issue, ui: &Ui, base_url: &str) -> gtk::Button {
     }
 
     let issue = issue.clone();
-    let ui = ui.clone();
+    let detail_box = ui.detail_box.clone();
+    let detail_panel = ui.detail_panel.clone();
+    let selected_button = ui.selected_button.clone();
+    let selected_issue = ui.selected_issue.clone();
     let base_url = base_url.to_owned();
-    let selected_button = button.clone();
-    button.connect_clicked(move |_| {
-        if let Some(previous) = ui.selected_button.borrow_mut().replace(selected_button.clone()) {
+    button.connect_clicked(move |button| {
+        if let Some(previous) = selected_button.borrow_mut().replace(button.clone()) {
             previous.remove_css_class("selected-issue");
         }
-        selected_button.add_css_class("selected-issue");
-        *ui.selected_issue.borrow_mut() = Some(issue.key.clone());
-        show_detail(&ui.detail_box, &issue, &base_url);
-        ui.detail_panel.set_visible(true);
+        button.add_css_class("selected-issue");
+        *selected_issue.borrow_mut() = Some(issue.key.clone());
+        show_detail(&detail_box, &issue, &base_url);
+        detail_panel.set_visible(true);
     });
     button
 }
