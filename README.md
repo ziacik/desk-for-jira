@@ -7,10 +7,13 @@ A native GNOME desktop client to browse **your Jira issues and boards**.
 - Jira Cloud (email + API token) and Jira Data Center / Server (personal access token)
 - Credentials stored in the desktop keyring using Secret Service / oo7, not in plaintext files
 - Your assigned tickets, with local search
-- Browse accessible Jira boards and their issues, grouped by board columns when available
+- Pin a few favourite boards in the sidebar; search and select boards in **Manage boards…**
+- Browse the pinned boards and their issues, grouped by board columns when available
 - Read issue descriptions and open tickets in the browser
 - Manual refresh, account switch and disconnect
 - Nonblocking network requests; no Jira credentials in logs
+
+Board selection is saved per Jira site in the desktop configuration directory. All accessible boards remain searchable via **Manage boards…**.
 
 Read-only by design for the initial release.
 

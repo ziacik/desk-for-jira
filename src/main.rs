@@ -1,4 +1,5 @@
 mod jira;
+mod preferences;
 mod secrets;
 mod ui;
 

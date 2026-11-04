@@ -1,5 +1,5 @@
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     rc::Rc,
     sync::mpsc::{self, Sender},
     thread,
@@ -11,7 +11,7 @@ use gtk::glib;
 
 use crate::{
     jira::{AuthMode, Board, BoardColumn, Credentials, Issue, JiraClient},
-    secrets,
+    preferences, secrets,
 };
 
 #[derive(Clone)]
@@ -26,6 +26,7 @@ struct Ui {
     disconnect_button: gtk::Button,
     refresh_button: gtk::Button,
     boards_box: gtk::Box,
+    manage_boards_button: gtk::Button,
     search: gtk::SearchEntry,
     center_title: gtk::Label,
     stack: gtk::Stack,
@@ -39,6 +40,7 @@ struct State {
     account: Option<Credentials>,
     issues: Vec<Issue>,
     boards: Vec<Board>,
+    pinned_boards: Vec<u64>,
     selected_board: Option<u64>,
     generation: u64,
     busy: bool,
@@ -114,7 +116,7 @@ fn build_ui(app: &adw::Application) {
     my_button.add_css_class("suggested-action");
     sidebar.append(&my_button);
 
-    let boards_label = gtk::Label::new(Some("BOARDS"));
+    let boards_label = gtk::Label::new(Some("PINNED BOARDS"));
     boards_label.add_css_class("dim-label");
     boards_label.add_css_class("heading");
     boards_label.set_xalign(0.0);
@@ -127,6 +129,11 @@ fn build_ui(app: &adw::Application) {
     boards_scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
     boards_scroll.set_child(Some(&boards_box));
     sidebar.append(&boards_scroll);
+
+    let manage_boards_button = gtk::Button::with_label("Manage boards…");
+    manage_boards_button.set_tooltip_text(Some("Choose which boards appear in the sidebar"));
+    manage_boards_button.set_sensitive(false);
+    sidebar.append(&manage_boards_button);
 
     let status = gtk::Label::new(Some("Connecting to keyring…"));
     status.add_css_class("dim-label");
@@ -208,6 +215,7 @@ fn build_ui(app: &adw::Application) {
         disconnect_button,
         refresh_button,
         boards_box,
+        manage_boards_button,
         search,
         center_title,
         stack,
@@ -240,6 +248,13 @@ fn build_ui(app: &adw::Application) {
 }
 
 fn wire_actions(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>) {
+    {
+        let ui = ui.clone();
+        let state = state.clone();
+        let sender = sender.clone();
+        let button = ui.manage_boards_button.clone();
+        button.connect_clicked(move |_| show_board_picker(&ui, &state, &sender));
+    }
     {
         let ui = ui.clone();
         let state = state.clone();
@@ -295,6 +310,7 @@ fn wire_actions(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>) {
                 s.account = None;
                 s.issues.clear();
                 s.boards.clear();
+                s.pinned_boards.clear();
                 s.selected_board = None;
                 s.busy = false;
                 s.generation
@@ -304,6 +320,7 @@ fn wire_actions(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>) {
             ui.spinner.stop();
             ui.spinner.set_visible(false);
             clear_box(&ui.boards_box);
+            ui.manage_boards_button.set_sensitive(false);
             ui.center_title.set_text("My issues");
             ui.stack.set_visible_child_name("issues");
             ui.search.set_visible(true);
@@ -336,13 +353,22 @@ fn handle_event(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>, eve
             set_busy(ui, state, false);
             match result {
                 Ok(loaded) => {
+                    let pinned = match preferences::load_pinned(&account.base_url) {
+                        Ok(pinned) => pinned,
+                        Err(error) => {
+                            show_error(ui, &format!("Could not load pinned boards: {error}"));
+                            Vec::new()
+                        }
+                    };
                     {
                         let mut s = state.borrow_mut();
                         s.account = Some(account);
                         s.issues = loaded.issues;
                         s.boards = loaded.boards.as_ref().cloned().unwrap_or_default();
+                        s.pinned_boards = pinned;
                         s.selected_board = None;
                     }
+                    ui.manage_boards_button.set_sensitive(true);
                     ui.header_title.set_subtitle(&loaded.user);
                     ui.status.set_text(&format!("{} assigned issues · {} boards",
                         state.borrow().issues.len(), state.borrow().boards.len()));
@@ -535,11 +561,21 @@ fn field<T: IsA<gtk::Widget>>(label: &str, widget: &T) -> gtk::Box {
 
 fn render_board_list(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>) {
     clear_box(&ui.boards_box);
-    let boards = state.borrow().boards.clone();
+    let boards = {
+        let s = state.borrow();
+        s.pinned_boards.iter()
+            .filter_map(|id| s.boards.iter().find(|board| board.id == *id).cloned())
+            .collect::<Vec<_>>()
+    };
     if boards.is_empty() {
-        let message = gtk::Label::new(Some("No accessible boards"));
+        let message = gtk::Label::new(Some(if state.borrow().boards.is_empty() {
+            "No accessible boards"
+        } else {
+            "Pin boards using ‘Manage boards…’ below."
+        }));
         message.set_wrap(true);
         message.add_css_class("dim-label");
+        message.set_xalign(0.0);
         ui.boards_box.append(&message);
     }
     for board in boards {
@@ -556,6 +592,142 @@ fn render_board_list(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>
         let sender = sender.clone();
         button.connect_clicked(move |_| start_board_load(&ui, &state, &sender, board.clone()));
     }
+}
+
+/// The complete board list lives here, never in the sidebar.
+fn show_board_picker(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>) {
+    let (mut boards, pinned) = {
+        let s = state.borrow();
+        if s.account.is_none() {
+            return;
+        }
+        (s.boards.clone(), s.pinned_boards.clone())
+    };
+    // Pinned boards appear first, then the remaining boards alphabetically.
+    boards.sort_by(|a, b| {
+        let a_pin = pinned.iter().position(|id| *id == a.id);
+        let b_pin = pinned.iter().position(|id| *id == b.id);
+        match (a_pin, b_pin) {
+            (Some(a), Some(b)) => a.cmp(&b),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
+        }
+    });
+
+    let dialog = gtk::Window::builder()
+        .title("Manage boards")
+        .transient_for(&ui.window)
+        .modal(true)
+        .default_width(480)
+        .default_height(560)
+        .build();
+
+    let content = gtk::Box::new(gtk::Orientation::Vertical, 12);
+    content.set_margin_top(18);
+    content.set_margin_bottom(18);
+    content.set_margin_start(18);
+    content.set_margin_end(18);
+
+    let intro = gtk::Label::new(Some("Select the boards you want in the sidebar."));
+    intro.set_xalign(0.0);
+    intro.set_wrap(true);
+    content.append(&intro);
+
+    let search = gtk::SearchEntry::new();
+    search.set_placeholder_text(Some("Search boards"));
+    content.append(&search);
+
+    let rows = gtk::ListBox::new();
+    rows.set_selection_mode(gtk::SelectionMode::None);
+    rows.add_css_class("boxed-list");
+    let mut searchable = Vec::new();
+
+    for board in boards {
+        let check = gtk::CheckButton::with_label(&board.name);
+        check.set_active(pinned.contains(&board.id));
+        check.set_margin_start(12);
+        check.set_margin_end(12);
+        check.set_margin_top(10);
+        check.set_margin_bottom(10);
+        check.set_tooltip_text(Some(&format!("{} board · ID {}", board.board_type, board.id)));
+
+        let row = gtk::ListBoxRow::new();
+        row.set_activatable(false);
+        row.set_child(Some(&check));
+        rows.append(&row);
+        searchable.push((row, board.name.to_lowercase()));
+
+        let ui = ui.clone();
+        let state = state.clone();
+        let sender = sender.clone();
+        let reverting = Rc::new(Cell::new(false));
+        check.connect_toggled(move |check| {
+            if reverting.get() {
+                return;
+            }
+            let (account_url, old_pinned, new_pinned) = {
+                let mut s = state.borrow_mut();
+                let Some(url) = s.account.as_ref().map(|account| account.base_url.clone()) else {
+                    return;
+                };
+                let before = s.pinned_boards.clone();
+                if check.is_active() {
+                    if !s.pinned_boards.contains(&board.id) {
+                        s.pinned_boards.push(board.id);
+                    }
+                } else {
+                    s.pinned_boards.retain(|id| *id != board.id);
+                }
+                (url, before, s.pinned_boards.clone())
+            };
+            if let Err(error) = preferences::save_pinned(&account_url, &new_pinned) {
+                state.borrow_mut().pinned_boards = old_pinned;
+                reverting.set(true);
+                check.set_active(!check.is_active());
+                reverting.set(false);
+                show_error(&ui, &format!("Could not save pinned boards: {error}"));
+            } else {
+                render_board_list(&ui, &state, &sender);
+                // A board may be removed from the sidebar while it is open;
+                // leave the current view available until the user navigates.
+            }
+        });
+    }
+
+    {
+        let searchable = searchable;
+        search.connect_search_changed(move |search| {
+            let query = search.text().to_lowercase();
+            for (row, name) in &searchable {
+                row.set_visible(name.contains(&query));
+            }
+        });
+    }
+
+    let scroller = gtk::ScrolledWindow::new();
+    scroller.set_vexpand(true);
+    scroller.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
+    scroller.set_child(Some(&rows));
+    content.append(&scroller);
+
+    if rows.first_child().is_none() {
+        let empty = gtk::Label::new(Some("No accessible Jira boards."));
+        empty.add_css_class("dim-label");
+        content.append(&empty);
+    }
+
+    let done = gtk::Button::with_label("Done");
+    done.set_halign(gtk::Align::End);
+    done.add_css_class("suggested-action");
+    content.append(&done);
+    dialog.set_child(Some(&content));
+    {
+        let dialog = dialog.clone();
+        done.connect_clicked(move |_| dialog.close());
+    }
+    dialog.present();
+    search.grab_focus();
 }
 
 fn render_my_issues(ui: &Ui, state: &State) {
