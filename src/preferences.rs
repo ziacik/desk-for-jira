@@ -28,45 +28,6 @@ impl ProjectStatus {
         StatusRef { project_key: self.project_key.clone(), status_id: self.id.clone() }
     }
 }
-fn status_stage(name: &str) -> (Option<StatusCategory>, u8) {
-    let name = name.trim().to_ascii_lowercase();
-    // These names are only tie-breakers WITHIN Jira's real status categories,
-    // or a fallback if the Jira status-category endpoint is unavailable.
-    if name.contains("backlog") { return (Some(StatusCategory::Todo), 0); }
-    if name.contains("triage") || name == "new" {
-        return (Some(StatusCategory::Todo), 10);
-    }
-    if name == "open" || name == "to do" || name == "todo" {
-        return (Some(StatusCategory::Todo), 20);
-    }
-    if name.contains("selected") || name.contains("ready for development")
-        || name == "ready" {
-        return (Some(StatusCategory::Todo), 30);
-    }
-    if name.contains("analys") || name.contains("design") || name.contains("specif") {
-        return (Some(StatusCategory::InProgress), 10);
-    }
-    if name.contains("progress") || name.contains("develop")
-        || name.contains("implement") || name == "doing" {
-        return (Some(StatusCategory::InProgress), 20);
-    }
-    if name.contains("review") { return (Some(StatusCategory::InProgress), 40); }
-    if name.contains("test") || name == "qa" {
-        return (Some(StatusCategory::InProgress), 50);
-    }
-    if name.contains("release") || name.contains("deploy") {
-        return (Some(StatusCategory::InProgress), 60);
-    }
-    if name.contains("resolved") || name == "done" || name == "finished" {
-        return (Some(StatusCategory::Done), 10);
-    }
-    if name.contains("closed") { return (Some(StatusCategory::Done), 20); }
-    if name.contains("cancel") || name.contains("reject") {
-        return (Some(StatusCategory::Done), 30);
-    }
-    (None, 35)
-}
-
 fn category_position(category: StatusCategory) -> u8 {
     match category {
         StatusCategory::Todo => 0,
@@ -124,17 +85,20 @@ impl BoardSettings {
     }
 
     fn sort_initial_columns(&mut self, available: &[ProjectStatus]) {
-        let categories: HashMap<_, _> = available.iter()
-            .map(|status| (status.reference(), status.category))
+        // Jira's workflow transitions determine relative order when accessible.
+        // Without workflow permission, keep Jira's returned order WITHIN each
+        // status category. Do not guess from English or localized status names.
+        let metadata: HashMap<_, _> = available.iter()
+            .map(|status| (status.reference(), (status.category, status.workflow_order)))
             .collect();
         self.columns.sort_by_key(|column| {
-            let (guessed_category, stage) = status_stage(&column.title);
-            let jira_category = column.statuses.iter()
-                .filter_map(|reference| categories.get(reference).copied().flatten())
+            let category = column.statuses.iter()
+                .filter_map(|reference| metadata.get(reference).and_then(|(category, _)| *category))
                 .min_by_key(|category| category_position(*category));
-            let category = jira_category.or(guessed_category)
-                .unwrap_or(StatusCategory::InProgress);
-            (category_position(category), stage)
+            let workflow_order = column.statuses.iter()
+                .filter_map(|reference| metadata.get(reference).and_then(|(_, order)| *order))
+                .min();
+            (category.map(category_position).unwrap_or(1), workflow_order)
         });
     }
 
@@ -270,45 +234,85 @@ pub fn save(base_url: &str, settings: &BoardSettings) -> Result<()> {
 mod tests {
     use super::*;
     fn status(project: &str, id: &str, name: &str) -> ProjectStatus {
-        ProjectStatus { project_key: project.into(), id: id.into(), name: name.into(), category: None }
+        ProjectStatus {
+            project_key: project.into(), id: id.into(), name: name.into(),
+            category: None, workflow_order: None,
+        }
     }
     #[test]
-    fn first_load_suggests_workflow_order_not_api_order() {
+    fn first_load_uses_real_workflow_order_independent_of_names() {
         let mut board = BoardSettings {
             projects: vec!["ART".into()],
             ..BoardSettings::default()
         };
-        let statuses = vec![
-            status("ART", "5", "Done"),
-            status("ART", "4", "Code Review"),
-            status("ART", "2", "Open"),
-            status("ART", "6", "Closed"),
-            status("ART", "3", "In Progress"),
-            status("ART", "1", "Backlog"),
-            status("ART", "7", "QA"),
-        ];
-        board.reconcile(&statuses);
-        let names: Vec<_> = board.columns.iter().map(|c| c.title.as_str()).collect();
-        assert_eq!(names, vec![
-            "Backlog", "Open", "In Progress", "Code Review", "QA", "Done", "Closed"
-        ]);
+        let mut last = status("ART", "3", "Fertig");
+        last.category = Some(StatusCategory::Done);
+        last.workflow_order = Some(2);
+        let mut middle = status("ART", "2", "Spracúva sa");
+        middle.category = Some(StatusCategory::InProgress);
+        middle.workflow_order = Some(1);
+        let mut first = status("ART", "1", "Čaká");
+        first.category = Some(StatusCategory::Todo);
+        first.workflow_order = Some(0);
+        board.reconcile(&[last, middle, first]);
+        assert_eq!(
+            board.columns.iter().map(|c| c.title.as_str()).collect::<Vec<_>>(),
+            vec!["Čaká", "Spracúva sa", "Fertig"]
+        );
     }
 
     #[test]
-    fn jira_category_takes_precedence_over_status_name() {
+    fn workflow_order_sorts_within_category_without_name_heuristics() {
         let mut board = BoardSettings {
             projects: vec!["ART".into()],
             ..BoardSettings::default()
         };
-        let mut blocked = status("ART", "11", "Waiting for approval");
-        blocked.category = Some(StatusCategory::Todo);
-        let mut processing = status("ART", "12", "Waiting for QA");
-        processing.category = Some(StatusCategory::InProgress);
-        let mut finished = status("ART", "13", "Archived");
-        finished.category = Some(StatusCategory::Done);
-        board.reconcile(&[finished, processing, blocked]);
+        let mut first = status("ART", "1", "Whatever first");
+        first.category = Some(StatusCategory::InProgress);
+        first.workflow_order = Some(0);
+        let mut second = status("ART", "2", "Whatever second");
+        second.category = Some(StatusCategory::InProgress);
+        second.workflow_order = Some(1);
+        board.reconcile(&[second, first]);
+        assert_eq!(board.columns[0].title, "Whatever first");
+        assert_eq!(board.columns[1].title, "Whatever second");
+    }
+
+    #[test]
+    fn without_workflow_access_preserves_api_order_within_categories() {
+        let mut board = BoardSettings {
+            projects: vec!["ART".into()],
+            ..BoardSettings::default()
+        };
+        let mut alpha = status("ART", "1", "Closed");
+        alpha.category = Some(StatusCategory::InProgress);
+        let mut beta = status("ART", "2", "Backlog");
+        beta.category = Some(StatusCategory::InProgress);
+        board.reconcile(&[alpha, beta]);
+        assert_eq!(
+            board.columns.iter().map(|c| c.title.as_str()).collect::<Vec<_>>(),
+            vec!["Closed", "Backlog"]
+        );
+    }
+
+    #[test]
+    fn jira_category_takes_precedence_over_workflow_position_across_categories() {
+        let mut board = BoardSettings {
+            projects: vec!["ART".into()],
+            ..BoardSettings::default()
+        };
+        let mut todo = status("ART", "11", "Indeterminate");
+        todo.category = Some(StatusCategory::Todo);
+        todo.workflow_order = Some(10);
+        let mut progress = status("ART", "12", "Working");
+        progress.category = Some(StatusCategory::InProgress);
+        progress.workflow_order = Some(0);
+        let mut done = status("ART", "13", "Final");
+        done.category = Some(StatusCategory::Done);
+        done.workflow_order = Some(1);
+        board.reconcile(&[done, progress, todo]);
         let names: Vec<_> = board.columns.iter().map(|c| c.title.as_str()).collect();
-        assert_eq!(names, vec!["Waiting for approval", "Waiting for QA", "Archived"]);
+        assert_eq!(names, vec!["Indeterminate", "Working", "Final"]);
     }
 
     #[test]
@@ -317,22 +321,24 @@ mod tests {
             projects: vec!["ART".into()],
             ..BoardSettings::default()
         };
-        let statuses = vec![
-            status("ART", "1", "Done"),
-            status("ART", "2", "In Progress"),
-            status("ART", "3", "Backlog"),
-        ];
+        let mut done = status("ART", "1", "Ukončené");
+        done.category = Some(StatusCategory::Done);
+        let mut progress = status("ART", "2", "Pracuje sa");
+        progress.category = Some(StatusCategory::InProgress);
+        let mut todo = status("ART", "3", "Čaká");
+        todo.category = Some(StatusCategory::Todo);
+        let statuses = vec![done, progress, todo];
         board.reconcile(&statuses);
-        assert_eq!(board.columns[0].title, "Backlog");
+        assert_eq!(board.columns[0].title, "Čaká");
         board.move_column(2, true);
         board.move_column(1, true);
-        assert_eq!(board.columns[0].title, "Done");
+        assert_eq!(board.columns[0].title, "Ukončené");
         board.reconcile(&statuses);
-        assert_eq!(board.columns[0].title, "Done");
+        assert_eq!(board.columns[0].title, "Ukončené");
         board.reset_columns(&statuses);
         assert_eq!(
             board.columns.iter().map(|c| c.title.as_str()).collect::<Vec<_>>(),
-            vec!["Backlog", "In Progress", "Done"]
+            vec!["Čaká", "Pracuje sa", "Ukončené"]
         );
     }
 
