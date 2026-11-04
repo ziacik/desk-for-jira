@@ -107,6 +107,24 @@ impl BoardSettings {
         }
         self.columns.retain(|c| !c.statuses.is_empty());
     }
+    pub fn rename_column(&mut self, index: usize, title: &str) -> bool {
+        let title = title.trim();
+        if title.is_empty() {
+            return false;
+        }
+        if let Some(column) = self.columns.get_mut(index) {
+            column.title = title.to_owned();
+            return true;
+        }
+        false
+    }
+
+    pub fn reset_columns(&mut self, available: &[ProjectStatus]) {
+        self.columns.clear();
+        self.grouping_version = 1;
+        self.reconcile(available);
+    }
+
     pub fn move_column(&mut self, index: usize, up: bool) {
         let other = if up { index.checked_sub(1) } else { index.checked_add(1) };
         if let Some(other) = other.filter(|i| *i < self.columns.len()) {
@@ -237,6 +255,27 @@ mod tests {
         board.move_column(1, true);
         assert_eq!(board.columns[0].title, "Review");
     }
+    #[test]
+    fn rename_and_reset_preserve_projects_but_restore_default_grouping() {
+        let art = status("ART", "1", "Open");
+        let afb = status("AFB", "2", "Open");
+        let review = status("ART", "3", "In Review");
+        let mut board = BoardSettings {
+            projects: vec!["ART".into(), "AFB".into()],
+            ..BoardSettings::default()
+        };
+        board.reconcile(&[art.clone(), afb.clone(), review.clone()]);
+        assert!(!board.rename_column(0, "   "));
+        assert!(board.rename_column(0, "Ready"));
+        assert_eq!(board.columns[0].title, "Ready");
+        board.move_status(&afb.reference(), Some(1), &afb.name);
+        board.reset_columns(&[art, afb, review]);
+        assert_eq!(board.projects, vec!["ART", "AFB"]);
+        assert_eq!(board.columns.len(), 2);
+        assert_eq!(board.columns[0].title, "Open");
+        assert_eq!(board.columns[0].statuses.len(), 2);
+    }
+
     #[test]
     fn per_site_roundtrip() {
         let mut prefs = Preferences::default();
