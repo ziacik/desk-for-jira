@@ -35,8 +35,29 @@ struct Ui {
     board_box: gtk::Box,
     board_stack: gtk::Stack,
     board_switcher: gtk::StackSwitcher,
+    mine_filter: gtk::ToggleButton,
+    unassigned_filter: gtk::ToggleButton,
+    all_filter: gtk::ToggleButton,
     backlog_box: gtk::Box,
     detail_box: gtk::Box,
+}
+
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+enum IssueScope {
+    #[default]
+    Mine,
+    Unassigned,
+    All,
+}
+
+impl IssueScope {
+    fn jql(self) -> Option<&'static str> {
+        match self {
+            Self::Mine => Some("assignee = currentUser()"),
+            Self::Unassigned => Some("assignee IS EMPTY"),
+            Self::All => None,
+        }
+    }
 }
 
 #[derive(Default)]
@@ -46,6 +67,8 @@ struct State {
     boards: Vec<Board>,
     pinned_boards: Vec<u64>,
     selected_board: Option<u64>,
+    issue_scope: IssueScope,
+    board_request: u64,
     generation: u64,
     busy: bool,
 }
@@ -66,7 +89,7 @@ struct BoardData {
 enum Event {
     Stored(Result<Option<Credentials>, String>),
     Loaded(u64, Credentials, Result<Loaded, String>),
-    BoardLoaded(u64, u64, Result<BoardData, String>),
+    BoardLoaded(u64, u64, u64, Result<BoardData, String>),
     Disconnected(u64, Result<(), String>),
 }
 
@@ -199,9 +222,28 @@ fn build_ui(app: &adw::Application) {
     board_switcher.set_halign(gtk::Align::Start);
     board_switcher.set_visible(false);
 
+    let mine_filter = gtk::ToggleButton::with_label("Mine");
+    let unassigned_filter = gtk::ToggleButton::with_label("Unassigned");
+    let all_filter = gtk::ToggleButton::with_label("All");
+    unassigned_filter.set_group(Some(&mine_filter));
+    all_filter.set_group(Some(&mine_filter));
+    mine_filter.set_active(true);
+    for button in [&mine_filter, &unassigned_filter, &all_filter] {
+        button.set_tooltip_text(Some("Filter issues by assignee"));
+    }
+    let filter_group = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    filter_group.add_css_class("linked");
+    filter_group.append(&mine_filter);
+    filter_group.append(&unassigned_filter);
+    filter_group.append(&all_filter);
+
+    let board_controls = gtk::Box::new(gtk::Orientation::Horizontal, 14);
+    board_controls.append(&board_switcher);
+    board_controls.append(&filter_group);
+
     let board_page = gtk::Box::new(gtk::Orientation::Vertical, 8);
     board_page.set_vexpand(true);
-    board_page.append(&board_switcher);
+    board_page.append(&board_controls);
     board_page.append(&board_stack);
     stack.add_named(&board_page, Some("board"));
     center.append(&stack);
@@ -256,6 +298,9 @@ fn build_ui(app: &adw::Application) {
         board_box,
         board_stack,
         board_switcher,
+        mine_filter,
+        unassigned_filter,
+        all_filter,
         backlog_box,
         detail_box,
     };
@@ -284,6 +329,32 @@ fn build_ui(app: &adw::Application) {
 }
 
 fn wire_actions(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>) {
+    for (button, scope) in [
+        (ui.mine_filter.clone(), IssueScope::Mine),
+        (ui.unassigned_filter.clone(), IssueScope::Unassigned),
+        (ui.all_filter.clone(), IssueScope::All),
+    ] {
+        let ui = ui.clone();
+        let state = state.clone();
+        let sender = sender.clone();
+        button.connect_toggled(move |button| {
+            if !button.is_active() {
+                return;
+            }
+            let board = {
+                let mut s = state.borrow_mut();
+                if s.issue_scope == scope {
+                    return;
+                }
+                s.issue_scope = scope;
+                s.selected_board
+                    .and_then(|id| s.boards.iter().find(|board| board.id == id).cloned())
+            };
+            if let Some(board) = board {
+                start_board_load(&ui, &state, &sender, board);
+            }
+        });
+    }
     {
         let ui = ui.clone();
         let state = state.clone();
@@ -316,7 +387,11 @@ fn wire_actions(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>) {
         let state = state.clone();
         let button = ui.my_button.clone();
         button.connect_clicked(move |_| {
-            state.borrow_mut().selected_board = None;
+            {
+                let mut s = state.borrow_mut();
+                s.selected_board = None;
+                s.board_request += 1;
+            }
             set_busy(&ui, &state, false);
             ui.stack.set_visible_child_name("issues");
             ui.search.set_visible(true);
@@ -348,6 +423,8 @@ fn wire_actions(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>) {
                 s.boards.clear();
                 s.pinned_boards.clear();
                 s.selected_board = None;
+                s.board_request += 1;
+                s.issue_scope = IssueScope::Mine;
                 s.busy = false;
                 s.generation
             };
@@ -358,6 +435,7 @@ fn wire_actions(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>) {
             clear_box(&ui.boards_box);
             ui.manage_boards_button.set_sensitive(false);
             ui.board_switcher.set_visible(false);
+            ui.mine_filter.set_active(true);
             clear_box(&ui.backlog_box);
             ui.center_title.set_text("My issues");
             ui.stack.set_visible_child_name("issues");
@@ -405,7 +483,10 @@ fn handle_event(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>, eve
                         s.boards = loaded.boards.as_ref().cloned().unwrap_or_default();
                         s.pinned_boards = pinned;
                         s.selected_board = None;
+                        s.board_request += 1;
+                        s.issue_scope = IssueScope::Mine;
                     }
+                    ui.mine_filter.set_active(true);
                     ui.manage_boards_button.set_sensitive(true);
                     ui.header_title.set_subtitle(&loaded.user);
                     ui.status.set_text(&format!("{} assigned issues · {} boards",
@@ -426,8 +507,11 @@ fn handle_event(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>, eve
                 }
             }
         }
-        Event::BoardLoaded(id, board_id, result) => {
-            if state.borrow().generation != id || state.borrow().selected_board != Some(board_id) {
+        Event::BoardLoaded(id, board_id, request_id, result) => {
+            if state.borrow().generation != id
+                || state.borrow().selected_board != Some(board_id)
+                || state.borrow().board_request != request_id
+            {
                 return;
             }
             set_busy(ui, state, false);
@@ -483,6 +567,7 @@ fn start_refresh(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>, ac
     let id = {
         let mut s = state.borrow_mut();
         s.generation += 1;
+        s.board_request += 1;
         s.selected_board = None;
         s.generation
     };
@@ -508,10 +593,11 @@ fn start_refresh(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>, ac
 }
 
 fn start_board_load(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>, board: Board) {
-    let (id, account) = {
+    let (id, request_id, account, scope) = {
         let mut s = state.borrow_mut();
         s.selected_board = Some(board.id);
-        (s.generation, s.account.clone())
+        s.board_request += 1;
+        (s.generation, s.board_request, s.account.clone(), s.issue_scope)
     };
     ui.center_title.set_text(&format!("{} · {}", board.name, board.board_type));
     ui.stack.set_visible_child_name("board");
@@ -530,15 +616,15 @@ fn start_board_load(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>,
     thread::spawn(move || {
         let result = (|| -> anyhow::Result<BoardData> {
             let client = JiraClient::new(account)?;
-            let issues = client.board_issues(board.id)?;
+            let issues = client.board_issues(board.id, scope.jql())?;
             let columns = client.board_columns(board.id).unwrap_or_default();
             let is_kanban = board.board_type.eq_ignore_ascii_case("kanban");
             let has_backlog = is_kanban || board.board_type.eq_ignore_ascii_case("scrum");
             let backlog = has_backlog
-                .then(|| client.board_backlog(board.id).map_err(|err| err.to_string()));
+                .then(|| client.board_backlog(board.id, scope.jql()).map_err(|err| err.to_string()));
             Ok(BoardData { issues, columns, backlog, is_kanban })
         })().map_err(|err| err.to_string());
-        let _ = sender.send(Event::BoardLoaded(id, board.id, result));
+        let _ = sender.send(Event::BoardLoaded(id, board.id, request_id, result));
     });
 }
 
@@ -1051,4 +1137,16 @@ fn clear_box(container: &gtk::Box) {
 
 fn show_error(ui: &Ui, error: &str) {
     ui.toast.add_toast(adw::Toast::new(error));
+}
+
+#[cfg(test)]
+mod scope_tests {
+    use super::*;
+
+    #[test]
+    fn board_scope_uses_server_side_jql() {
+        assert_eq!(IssueScope::Mine.jql(), Some("assignee = currentUser()"));
+        assert_eq!(IssueScope::Unassigned.jql(), Some("assignee IS EMPTY"));
+        assert_eq!(IssueScope::All.jql(), None);
+    }
 }

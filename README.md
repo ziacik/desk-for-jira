@@ -9,6 +9,7 @@ A native GNOME desktop client to browse **your Jira issues and boards**.
 - Your assigned tickets, with local search
 - Pin a few favourite boards in the sidebar; search and select boards in **Manage boards…**
 - Browse pinned boards, with a separate **Board / Backlog** switch for Kanban and Scrum boards
+- Filter board and backlog tickets by assignee: **Mine** (default), **Unassigned**, or **All**; Jira filters results before pagination
 - Read ranked backlog issues in a compact list; board columns only show active board tickets
 - Read issue descriptions and open tickets in the browser
 - Manual refresh, account switch and disconnect

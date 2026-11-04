@@ -207,15 +207,15 @@ impl JiraClient {
         Ok(boards)
     }
 
-    pub fn board_issues(&self, board_id: u64) -> Result<Vec<Issue>> {
-        self.fetch_board_issues(board_id, "issue")
+    pub fn board_issues(&self, board_id: u64, jql: Option<&str>) -> Result<Vec<Issue>> {
+        self.fetch_board_issues(board_id, "issue", jql)
     }
 
-    pub fn board_backlog(&self, board_id: u64) -> Result<Vec<Issue>> {
-        self.fetch_board_issues(board_id, "backlog")
+    pub fn board_backlog(&self, board_id: u64, jql: Option<&str>) -> Result<Vec<Issue>> {
+        self.fetch_board_issues(board_id, "backlog", jql)
     }
 
-    fn fetch_board_issues(&self, board_id: u64, section: &str) -> Result<Vec<Issue>> {
+    fn fetch_board_issues(&self, board_id: u64, section: &str, jql: Option<&str>) -> Result<Vec<Issue>> {
         let mut issues = Vec::new();
         let mut next_token: Option<String> = None;
         let mut start = 0usize;
@@ -228,6 +228,9 @@ impl JiraClient {
             let mut request = self.http.get(self.url(&path))
                 .query(&[("maxResults", PAGE_SIZE.to_string()),
                           ("fields", FIELDS.join(","))]);
+            if let Some(jql) = jql {
+                request = request.query(&[("jql", jql)]);
+            }
             if let Some(ref token) = next_token {
                 request = request.query(&[("nextPageToken", token)]);
             } else if self.account.mode == AuthMode::Server {
