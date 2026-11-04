@@ -251,22 +251,33 @@ fn build_ui(app: &adw::Application) {
         collapsed_columns: Rc::new(RefCell::new(HashSet::new())),
     };
     {
-        let ui = ui.clone();
-        close_detail.connect_clicked(move |_| close_issue_details(&ui));
+        let panel = ui.detail_panel.downgrade();
+        let selected_issue = ui.selected_issue.clone();
+        let selected_button = ui.selected_button.clone();
+        close_detail.connect_clicked(move |_| {
+            if let Some(panel) = panel.upgrade() {
+                close_issue_pane(&panel, &selected_issue, &selected_button);
+            }
+        });
     }
     {
-        let ui = ui.clone();
+        let panel = ui.detail_panel.downgrade();
+        let search = ui.search.downgrade();
+        let selected_issue = ui.selected_issue.clone();
+        let selected_button = ui.selected_button.clone();
         let keys = gtk::EventControllerKey::new();
         keys.connect_key_pressed(move |_, key, _, modifiers| {
-            if key == gtk::gdk::Key::Escape && ui.detail_panel.is_visible() && !ui.search.has_focus() {
-                close_issue_details(&ui);
+            let (Some(panel), Some(search)) = (panel.upgrade(), search.upgrade())
+                else { return glib::Propagation::Proceed };
+            if key == gtk::gdk::Key::Escape && panel.is_visible() && !search.has_focus() {
+                close_issue_pane(&panel, &selected_issue, &selected_button);
                 return glib::Propagation::Stop;
             }
             if key == gtk::gdk::Key::slash
-                && !ui.search.has_focus()
+                && !search.has_focus()
                 && !modifiers.intersects(gtk::gdk::ModifierType::CONTROL_MASK | gtk::gdk::ModifierType::ALT_MASK)
             {
-                ui.search.grab_focus();
+                search.grab_focus();
                 return glib::Propagation::Stop;
             }
             glib::Propagation::Proceed
@@ -1399,9 +1410,17 @@ fn visible_board_groups<'a>(
 
 
 fn close_issue_details(ui: &Ui) {
-    ui.detail_panel.set_visible(false);
-    *ui.selected_issue.borrow_mut() = None;
-    if let Some(button) = ui.selected_button.borrow_mut().take() {
+    close_issue_pane(&ui.detail_panel, &ui.selected_issue, &ui.selected_button);
+}
+
+fn close_issue_pane(
+    panel: &gtk::Box,
+    selected_issue: &Rc<RefCell<Option<String>>>,
+    selected_button: &Rc<RefCell<Option<gtk::Button>>>,
+) {
+    panel.set_visible(false);
+    *selected_issue.borrow_mut() = None;
+    if let Some(button) = selected_button.borrow_mut().take() {
         button.remove_css_class("selected-issue");
     }
 }
@@ -1576,11 +1595,13 @@ fn issue_button(issue: &Issue, ui: &Ui, base_url: &str) -> gtk::Button {
     let issue = issue.clone();
     let detail_box = ui.detail_box.clone();
     let detail_panel = ui.detail_panel.clone();
-    let selected_button = ui.selected_button.clone();
+    let selected_button = Rc::downgrade(&ui.selected_button);
     let selected_issue = ui.selected_issue.clone();
     let base_url = base_url.to_owned();
     button.connect_clicked(move |button| {
-        if let Some(previous) = selected_button.borrow_mut().replace(button.clone()) {
+        if let Some(selected_button) = selected_button.upgrade()
+            && let Some(previous) = selected_button.borrow_mut().replace(button.clone())
+        {
             previous.remove_css_class("selected-issue");
         }
         button.add_css_class("selected-issue");
