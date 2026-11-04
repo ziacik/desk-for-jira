@@ -16,6 +16,9 @@ use crate::{
     secrets,
 };
 
+const COLUMN_WIDTH: i32 = 330;
+const COLLAPSED_COLUMN_WIDTH: i32 = 116;
+
 #[derive(Clone)]
 struct Ui {
     window: adw::ApplicationWindow,
@@ -165,7 +168,7 @@ fn build_ui(app: &adw::Application) {
 
     let search = gtk::SearchEntry::new();
     search.set_placeholder_text(Some("Search issues… (/)"));
-    search.set_width_request(340);
+    search.set_width_request(300);
     search.set_hexpand(false);
     let mine_filter = gtk::ToggleButton::with_label("Mine");
     let unassigned_filter = gtk::ToggleButton::with_label("Unassigned");
@@ -1457,7 +1460,7 @@ fn render_board(ui: &Ui, state: &State) {
         if initially_collapsed {
             column.add_css_class("collapsed-column");
         }
-        column.set_width_request(if initially_collapsed { 68 } else { 330 });
+        column.set_width_request(if initially_collapsed { COLLAPSED_COLUMN_WIDTH } else { COLUMN_WIDTH });
         column.set_hexpand(false);
         column.set_vexpand(true);
 
@@ -1505,13 +1508,12 @@ fn render_board(ui: &Ui, state: &State) {
         collapsed_content.set_halign(gtk::Align::Center);
         let expand_icon = gtk::Image::from_icon_name("pan-end-symbolic");
         collapsed_content.append(&expand_icon);
-        let abbreviation: String = if name.split_whitespace().count() > 1 {
-            name.split_whitespace().filter_map(|word| word.chars().next()).take(3).collect()
-        } else {
-            name.chars().take(2).collect()
-        };
-        let collapsed_title = gtk::Label::new(Some(&abbreviation));
+        let collapsed_title = gtk::Label::new(Some(&name));
         collapsed_title.add_css_class("collapsed-title");
+        collapsed_title.set_wrap(true);
+        collapsed_title.set_justify(gtk::Justification::Center);
+        collapsed_title.set_max_width_chars(12);
+        collapsed_title.set_xalign(0.5);
         collapsed_content.append(&collapsed_title);
         let collapsed_count = gtk::Label::new(Some(&issue_count.to_string()));
         collapsed_count.add_css_class("collapsed-count");
@@ -1532,7 +1534,7 @@ fn render_board(ui: &Ui, state: &State) {
                 collapsed_columns.borrow_mut().insert(name.clone());
                 expanded.set_visible(false);
                 collapsed.set_visible(true);
-                column.set_width_request(68);
+                column.set_width_request(COLLAPSED_COLUMN_WIDTH);
                 column.add_css_class("collapsed-column");
             });
         }
@@ -1547,7 +1549,7 @@ fn render_board(ui: &Ui, state: &State) {
                 collapsed_columns.borrow_mut().remove(&name);
                 collapsed.set_visible(false);
                 expanded.set_visible(true);
-                column.set_width_request(330);
+                column.set_width_request(COLUMN_WIDTH);
                 column.remove_css_class("collapsed-column");
             });
         }
