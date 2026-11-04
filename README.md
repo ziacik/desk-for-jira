@@ -2,8 +2,6 @@
 
 A native GNOME desktop client to browse **your Jira issues and boards**.
 
-Built with the same core stack as [Scan Slicer](https://github.com/ziacik/scan-slicer): **Rust (edition 2024), GTK4, libadwaita, reqwest and oo7**.
-
 ## Features
 
 - Jira Cloud (email + API token) and Jira Data Center / Server (personal access token)
