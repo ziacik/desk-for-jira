@@ -287,6 +287,29 @@ mod tests {
         assert_eq!(board.columns[0].title, "Review");
     }
     #[test]
+    fn move_eighth_column_to_first_with_repeated_left_actions() {
+        let statuses: Vec<_> = (0..8)
+            .map(|index| status("ART", &index.to_string(), &format!("Column {index}")))
+            .collect();
+        let selected = statuses[7].reference();
+        let mut board = BoardSettings {
+            projects: vec!["ART".into()],
+            ..BoardSettings::default()
+        };
+        board.reconcile(&statuses);
+
+        for expected_index in (0..7).rev() {
+            assert!(board.move_visible_column(&selected, true));
+            let actual_index = board.columns.iter().position(|column|
+                column.statuses.contains(&selected));
+            assert_eq!(actual_index, Some(expected_index));
+        }
+        assert!(!board.move_visible_column(&selected, true));
+        assert_eq!(board.columns[0].statuses, vec![selected]);
+        assert_eq!(board.columns[1].title, "Column 0");
+    }
+
+    #[test]
     fn repeated_moves_follow_the_same_column_and_skip_inactive_projects() {
         let first = status("ART", "1", "First");
         let hidden = status("OTHER", "2", "Hidden");
