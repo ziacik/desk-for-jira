@@ -1208,8 +1208,9 @@ fn confirm_column_reset(
     content.set_margin_start(20);
     content.set_margin_end(20);
     let message = gtk::Label::new(Some(
-        "Reset column names, order and status mappings? Jira statuses with matching \
-         names will be grouped automatically. Your selected projects will be kept."
+        "Restore suggested column order and default status groups? Jira statuses \
+         with matching names will be grouped automatically. Your selected projects \
+         will be kept."
     ));
     message.set_wrap(true);
     message.set_xalign(0.0);
