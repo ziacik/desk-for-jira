@@ -72,11 +72,29 @@ pub struct Project {
     pub name: String,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StatusCategory {
+    Todo,
+    InProgress,
+    Done,
+}
+
 #[derive(Clone, Debug)]
 pub struct ProjectStatus {
     pub project_key: String,
     pub id: String,
     pub name: String,
+    pub category: Option<StatusCategory>,
+}
+
+fn parse_status_category(value: &Value) -> Option<StatusCategory> {
+    let key = value.as_str().or_else(|| value.get("key").and_then(Value::as_str))?;
+    match key.to_ascii_lowercase().as_str() {
+        "new" | "todo" | "to_do" | "to do" => Some(StatusCategory::Todo),
+        "indeterminate" | "in_progress" | "in progress" | "in-flight" => Some(StatusCategory::InProgress),
+        "done" | "completed" => Some(StatusCategory::Done),
+        _ => None,
+    }
 }
 
 pub struct JiraClient {
@@ -221,9 +239,33 @@ impl JiraClient {
                     ) else { continue };
                     if seen.insert((key.clone(), id.to_owned())) {
                         statuses.push(ProjectStatus {
-                            project_key: key.clone(), id: id.to_owned(), name: name.to_owned(),
+                            project_key: key.clone(),
+                            id: id.to_owned(),
+                            name: name.to_owned(),
+                            category: status.get("statusCategory").and_then(parse_status_category),
                         });
                     }
+                }
+            }
+        }
+        // The project-status endpoint can omit statusCategory. The regular
+        // status endpoint provides it to users with Browse Projects permission.
+        // This is optional metadata: if it is inaccessible, the board still loads.
+        if statuses.iter().any(|status| status.category.is_none())
+            && let Ok(data) = self.read_json(self.http.get(
+                self.url(&format!("/rest/api/{version}/status"))
+            ))
+            && let Some(all) = data.as_array()
+        {
+            let categories: std::collections::HashMap<_, _> = all.iter()
+                .filter_map(|status| Some((
+                    status.get("id")?.as_str()?,
+                    parse_status_category(status.get("statusCategory")?)?,
+                )))
+                .collect();
+            for status in &mut statuses {
+                if status.category.is_none() {
+                    status.category = categories.get(status.id.as_str()).copied();
                 }
             }
         }
@@ -325,6 +367,21 @@ mod tests {
         c.base_url = "https://jira.example.com/".into();
         assert!(c.validate().is_ok());
         assert_eq!(c.base_url, "https://jira.example.com");
+    }
+
+    #[test]
+    fn parses_jira_status_category_formats() {
+        for (value, expected) in [
+            (json!({"key": "new"}), StatusCategory::Todo),
+            (json!({"key": "indeterminate"}), StatusCategory::InProgress),
+            (json!({"key": "done"}), StatusCategory::Done),
+            (json!("TODO"), StatusCategory::Todo),
+            (json!("IN_PROGRESS"), StatusCategory::InProgress),
+            (json!("DONE"), StatusCategory::Done),
+        ] {
+            assert_eq!(parse_status_category(&value), Some(expected));
+        }
+        assert_eq!(parse_status_category(&json!({})), None);
     }
 
     #[test]
