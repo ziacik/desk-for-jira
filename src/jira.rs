@@ -233,7 +233,7 @@ impl JiraClient {
     pub fn project_issues(&self, keys: &[String], scope: Option<&str>) -> Result<Vec<Issue>> {
         if keys.is_empty() { return Ok(Vec::new()); }
         for key in keys { validate_project_key(key)?; }
-        let projects = keys.iter().map(|key| format!("\\"{key}\\"")).collect::<Vec<_>>().join(", ");
+        let projects = keys.iter().map(|key| format!("\\\"{key}\\\"")).collect::<Vec<_>>().join(", ");
         let mut jql = format!("project IN ({projects})");
         if let Some(scope) = scope {
             jql.push_str(" AND (");
