@@ -9,13 +9,13 @@ A native GNOME desktop client with **one unified board across your Jira projects
 - Select any combination of accessible Jira projects (for example ART and AFB)
 - Load issues using JQL across those projects, with **Mine** (default), **Unassigned**, and **All** filters
 - Build columns from the projects' real workflow statuses, independent of Jira's configured boards
-- Reorder columns and explicitly merge different project statuses into one column; split them again when needed
+- Configure columns as a clear ordered list: move them left/right, rename them, add Jira statuses from other columns, or separate a status into its own column
 - Local search by issue key, summary, and status
 - Read issue descriptions, inspect details, and open an issue in Jira
 - Save project selection, column ordering, and status mappings per Jira site
 - Manual refresh, account switch and disconnect
 
-The column editor tracks each Jira status by **project key plus status ID**. By default, statuses with the same name in different projects share a column (for example, `ART: Open` and `AFB: Open` both appear under **Open**). Different names can be mapped together manually, and same-name statuses can be split again; manual mappings are kept on refresh. Existing settings are migrated once to group matching project statuses. Statuses without matching issues are still available as columns.
+The column editor tracks each Jira status by **project key plus status ID**. By default, statuses with the same name in different projects share a column (for example, `ART: Open` and `AFB: Open` both appear under **Open**). Different names can be mapped together manually, and same-name statuses can be split again; manual mappings are kept on refresh. Existing settings are migrated once to group matching project statuses. **Reset columns** in the editor restores default grouping and order without changing your selected projects. Statuses without matching issues are still available as columns.
 
 This is a read-only client. It does not modify the Jira projects, workflows, issues, or board configurations.
 
