@@ -883,15 +883,15 @@ fn rebuild_editor(
             button.connect_clicked(move |button| {
                 let Some(card) = button.parent().and_then(|header| header.parent())
                 else { return; };
-                if move_editor_column(&rows, &ui, &state, &card, &anchor, up) {
-                    if let Some(press) = reorder.last_press.get() {
-                        *reorder.active.borrow_mut() = Some(ColumnReorderSession {
-                            reference: anchor.clone(),
-                            card,
-                            left: up,
-                            press,
-                        });
-                    }
+                if move_editor_column(&rows, &ui, &state, &card, &anchor, up)
+                    && let Some(press) = reorder.last_press.get()
+                {
+                    *reorder.active.borrow_mut() = Some(ColumnReorderSession {
+                        reference: anchor.clone(),
+                        card,
+                        left: up,
+                        press,
+                    });
                 }
             });
         }
