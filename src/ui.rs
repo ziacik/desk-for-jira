@@ -792,10 +792,10 @@ fn save_settings(ui: &Ui, state: &Rc<RefCell<State>>) {
         let s = state.borrow();
         (s.account.as_ref().map(|a| a.base_url.clone()), s.settings.clone())
     };
-    if let Some(url) = url {
-        if let Err(error) = preferences::save(&url, &settings) {
-            show_error(ui, &format!("Could not save board settings: {error}"));
-        }
+    if let Some(url) = url
+        && let Err(error) = preferences::save(&url, &settings)
+    {
+        show_error(ui, &format!("Could not save board settings: {error}"));
     }
 }
 
