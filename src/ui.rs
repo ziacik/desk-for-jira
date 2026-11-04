@@ -524,6 +524,7 @@ fn start_board_load(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>)
         (s.generation, s.board_request, s.account.clone(), s.settings.projects.clone(), s.issue_scope)
     };
     update_project_label(ui, &state.borrow());
+    close_issue_details(ui);
     if projects.is_empty() {
         set_busy(ui, state, false);
         ui.status.set_text("Select one or more projects");
@@ -534,7 +535,6 @@ fn start_board_load(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>)
     let Some(account) = account else { return; };
     ui.status.set_text("Loading project issues and workflow statuses…");
     show_empty(&ui.board_box, "Loading board…", "Fetching real Jira workflow statuses");
-    close_issue_details(ui);
     set_busy(ui, state, true);
     let sender = sender.clone();
     thread::spawn(move || {
