@@ -15,7 +15,7 @@ A native GNOME desktop client with **one unified board across your Jira projects
 - Save project selection, column ordering, and status mappings per Jira site
 - Manual refresh, account switch and disconnect
 
-The column editor uses the Jira status **ID plus project key**. Matching status names in two projects are *not* treated as equivalent until you map them together. Statuses without matching issues are still available as columns.
+The column editor tracks each Jira status by **project key plus status ID**. By default, statuses with the same name in different projects share a column (for example, `ART: Open` and `AFB: Open` both appear under **Open**). Different names can be mapped together manually, and same-name statuses can be split again; manual mappings are kept on refresh. Existing settings are migrated once to group matching project statuses. Statuses without matching issues are still available as columns.
 
 This is a read-only client. It does not modify the Jira projects, workflows, issues, or board configurations.
 
