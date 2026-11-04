@@ -125,6 +125,37 @@ impl BoardSettings {
         self.reconcile(available);
     }
 
+    /// Move the column containing this status, skipping inactive project columns.
+    /// The reference identifies the column even after previous moves.
+    pub fn move_visible_column(&mut self, reference: &StatusRef, left: bool) -> bool {
+        let visible: Vec<_> = self.columns.iter().enumerate()
+            .filter(|(_, column)| column.statuses.iter()
+                .any(|status| self.projects.contains(&status.project_key)))
+            .map(|(index, _)| index)
+            .collect();
+        let Some(position) = visible.iter()
+            .position(|&index| self.columns[index].statuses.contains(reference))
+        else { return false; };
+        let destination_position = if left {
+            position.checked_sub(1)
+        } else {
+            position.checked_add(1).filter(|&next| next < visible.len())
+        };
+        let Some(destination_position) = destination_position else { return false; };
+        let source = visible[position];
+        let destination = visible[destination_position];
+        if left {
+            for index in (destination + 1..=source).rev() {
+                self.move_column(index, true);
+            }
+        } else {
+            for index in source..destination {
+                self.move_column(index, false);
+            }
+        }
+        true
+    }
+
     pub fn move_column(&mut self, index: usize, up: bool) {
         let other = if up { index.checked_sub(1) } else { index.checked_add(1) };
         if let Some(other) = other.filter(|i| *i < self.columns.len()) {
@@ -255,6 +286,39 @@ mod tests {
         board.move_column(1, true);
         assert_eq!(board.columns[0].title, "Review");
     }
+    #[test]
+    fn repeated_moves_follow_the_same_column_and_skip_inactive_projects() {
+        let first = status("ART", "1", "First");
+        let hidden = status("OTHER", "2", "Hidden");
+        let second = status("ART", "3", "Second");
+        let third = status("ART", "4", "Third");
+        let mut board = BoardSettings {
+            projects: vec!["ART".into(), "OTHER".into()],
+            ..BoardSettings::default()
+        };
+        board.reconcile(&[first.clone(), hidden, second.clone(), third.clone()]);
+        board.projects = vec!["ART".into()];
+
+        assert!(board.move_visible_column(&third.reference(), true));
+        assert!(board.move_visible_column(&third.reference(), true));
+        let active: Vec<_> = board.columns.iter()
+            .filter(|column| column.statuses.iter()
+                .any(|item| board.projects.contains(&item.project_key)))
+            .map(|column| column.title.as_str())
+            .collect();
+        assert_eq!(active, vec!["Third", "First", "Second"]);
+        assert!(!board.move_visible_column(&third.reference(), true));
+        assert!(board.move_visible_column(&third.reference(), false));
+        assert!(board.move_visible_column(&third.reference(), false));
+        assert_eq!(board.columns.iter().filter(|column| column.title == "Third").count(), 1);
+        let active: Vec<_> = board.columns.iter()
+            .filter(|column| column.statuses.iter()
+                .any(|item| board.projects.contains(&item.project_key)))
+            .map(|column| column.title.as_str())
+            .collect();
+        assert_eq!(active, vec!["First", "Second", "Third"]);
+    }
+
     #[test]
     fn rename_and_reset_preserve_projects_but_restore_default_grouping() {
         let art = status("ART", "1", "Open");
