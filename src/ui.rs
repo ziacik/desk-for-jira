@@ -780,65 +780,83 @@ fn show_column_editor(ui: &Ui, state: &Rc<RefCell<State>>) {
     content.set_margin_end(18);
 
     let intro = gtk::Label::new(Some(
-        "Each card below is one board column. Cards are ordered left to right on your board. \
-         Add Jira statuses to a column to combine them; Separate gives a status its own column."
+        "Each card is one board column. Select a column below and use the fixed arrows          to move it repeatedly. Add Jira statuses to combine them; Separate splits them."
     ));
     intro.set_wrap(true);
     intro.set_xalign(0.0);
     content.append(&intro);
 
     let rows = gtk::Box::new(gtk::Orientation::Vertical, 12);
-    let reorder = ColumnReorderContext::default();
-
-    // Capture mouse presses before any card button sees them. A repeated press
-    // at the same dialog coordinate is routed to the ORIGINAL column, rather
-    // than whichever different card is now underneath the stationary mouse.
-    let clicks = gtk::GestureClick::new();
-    clicks.set_button(1);
-    clicks.set_propagation_phase(gtk::PropagationPhase::Capture);
-    {
-        let reorder = reorder.clone();
-        let rows = rows.clone();
-        let ui = ui.clone();
-        let state = state.clone();
-        clicks.connect_pressed(move |gesture, _, x, y| {
-            let repeat = reorder.active.borrow().as_ref()
-                .filter(|active| active.card.parent().is_some()
-                    && same_click_position(active.press, (x, y)))
-                .cloned();
-            if let Some(active) = repeat {
-                // Prevent GTK from also clicking the unrelated button under
-                // the pointer; that would swap columns back and forth.
-                gesture.set_state(gtk::EventSequenceState::Claimed);
-                move_editor_column(
-                    &rows, &ui, &state, &active.card, &active.reference, active.left,
-                );
-            } else {
-                reorder.active.borrow_mut().take();
-                reorder.last_press.set(Some((x, y)));
-            }
-        });
-    }
-    dialog.add_controller(clicks);
-
-    let pointer = gtk::EventControllerMotion::new();
-    {
-        let reorder = reorder.clone();
-        pointer.connect_motion(move |_, x, y| {
-            let active = reorder.active.borrow().as_ref()
-                .is_some_and(|session| !same_click_position(session.press, (x, y)));
-            if active {
-                reorder.active.borrow_mut().take();
-            }
-        });
-    }
-    dialog.add_controller(pointer);
-    rebuild_editor(&rows, ui, state, &dialog, &reorder);
     let scroll = gtk::ScrolledWindow::new();
     scroll.set_vexpand(true);
     scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
     scroll.set_child(Some(&rows));
+
+    let toolbar = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let select_label = gtk::Label::new(Some("Move column"));
+    toolbar.append(&select_label);
+    let selector = gtk::DropDown::from_strings(&[]);
+    selector.set_hexpand(true);
+    selector.set_tooltip_text(Some("Select the column to move"));
+    toolbar.append(&selector);
+    let left = gtk::Button::builder().icon_name("go-previous-symbolic").build();
+    left.set_tooltip_text(Some("Move selected column left; click repeatedly without moving the mouse"));
+    toolbar.append(&left);
+    let right = gtk::Button::builder().icon_name("go-next-symbolic").build();
+    right.set_tooltip_text(Some("Move selected column right; click repeatedly without moving the mouse"));
+    toolbar.append(&right);
+    content.append(&toolbar);
     content.append(&scroll);
+
+    let controls = ColumnOrderControls {
+        selected: Rc::new(RefCell::new(None)),
+        updating: Rc::new(Cell::new(false)),
+        selector: selector.clone(),
+        left: left.clone(),
+        right: right.clone(),
+        scroll: scroll.clone(),
+    };
+
+    {
+        let controls = controls.clone();
+        let rows = rows.clone();
+        let state = state.clone();
+        selector.connect_selected_notify(move |dropdown| {
+            if controls.updating.get() { return; }
+            let position = dropdown.selected() as usize;
+            let s = state.borrow();
+            let visible = visible_column_indices(&s.settings);
+            let selected = visible.get(position)
+                .and_then(|&index| s.settings.columns[index].statuses.first().cloned());
+            let can_move = visible.get(position).is_some();
+            controls.left.set_sensitive(can_move && position > 0);
+            controls.right.set_sensitive(can_move && position + 1 < visible.len());
+            drop(s);
+            *controls.selected.borrow_mut() = selected;
+            scroll_to_selected_column(&rows, &controls, &state);
+        });
+    }
+    {
+        let controls = controls.clone();
+        let ui = ui.clone();
+        let state = state.clone();
+        let rows = rows.clone();
+        let editor = dialog.clone();
+        left.connect_clicked(move |_| {
+            move_selected_column(&rows, &ui, &state, &editor, &controls, true);
+        });
+    }
+    {
+        let controls = controls.clone();
+        let ui = ui.clone();
+        let state = state.clone();
+        let rows = rows.clone();
+        let editor = dialog.clone();
+        right.connect_clicked(move |_| {
+            move_selected_column(&rows, &ui, &state, &editor, &controls, false);
+        });
+    }
+    rebuild_editor(&rows, ui, state, &dialog, &controls);
 
     let actions = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     let reset = gtk::Button::with_label("Reset columns");
@@ -861,8 +879,10 @@ fn show_column_editor(ui: &Ui, state: &Rc<RefCell<State>>) {
         let state = state.clone();
         let rows = rows.clone();
         let editor = dialog.clone();
-        let reorder = reorder.clone();
-        reset.connect_clicked(move |_| confirm_column_reset(&ui, &state, &rows, &editor, &reorder));
+        let controls = controls.clone();
+        reset.connect_clicked(move |_| {
+            confirm_column_reset(&ui, &state, &rows, &editor, &controls);
+        });
     }
     dialog.present();
 }
