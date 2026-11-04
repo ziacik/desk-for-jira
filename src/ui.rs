@@ -716,7 +716,7 @@ fn rebuild_editor(rows: &gtk::Box, ui: &Ui, state: &Rc<RefCell<State>>) {
         .filter(|(_, c)| c.statuses.iter().any(|s| projects.contains(&s.project_key)))
         .map(|(i, _)| i).collect();
     let choices: Vec<String> = visible.iter()
-        .map(|&i| column_label(&columns[i], &projects))
+        .map(|&i| column_label(&columns[i], &columns, &projects))
         .chain(std::iter::once("Separate column".to_owned())).collect();
     let names: Vec<&str> = choices.iter().map(String::as_str).collect();
     for (index, column) in columns.iter().enumerate() {
@@ -733,7 +733,7 @@ fn rebuild_editor(rows: &gtk::Box, ui: &Ui, state: &Rc<RefCell<State>>) {
         header.set_margin_top(8);
         header.set_margin_start(10);
         header.set_margin_end(10);
-        let title = gtk::Label::new(Some(&column_label(column, &projects)));
+        let title = gtk::Label::new(Some(&column_label(column, &columns, &projects)));
         title.add_css_class("heading");
         title.set_xalign(0.0);
         title.set_hexpand(true);
@@ -820,14 +820,27 @@ fn save_settings(ui: &Ui, state: &Rc<RefCell<State>>) {
     }
 }
 
-fn column_label(column: &preferences::Column, projects: &[String]) -> String {
-    let active: Vec<_> = column.statuses.iter()
-        .filter(|s| projects.contains(&s.project_key)).collect();
-    if active.len() == 1 {
-        format!("{} · {}", active[0].project_key, column.title)
-    } else {
-        format!("{} · {} statuses", column.title, active.len())
+fn column_label(
+    column: &preferences::Column,
+    all_columns: &[preferences::Column],
+    projects: &[String],
+) -> String {
+    // The common case (ART: Open + AFB: Open) is just "Open".
+    // Disambiguate only if the user has deliberately split equal-named columns.
+    let duplicate = all_columns.iter().filter(|candidate| {
+        candidate.title.eq_ignore_ascii_case(&column.title)
+            && candidate.statuses.iter().any(|s| projects.contains(&s.project_key))
+    }).count() > 1;
+    if !duplicate {
+        return column.title.clone();
     }
+    let mut project_keys: Vec<&str> = column.statuses.iter()
+        .filter(|status| projects.contains(&status.project_key))
+        .map(|status| status.project_key.as_str())
+        .collect();
+    project_keys.sort_unstable();
+    project_keys.dedup();
+    format!("{} · {}", column.title, project_keys.join(", "))
 }
 
 fn render_board(ui: &Ui, state: &State) {
@@ -839,7 +852,7 @@ fn render_board(ui: &Ui, state: &State) {
     let text = ui.search.text().to_lowercase();
     let mut groups: Vec<(String, Vec<&Issue>, Vec<preferences::StatusRef>)> = state.settings.columns.iter()
         .filter(|c| c.statuses.iter().any(|s| state.settings.projects.contains(&s.project_key)))
-        .map(|c| (column_label(c, &state.settings.projects), Vec::new(), c.statuses.clone())).collect();
+        .map(|c| (column_label(c, &state.settings.columns, &state.settings.projects), Vec::new(), c.statuses.clone())).collect();
     for issue in &state.issues {
         if !text.is_empty()
             && !issue.key.to_lowercase().contains(&text)
