@@ -1,5 +1,6 @@
 /* Native Adwaita board surfaces, intentionally quiet and theme-aware. */
 .board-column {
+  color: @window_fg_color;
   background-color: alpha(@window_fg_color, 0.035);
   border: 1px solid alpha(@window_fg_color, 0.045);
   border-radius: 14px;
@@ -12,12 +13,13 @@
   padding: 4px 3px 9px 4px;
 }
 .board-column-title {
+  color: @window_fg_color;
   font-weight: 700;
   font-size: 1.04em;
 }
 .board-column-count {
   font-size: 0.88em;
-  color: @dim_label_color;
+  color: @window_fg_color;
   background-color: alpha(@window_fg_color, 0.075);
   border-radius: 999px;
   padding: 3px 9px;
@@ -28,6 +30,7 @@ button.column-collapse {
   min-height: 24px;
 }
 button.issue-card {
+  color: @window_fg_color;
   padding: 0;
   border: 1px solid alpha(@window_fg_color, 0.085);
   border-radius: 11px;
@@ -36,23 +39,29 @@ button.issue-card {
   box-shadow: 0 1px 2px alpha(@window_fg_color, 0.06);
 }
 button.issue-card:hover {
+  color: @window_fg_color;
   border-color: alpha(@accent_color, 0.50);
 }
 button.issue-card.selected-issue {
+  color: @window_fg_color;
   border-color: @accent_color;
   background-color: alpha(@accent_bg_color, 0.09);
   box-shadow: 0 0 0 1px alpha(@accent_color, 0.32);
 }
+button.issue-card label {
+  color: @window_fg_color;
+}
 .ticket-key {
+  color: @window_fg_color;
   font-weight: 700;
   font-size: 0.9em;
 }
-.ticket-kind {
-  color: @dim_label_color;
+button.issue-card label.ticket-kind {
+  color: alpha(@window_fg_color, 0.74);
   font-size: 0.88em;
 }
-.ticket-priority {
-  color: @warning_color;
+button.issue-card label.ticket-priority {
+  color: @window_fg_color;
   background-color: alpha(@warning_color, 0.12);
   font-weight: 600;
   font-size: 0.82em;
@@ -60,6 +69,7 @@ button.issue-card.selected-issue {
   padding: 2px 6px;
 }
 button.collapsed-expand {
+  color: @window_fg_color;
   padding: 12px 2px;
   border: none;
   border-radius: 10px;
@@ -70,10 +80,11 @@ button.collapsed-expand:hover {
   background-color: alpha(@window_fg_color, 0.065);
 }
 .collapsed-title {
+  color: @window_fg_color;
   font-weight: 700;
   font-size: 0.96em;
 }
 .collapsed-count {
   font-size: 0.88em;
-  color: @dim_label_color;
+  color: alpha(@window_fg_color, 0.78);
 }
