@@ -8,14 +8,16 @@ A native GNOME desktop client with **one unified board across your Jira projects
 - Credentials securely stored in the desktop keyring via Secret Service / oo7
 - Select any combination of accessible Jira projects (for example ART and AFB)
 - Load issues using JQL across those projects, with **Mine** (default), **Unassigned**, and **All** filters
+- Hide columns with no issues in the current scope or search; keep all workflow statuses configurable in **Edit columns**
 - Build columns from the projects' real workflow statuses, independent of Jira's configured boards
-- Reorder columns and explicitly merge different project statuses into one column; split them again when needed
+- Automatically suggest left-to-right status order on first load and **Reset columns**, using the actual Jira workflow transition graph (when permitted) and the status categories
+- Configure columns as a clear ordered list: select a column in the fixed toolbar (or from its card) and click the fixed left/right arrows repeatedly without moving the mouse; rename it, add Jira statuses from other columns, or separate a status into its own column
 - Local search by issue key, summary, and status
 - Read issue descriptions, inspect details, and open an issue in Jira
 - Save project selection, column ordering, and status mappings per Jira site
 - Manual refresh, account switch and disconnect
 
-The column editor uses the Jira status **ID plus project key**. Matching status names in two projects are *not* treated as equivalent until you map them together. Statuses without matching issues are still available as columns.
+The column editor tracks each Jira status by **project key plus status ID**. By default, statuses with the same name in different projects share a column (for example, `ART: Open` and `AFB: Open` both appear under **Open**). Different names can be mapped together manually, and same-name statuses can be split again; manual mappings are kept on refresh. Existing settings are migrated once to group matching project statuses. **Reset columns** in the editor restores automatic status ordering and default grouping without changing your selected projects. Manual column order is never changed by ordinary refreshes. Jira workflow transitions and diagram positions are read from the workflow API when accessible. Without workflow access, Jira status categories are used and original API order is retained within each category; no English-name guesses are made. Statuses without matching issues are still available as columns.
 
 This is a read-only client. It does not modify the Jira projects, workflows, issues, or board configurations.
 

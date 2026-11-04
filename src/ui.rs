@@ -1,5 +1,5 @@
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     rc::Rc,
     sync::mpsc::{self, Sender},
     thread,
@@ -145,7 +145,7 @@ fn build_ui(app: &adw::Application) {
     let manage_projects_button = gtk::Button::with_label("Choose projects…");
     manage_projects_button.set_sensitive(false);
     sidebar.append(&manage_projects_button);
-    let manage_columns_button = gtk::Button::with_label("Configure columns…");
+    let manage_columns_button = gtk::Button::with_label("Edit columns…");
     manage_columns_button.set_sensitive(false);
     sidebar.append(&manage_columns_button);
     let status = gtk::Label::new(Some("Connecting to keyring…"));
@@ -669,143 +669,592 @@ fn show_project_picker(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Even
     search.grab_focus();
 }
 
+// The selector and movement buttons live outside the scrolling column list.
+ // A selected status reference identifies its column across reorders.
+#[derive(Clone)]
+struct ColumnOrderControls {
+    selected: Rc<RefCell<Option<preferences::StatusRef>>>,
+    updating: Rc<Cell<bool>>,
+    selector: gtk::DropDown,
+    left: gtk::Button,
+    right: gtk::Button,
+    scroll: gtk::ScrolledWindow,
+}
+
+fn visible_column_indices(settings: &BoardSettings) -> Vec<usize> {
+    settings.columns.iter().enumerate()
+        .filter(|(_, column)| column.statuses.iter()
+            .any(|status| settings.projects.contains(&status.project_key)))
+        .map(|(index, _)| index)
+        .collect()
+}
+
+fn update_column_order_controls(controls: &ColumnOrderControls, state: &Rc<RefCell<State>>) {
+    let s = state.borrow();
+    let visible = visible_column_indices(&s.settings);
+    let selection = controls.selected.borrow().clone();
+    let position = selection.as_ref()
+        .and_then(|selected| visible.iter().position(|&index|
+            s.settings.columns[index].statuses.contains(selected)));
+    let position = position.or_else(|| (!visible.is_empty()).then_some(0));
+    *controls.selected.borrow_mut() = position
+        .and_then(|i| s.settings.columns[visible[i]].statuses.first().cloned());
+
+    let labels: Vec<String> = visible.iter().enumerate()
+        .map(|(i, &index)| format!(
+            "{}. {}", i + 1,
+            column_label(&s.settings.columns[index], &s.settings.columns, &s.settings.projects)
+        ))
+        .collect();
+    let label_refs: Vec<&str> = labels.iter().map(String::as_str).collect();
+    let model = gtk::StringList::new(&label_refs);
+    controls.updating.set(true);
+    controls.selector.set_model(Some(&model));
+    controls.selector.set_selected(position.map(|i| i as u32).unwrap_or(gtk::INVALID_LIST_POSITION));
+    controls.updating.set(false);
+    controls.left.set_sensitive(position.is_some_and(|i| i > 0));
+    controls.right.set_sensitive(position.is_some_and(|i| i + 1 < visible.len()));
+}
+
+fn scroll_to_selected_column(rows: &gtk::Box, controls: &ColumnOrderControls, state: &Rc<RefCell<State>>) {
+    let position = {
+        let s = state.borrow();
+        let visible = visible_column_indices(&s.settings);
+        let selected = controls.selected.borrow();
+        selected.as_ref().and_then(|reference| visible.iter()
+            .position(|&index| s.settings.columns[index].statuses.contains(reference)))
+    };
+    let Some(position) = position else { return; };
+    let rows = rows.clone();
+    let scroll = controls.scroll.clone();
+    glib::idle_add_local_once(move || {
+        let mut card = rows.first_child();
+        for _ in 0..position {
+            card = card.and_then(|child| child.next_sibling());
+        }
+        let Some(card) = card else { return; };
+        let Some(bounds) = card.compute_bounds(&rows) else { return; };
+        let adjustment = scroll.vadjustment();
+        let top = adjustment.value();
+        let bottom = top + adjustment.page_size();
+        let card_top = f64::from(bounds.y());
+        let card_bottom = card_top + f64::from(bounds.height());
+
+        if card_top < top + 12.0 {
+            adjustment.set_value((card_top - 12.0).max(0.0));
+        } else if card_bottom > bottom - 12.0 {
+            adjustment.set_value((card_bottom - adjustment.page_size() + 12.0).max(0.0));
+        }
+    });
+}
+
+fn move_selected_column(
+    rows: &gtk::Box,
+    ui: &Ui,
+    state: &Rc<RefCell<State>>,
+    editor: &gtk::Window,
+    controls: &ColumnOrderControls,
+    left: bool,
+) {
+    let selection = controls.selected.borrow().clone();
+    let Some(selection) = selection else { return; };
+    if !state.borrow_mut().settings.move_visible_column(&selection, left) {
+        return;
+    }
+    refresh_column_editor(ui, state, rows, editor, controls);
+    scroll_to_selected_column(rows, controls, state);
+}
+
 fn show_column_editor(ui: &Ui, state: &Rc<RefCell<State>>) {
     let dialog = gtk::Window::builder()
-        .title("Configure columns")
+        .title("Board columns")
         .transient_for(&ui.window)
         .modal(true)
-        .default_width(570)
-        .default_height(650)
+        .default_width(680)
+        .default_height(720)
         .build();
-    let content = gtk::Box::new(gtk::Orientation::Vertical, 12);
+    let content = gtk::Box::new(gtk::Orientation::Vertical, 14);
     content.set_margin_top(18);
     content.set_margin_bottom(18);
     content.set_margin_start(18);
     content.set_margin_end(18);
+
     let intro = gtk::Label::new(Some(
-        "Reorder columns with the arrows. To merge statuses, choose another column in the dropdown. Choose 'Separate column' to split them."
+        "Each card is one board column. Select a column below and use the fixed arrows          to move it repeatedly. Add Jira statuses to combine them; Separate splits them."
     ));
     intro.set_wrap(true);
     intro.set_xalign(0.0);
     content.append(&intro);
+
     let rows = gtk::Box::new(gtk::Orientation::Vertical, 12);
-    rebuild_editor(&rows, ui, state);
     let scroll = gtk::ScrolledWindow::new();
     scroll.set_vexpand(true);
+    scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
     scroll.set_child(Some(&rows));
+
+    let toolbar = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let select_label = gtk::Label::new(Some("Move column"));
+    toolbar.append(&select_label);
+    let selector = gtk::DropDown::from_strings(&[]);
+    selector.set_hexpand(true);
+    selector.set_tooltip_text(Some("Select the column to move"));
+    toolbar.append(&selector);
+    let left = gtk::Button::builder().icon_name("go-previous-symbolic").build();
+    left.set_tooltip_text(Some("Move selected column left; click repeatedly without moving the mouse"));
+    toolbar.append(&left);
+    let right = gtk::Button::builder().icon_name("go-next-symbolic").build();
+    right.set_tooltip_text(Some("Move selected column right; click repeatedly without moving the mouse"));
+    toolbar.append(&right);
+    content.append(&toolbar);
     content.append(&scroll);
+
+    let controls = ColumnOrderControls {
+        selected: Rc::new(RefCell::new(None)),
+        updating: Rc::new(Cell::new(false)),
+        selector: selector.clone(),
+        left: left.clone(),
+        right: right.clone(),
+        scroll: scroll.clone(),
+    };
+
+    {
+        let controls = controls.clone();
+        let rows = rows.clone();
+        let state = state.clone();
+        selector.connect_selected_notify(move |dropdown| {
+            if controls.updating.get() { return; }
+            let position = dropdown.selected() as usize;
+            let s = state.borrow();
+            let visible = visible_column_indices(&s.settings);
+            let selected = visible.get(position)
+                .and_then(|&index| s.settings.columns[index].statuses.first().cloned());
+            let can_move = visible.get(position).is_some();
+            controls.left.set_sensitive(can_move && position > 0);
+            controls.right.set_sensitive(can_move && position + 1 < visible.len());
+            drop(s);
+            *controls.selected.borrow_mut() = selected;
+            scroll_to_selected_column(&rows, &controls, &state);
+        });
+    }
+    {
+        let controls = controls.clone();
+        let ui = ui.clone();
+        let state = state.clone();
+        let rows = rows.clone();
+        let editor = dialog.clone();
+        left.connect_clicked(move |_| {
+            move_selected_column(&rows, &ui, &state, &editor, &controls, true);
+        });
+    }
+    {
+        let controls = controls.clone();
+        let ui = ui.clone();
+        let state = state.clone();
+        let rows = rows.clone();
+        let editor = dialog.clone();
+        right.connect_clicked(move |_| {
+            move_selected_column(&rows, &ui, &state, &editor, &controls, false);
+        });
+    }
+    rebuild_editor(&rows, ui, state, &dialog, &controls);
+
+    let actions = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let reset = gtk::Button::with_label("Reset columns");
+    reset.set_tooltip_text(Some("Restore columns from Jira status names"));
+    actions.append(&reset);
+    let spacer = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    spacer.set_hexpand(true);
+    actions.append(&spacer);
     let done = gtk::Button::with_label("Done");
     done.add_css_class("suggested-action");
-    done.set_halign(gtk::Align::End);
-    content.append(&done);
+    actions.append(&done);
+    content.append(&actions);
     dialog.set_child(Some(&content));
     {
         let dialog = dialog.clone();
         done.connect_clicked(move |_| dialog.close());
     }
+    {
+        let ui = ui.clone();
+        let state = state.clone();
+        let rows = rows.clone();
+        let editor = dialog.clone();
+        let controls = controls.clone();
+        reset.connect_clicked(move |_| {
+            confirm_column_reset(&ui, &state, &rows, &editor, &controls);
+        });
+    }
     dialog.present();
 }
 
-fn rebuild_editor(rows: &gtk::Box, ui: &Ui, state: &Rc<RefCell<State>>) {
+fn rebuild_editor(
+    rows: &gtk::Box,
+    ui: &Ui,
+    state: &Rc<RefCell<State>>,
+    editor: &gtk::Window,
+    controls: &ColumnOrderControls,
+) {
     clear_box(rows);
     let (columns, statuses, projects) = {
         let s = state.borrow();
         (s.settings.columns.clone(), s.statuses.clone(), s.settings.projects.clone())
     };
     let visible: Vec<usize> = columns.iter().enumerate()
-        .filter(|(_, c)| c.statuses.iter().any(|s| projects.contains(&s.project_key)))
-        .map(|(i, _)| i).collect();
-    let choices: Vec<String> = visible.iter()
-        .map(|&i| column_label(&columns[i], &projects))
-        .chain(std::iter::once("Separate column".to_owned())).collect();
-    let names: Vec<&str> = choices.iter().map(String::as_str).collect();
-    for (index, column) in columns.iter().enumerate() {
+        .filter(|(_, column)| column.statuses.iter().any(|s| projects.contains(&s.project_key)))
+        .map(|(index, _)| index)
+        .collect();
+
+    for (position, &index) in visible.iter().enumerate() {
+        let column = &columns[index];
         let matching: Vec<ProjectStatus> = column.statuses.iter()
             .filter(|reference| projects.contains(&reference.project_key))
-            .filter_map(|reference| statuses.iter().find(|status| status.reference() == *reference).cloned())
+            .filter_map(|reference| statuses.iter()
+                .find(|status| status.reference() == *reference).cloned())
             .collect();
         if matching.is_empty() { continue; }
 
-        let section = gtk::Box::new(gtk::Orientation::Vertical, 6);
-        section.add_css_class("card");
-        section.set_margin_bottom(6);
-        let header = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-        header.set_margin_top(8);
-        header.set_margin_start(10);
-        header.set_margin_end(10);
-        let title = gtk::Label::new(Some(&column_label(column, &projects)));
-        title.add_css_class("heading");
-        title.set_xalign(0.0);
-        title.set_hexpand(true);
-        header.append(&title);
-        let position = visible.iter().position(|i| *i == index).unwrap_or(0);
-        for (up, icon) in [(true, "go-up-symbolic"), (false, "go-down-symbolic")] {
-            let destination = if up {
-                position.checked_sub(1).and_then(|i| visible.get(i)).copied()
-            } else {
-                visible.get(position + 1).copied()
-            };
-            let button = gtk::Button::builder().icon_name(icon).build();
-            button.set_tooltip_text(Some(if up { "Move left" } else { "Move right" }));
-            button.set_sensitive(destination.is_some());
-            header.append(&button);
+        let card = gtk::Box::new(gtk::Orientation::Vertical, 10);
+        card.add_css_class("card");
+        card.set_margin_bottom(4);
+        card.set_margin_start(2);
+        card.set_margin_end(2);
+
+        let header = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        header.set_margin_top(12);
+        header.set_margin_start(12);
+        header.set_margin_end(12);
+        let heading = gtk::Label::new(Some(&format!(
+            "{}. {}", position + 1, column_label(column, &columns, &projects)
+        )));
+        heading.set_xalign(0.0);
+        heading.set_hexpand(true);
+        heading.add_css_class("heading");
+        heading.set_ellipsize(gtk::pango::EllipsizeMode::End);
+        header.append(&heading);
+
+        // Selecting the card only changes the selection in the persistent toolbar.
+        // Moving is exclusively handled by the toolbar's fixed-position arrows.
+        let choose = gtk::Button::with_label("Select");
+        choose.set_tooltip_text(Some("Select this column in the fixed move toolbar"));
+        header.append(&choose);
+        {
+            let controls = controls.clone();
+            let state = state.clone();
+            let reference = column.statuses[0].clone();
+            choose.connect_clicked(move |_| {
+                *controls.selected.borrow_mut() = Some(reference.clone());
+                update_column_order_controls(&controls, &state);
+            });
+        }
+        card.append(&header);
+
+        let name_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        name_row.set_margin_start(12);
+        name_row.set_margin_end(12);
+        let name = gtk::Entry::new();
+        name.set_text(&column.title);
+        name.set_placeholder_text(Some("Column name"));
+        name.set_tooltip_text(Some("Rename this board column without changing Jira statuses"));
+        name.set_hexpand(true);
+        name_row.append(&name);
+        let rename = gtk::Button::with_label("Rename");
+        rename.set_sensitive(false);
+        name_row.append(&rename);
+        card.append(&name_row);
+        {
+            let rename = rename.clone();
+            let original = column.title.clone();
+            name.connect_changed(move |entry| {
+                let proposed = entry.text();
+                rename.set_sensitive(!proposed.trim().is_empty() && proposed.trim() != original);
+            });
+        }
+        {
+            let rename = rename.clone();
+            name.connect_activate(move |_| rename.emit_clicked());
+        }
+        {
             let ui = ui.clone();
             let state = state.clone();
             let rows = rows.clone();
-            button.connect_clicked(move |_| {
-                if let Some(destination) = destination {
+            let editor = editor.clone();
+            let anchor = column.statuses[0].clone();
+            let controls = controls.clone();
+            rename.connect_clicked(move |_| {
+                let renamed = {
                     let mut s = state.borrow_mut();
-                    if up {
-                        for i in (destination + 1..=index).rev() {
-                            s.settings.move_column(i, true);
-                        }
-                    } else {
-                        for i in index..destination {
-                            s.settings.move_column(i, false);
-                        }
-                    }
+                    let index = s.settings.columns.iter()
+                        .position(|column| column.statuses.contains(&anchor));
+                    index.is_some_and(|index| s.settings.rename_column(index, &name.text()))
+                };
+                if renamed {
+                    refresh_column_editor(&ui, &state, &rows, &editor, &controls);
                 }
-                save_settings(&ui, &state);
-                render_board(&ui, &state.borrow());
-                rebuild_editor(&rows, &ui, &state);
             });
         }
-        section.append(&header);
+
+        let subheading = gtk::Label::new(Some(&format!(
+            "Jira statuses in this column ({})", matching.len()
+        )));
+        subheading.set_xalign(0.0);
+        subheading.set_margin_start(12);
+        subheading.set_margin_end(12);
+        subheading.add_css_class("dim-label");
+        card.append(&subheading);
+
         for status in matching {
-            let row = gtk::Box::new(gtk::Orientation::Horizontal, 10);
-            row.set_margin_start(10);
-            row.set_margin_end(10);
-            row.set_margin_bottom(8);
+            let status_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+            status_row.set_margin_start(12);
+            status_row.set_margin_end(12);
             let label = gtk::Label::new(Some(&format!("{} · {}", status.project_key, status.name)));
             label.set_xalign(0.0);
             label.set_hexpand(true);
             label.set_ellipsize(gtk::pango::EllipsizeMode::End);
-            label.set_tooltip_text(Some(&format!("Status ID {}", status.id)));
-            row.append(&label);
-            let dropdown = gtk::DropDown::from_strings(&names);
-            dropdown.set_selected(position as u32);
-            dropdown.set_width_request(190);
-            row.append(&dropdown);
+            label.set_tooltip_text(Some(&format!("Jira status ID: {}", status.id)));
+            status_row.append(&label);
+
+            if column.statuses.len() > 1 {
+                let separate = gtk::Button::with_label("Separate");
+                separate.set_tooltip_text(Some("Move this Jira status into its own new column"));
+                status_row.append(&separate);
+                let ui = ui.clone();
+                let state = state.clone();
+                let rows = rows.clone();
+                let editor = editor.clone();
+                let controls = controls.clone();
+                separate.connect_clicked(move |_| {
+                    state.borrow_mut().settings.move_status(
+                        &status.reference(), None, &status.name
+                    );
+                    refresh_column_editor(&ui, &state, &rows, &editor, &controls);
+                });
+            }
+            card.append(&status_row);
+        }
+
+        let add = gtk::Button::with_label("+ Add Jira status…");
+        add.set_halign(gtk::Align::Start);
+        add.set_margin_start(12);
+        add.set_margin_bottom(12);
+        add.set_tooltip_text(Some("Choose a status from another column to combine them here"));
+        card.append(&add);
+        {
             let ui = ui.clone();
             let state = state.clone();
             let rows = rows.clone();
-            let targets = visible.clone();
-            dropdown.connect_selected_notify(move |dropdown| {
-                let target = targets.get(dropdown.selected() as usize).copied();
-                if target == Some(index) { return; }
-                state.borrow_mut().settings.move_status(
-                    &status.reference(),
-                    target,
-                    &status.name,
-                );
-                save_settings(&ui, &state);
-                render_board(&ui, &state.borrow());
-                rebuild_editor(&rows, &ui, &state);
+            let editor = editor.clone();
+            let anchor = column.statuses[0].clone();
+            let controls = controls.clone();
+            add.connect_clicked(move |_| {
+                let target = {
+                    let s = state.borrow();
+                    s.settings.columns.iter()
+                        .position(|column| column.statuses.contains(&anchor))
+                };
+                if let Some(target) = target {
+                    show_add_status_picker(&ui, &state, &rows, &editor, target, &controls);
+                }
             });
-            section.append(&row);
         }
-        rows.append(&section);
+
+        rows.append(&card);
     }
+    if visible.is_empty() {
+        let empty = gtk::Label::new(Some("No Jira statuses found for the selected projects."));
+        empty.set_wrap(true);
+        empty.add_css_class("dim-label");
+        rows.append(&empty);
+    }
+    update_column_order_controls(controls, state);
+}
+
+fn show_add_status_picker(
+    ui: &Ui,
+    state: &Rc<RefCell<State>>,
+    rows: &gtk::Box,
+    editor: &gtk::Window,
+    target: usize,
+    controls: &ColumnOrderControls,
+) {
+    let (columns, mut candidates, projects) = {
+        let s = state.borrow();
+        let candidates = s.statuses.iter()
+            .filter(|status| !s.settings.columns[target].statuses.contains(&status.reference()))
+            .cloned()
+            .collect::<Vec<_>>();
+        (s.settings.columns.clone(), candidates, s.settings.projects.clone())
+    };
+    candidates.sort_by(|a, b| a.project_key.cmp(&b.project_key)
+        .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase())));
+
+    let picker = gtk::Window::builder()
+        .title("Add Jira status to column")
+        .transient_for(editor)
+        .modal(true)
+        .default_width(540)
+        .default_height(510)
+        .build();
+    let content = gtk::Box::new(gtk::Orientation::Vertical, 12);
+    content.set_margin_top(18);
+    content.set_margin_bottom(18);
+    content.set_margin_start(18);
+    content.set_margin_end(18);
+    let destination = column_label(&columns[target], &columns, &projects);
+    let intro = gtk::Label::new(Some(&format!(
+        "Move a Jira status into “{destination}”. It will be removed from its old column."
+    )));
+    intro.set_wrap(true);
+    intro.set_xalign(0.0);
+    content.append(&intro);
+    let search = gtk::SearchEntry::new();
+    search.set_placeholder_text(Some("Find project or status"));
+    content.append(&search);
+
+    let list = gtk::ListBox::new();
+    list.set_selection_mode(gtk::SelectionMode::None);
+    list.add_css_class("boxed-list");
+    let mut searchable = Vec::new();
+    for status in candidates {
+        let source = columns.iter()
+            .find(|column| column.statuses.contains(&status.reference()));
+        let old_name = source.map(|column| column_label(column, &columns, &projects))
+            .unwrap_or_else(|| "Unmapped".into());
+        let row = gtk::ListBoxRow::new();
+        row.set_activatable(false);
+        let contents = gtk::Box::new(gtk::Orientation::Horizontal, 10);
+        contents.set_margin_top(8);
+        contents.set_margin_bottom(8);
+        contents.set_margin_start(10);
+        contents.set_margin_end(10);
+        let labels = gtk::Box::new(gtk::Orientation::Vertical, 3);
+        labels.set_hexpand(true);
+        let name = gtk::Label::new(Some(&format!("{} · {}", status.project_key, status.name)));
+        name.set_xalign(0.0);
+        name.add_css_class("heading");
+        labels.append(&name);
+        let current = gtk::Label::new(Some(&format!("Currently in: {old_name}")));
+        current.set_xalign(0.0);
+        current.add_css_class("dim-label");
+        current.set_ellipsize(gtk::pango::EllipsizeMode::End);
+        labels.append(&current);
+        contents.append(&labels);
+        let add = gtk::Button::with_label("Add");
+        contents.append(&add);
+        row.set_child(Some(&contents));
+        list.append(&row);
+        searchable.push((row, format!("{} {} {old_name}", status.project_key, status.name).to_lowercase()));
+
+        let ui = ui.clone();
+        let state = state.clone();
+        let rows = rows.clone();
+        let editor = editor.clone();
+        let picker = picker.clone();
+        let controls = controls.clone();
+        add.connect_clicked(move |_| {
+            state.borrow_mut().settings.move_status(
+                &status.reference(), Some(target), &status.name
+            );
+            refresh_column_editor(&ui, &state, &rows, &editor, &controls);
+            picker.close();
+        });
+    }
+    {
+        search.connect_search_changed(move |entry| {
+            let query = entry.text().to_lowercase();
+            for (row, text) in &searchable {
+                row.set_visible(text.contains(&query));
+            }
+        });
+    }
+
+    let scroller = gtk::ScrolledWindow::new();
+    scroller.set_vexpand(true);
+    scroller.set_child(Some(&list));
+    content.append(&scroller);
+    if list.first_child().is_none() {
+        let empty = gtk::Label::new(Some("All available Jira statuses are already in this column."));
+        empty.set_wrap(true);
+        content.append(&empty);
+    }
+    let cancel = gtk::Button::with_label("Close");
+    cancel.set_halign(gtk::Align::End);
+    content.append(&cancel);
+    picker.set_child(Some(&content));
+    {
+        let picker = picker.clone();
+        cancel.connect_clicked(move |_| picker.close());
+    }
+    picker.present();
+    search.grab_focus();
+}
+
+fn confirm_column_reset(
+    ui: &Ui,
+    state: &Rc<RefCell<State>>,
+    rows: &gtk::Box,
+    editor: &gtk::Window,
+    controls: &ColumnOrderControls,
+) {
+    let dialog = gtk::Window::builder()
+        .title("Reset board columns?")
+        .transient_for(editor)
+        .modal(true)
+        .resizable(false)
+        .default_width(430)
+        .build();
+    let content = gtk::Box::new(gtk::Orientation::Vertical, 14);
+    content.set_margin_top(20);
+    content.set_margin_bottom(20);
+    content.set_margin_start(20);
+    content.set_margin_end(20);
+    let message = gtk::Label::new(Some(
+        "Restore suggested column order and default status groups? Jira statuses \
+         with matching names will be grouped automatically. Your selected projects \
+         will be kept."
+    ));
+    message.set_wrap(true);
+    message.set_xalign(0.0);
+    content.append(&message);
+    let actions = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    actions.set_halign(gtk::Align::End);
+    let cancel = gtk::Button::with_label("Cancel");
+    let reset = gtk::Button::with_label("Reset");
+    reset.add_css_class("destructive-action");
+    actions.append(&cancel);
+    actions.append(&reset);
+    content.append(&actions);
+    dialog.set_child(Some(&content));
+    {
+        let dialog = dialog.clone();
+        cancel.connect_clicked(move |_| dialog.close());
+    }
+    {
+        let ui = ui.clone();
+        let state = state.clone();
+        let rows = rows.clone();
+        let editor = editor.clone();
+        let dialog = dialog.clone();
+        let controls = controls.clone();
+        reset.connect_clicked(move |_| {
+            let statuses = state.borrow().statuses.clone();
+            state.borrow_mut().settings.reset_columns(&statuses);
+            refresh_column_editor(&ui, &state, &rows, &editor, &controls);
+            dialog.close();
+        });
+    }
+    dialog.present();
+}
+
+fn refresh_column_editor(
+    ui: &Ui,
+    state: &Rc<RefCell<State>>,
+    rows: &gtk::Box,
+    editor: &gtk::Window,
+    controls: &ColumnOrderControls,
+) {
+    save_settings(ui, state);
+    render_board(ui, &state.borrow());
+    rebuild_editor(rows, ui, state, editor, controls);
 }
 
 fn save_settings(ui: &Ui, state: &Rc<RefCell<State>>) {
@@ -820,27 +1269,46 @@ fn save_settings(ui: &Ui, state: &Rc<RefCell<State>>) {
     }
 }
 
-fn column_label(column: &preferences::Column, projects: &[String]) -> String {
-    let active: Vec<_> = column.statuses.iter()
-        .filter(|s| projects.contains(&s.project_key)).collect();
-    if active.len() == 1 {
-        format!("{} · {}", active[0].project_key, column.title)
-    } else {
-        format!("{} · {} statuses", column.title, active.len())
+fn column_label(
+    column: &preferences::Column,
+    all_columns: &[preferences::Column],
+    projects: &[String],
+) -> String {
+    // The common case (ART: Open + AFB: Open) is just "Open".
+    // Disambiguate only if the user has deliberately split equal-named columns.
+    let duplicate = all_columns.iter().filter(|candidate| {
+        candidate.title.eq_ignore_ascii_case(&column.title)
+            && candidate.statuses.iter().any(|s| projects.contains(&s.project_key))
+    }).count() > 1;
+    if !duplicate {
+        return column.title.clone();
     }
+    let mut project_keys: Vec<&str> = column.statuses.iter()
+        .filter(|status| projects.contains(&status.project_key))
+        .map(|status| status.project_key.as_str())
+        .collect();
+    project_keys.sort_unstable();
+    project_keys.dedup();
+    format!("{} · {}", column.title, project_keys.join(", "))
 }
 
-fn render_board(ui: &Ui, state: &State) {
-    clear_box(&ui.board_box);
-    if state.settings.projects.is_empty() {
-        show_empty(&ui.board_box, "Choose projects", "Use Choose projects… to set up your board.");
-        return;
-    }
-    let text = ui.search.text().to_lowercase();
-    let mut groups: Vec<(String, Vec<&Issue>, Vec<preferences::StatusRef>)> = state.settings.columns.iter()
-        .filter(|c| c.statuses.iter().any(|s| state.settings.projects.contains(&s.project_key)))
-        .map(|c| (column_label(c, &state.settings.projects), Vec::new(), c.statuses.clone())).collect();
-    for issue in &state.issues {
+fn visible_board_groups<'a>(
+    settings: &BoardSettings,
+    issues: &'a [Issue],
+    search: &str,
+) -> Vec<(String, Vec<&'a Issue>)> {
+    let text = search.to_lowercase();
+    let mut groups: Vec<(String, Vec<&Issue>, Vec<preferences::StatusRef>)> = settings.columns.iter()
+        .filter(|column| column.statuses.iter()
+            .any(|status| settings.projects.contains(&status.project_key)))
+        .map(|column| (
+            column_label(column, &settings.columns, &settings.projects),
+            Vec::new(),
+            column.statuses.clone(),
+        ))
+        .collect();
+
+    for issue in issues {
         if !text.is_empty()
             && !issue.key.to_lowercase().contains(&text)
             && !issue.summary.to_lowercase().contains(&text)
@@ -852,23 +1320,44 @@ fn render_board(ui: &Ui, state: &State) {
             project_key: issue.project_key.clone(),
             status_id: issue.status_id.clone(),
         };
-        if let Some((_, items, _)) = groups.iter_mut().find(|(_, _, refs)| refs.contains(&reference)) {
-            items.push(issue);
+        if let Some((_, matches, _)) = groups.iter_mut()
+            .find(|(_, _, statuses)| statuses.contains(&reference))
+        {
+            matches.push(issue);
+        } else if let Some((_, matches, _)) = groups.iter_mut()
+            .find(|(title, _, _)| title == "Other")
+        {
+            matches.push(issue);
         } else {
-            let index = groups.iter().position(|(title, _, _)| title == "Other");
-            if let Some(index) = index {
-                groups[index].1.push(issue);
-            } else {
-                groups.push(("Other".into(), vec![issue], Vec::new()));
-            }
+            groups.push(("Other".into(), vec![issue], Vec::new()));
         }
     }
+
+    // Empty columns remain in board settings and the column editor.
+    // Only the current scope/search result determines what is rendered.
+    groups.into_iter()
+        .filter_map(|(name, matches, _)| (!matches.is_empty()).then_some((name, matches)))
+        .collect()
+}
+
+fn render_board(ui: &Ui, state: &State) {
+    clear_box(&ui.board_box);
+    if state.settings.projects.is_empty() {
+        show_empty(&ui.board_box, "Choose projects", "Use Choose projects… to set up your board.");
+        return;
+    }
+    let search = ui.search.text();
+    let groups = visible_board_groups(&state.settings, &state.issues, search.as_str());
     if groups.is_empty() {
-        show_empty(&ui.board_box, "No workflow statuses", "There are no statuses to display.");
+        show_empty(
+            &ui.board_box,
+            "No matching issues",
+            "No issues match the current filter or search.",
+        );
         return;
     }
     let url = state.account.as_ref().map(|a| a.base_url.as_str()).unwrap_or("");
-    for (name, issues, _) in groups {
+    for (name, issues) in groups {
         let column = gtk::Box::new(gtk::Orientation::Vertical, 8);
         column.set_width_request(280);
         let title = gtk::Label::new(Some(&format!("{name}  ({})", issues.len())));
@@ -1014,6 +1503,80 @@ fn show_error(ui: &Ui, error: &str) {
 #[cfg(test)]
 mod scope_tests {
     use super::*;
+
+    fn issue(key: &str, status_id: &str, summary: &str) -> Issue {
+        Issue {
+            key: key.into(),
+            project_key: "ART".into(),
+            summary: summary.into(),
+            status: format!("Status {status_id}"),
+            status_id: status_id.into(),
+            kind: String::new(),
+            priority: String::new(),
+            assignee: String::new(),
+            updated: String::new(),
+            description: String::new(),
+        }
+    }
+
+    fn board_settings() -> BoardSettings {
+        BoardSettings {
+            projects: vec!["ART".into()],
+            columns: ["Open", "Review", "Done"].iter().enumerate().map(|(i, title)| {
+                preferences::Column {
+                    title: (*title).into(),
+                    statuses: vec![preferences::StatusRef {
+                        project_key: "ART".into(),
+                        status_id: (i + 1).to_string(),
+                    }],
+                }
+            }).collect(),
+            ..BoardSettings::default()
+        }
+    }
+
+    #[test]
+    fn hides_zero_issue_columns_but_keeps_their_configuration() {
+        let settings = board_settings();
+        let issues = vec![
+            issue("ART-1", "1", "Relevant issue"),
+            issue("ART-2", "3", "Completed issue"),
+        ];
+        let groups = visible_board_groups(&settings, &issues, "");
+        assert_eq!(
+            groups.iter().map(|(name, _)| name.as_str()).collect::<Vec<_>>(),
+            vec!["Open", "Done"],
+        );
+        assert_eq!(settings.columns.len(), 3);
+    }
+
+    #[test]
+    fn hides_columns_that_become_empty_after_search_or_scope_filter() {
+        let settings = board_settings();
+        // The issues slice already represents the server-filtered Mine/Unassigned/All scope.
+        let issues = vec![
+            issue("ART-1", "1", "Relevant issue"),
+            issue("ART-2", "3", "Completed issue"),
+        ];
+        let groups = visible_board_groups(&settings, &issues, "Relevant");
+        assert_eq!(
+            groups.iter().map(|(name, _)| name.as_str()).collect::<Vec<_>>(),
+            vec!["Open"],
+        );
+        assert!(visible_board_groups(&settings, &issues, "no matches").is_empty());
+        assert!(visible_board_groups(&settings, &[], "").is_empty());
+    }
+
+    #[test]
+    fn keeps_other_column_only_when_unmapped_issues_exist() {
+        let settings = board_settings();
+        let issues = vec![issue("ART-404", "other", "Unmapped")];
+        let groups = visible_board_groups(&settings, &issues, "");
+        assert_eq!(
+            groups.iter().map(|(name, _)| name.as_str()).collect::<Vec<_>>(),
+            vec!["Other"],
+        );
+    }
 
     #[test]
     fn board_scope_uses_server_side_jql() {

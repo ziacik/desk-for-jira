@@ -1,7 +1,7 @@
 use std::{collections::{HashMap, HashSet}, env, fs, io::ErrorKind, path::PathBuf};
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
-use crate::jira::ProjectStatus;
+use crate::jira::{ProjectStatus, StatusCategory};
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct StatusRef {
@@ -19,15 +19,27 @@ pub struct BoardSettings {
     pub projects: Vec<String>,
     #[serde(default)]
     pub columns: Vec<Column>,
+    // A migration marker: older versions created a separate column for every project status.
+    #[serde(default)]
+    pub grouping_version: u8,
 }
 impl ProjectStatus {
     pub fn reference(&self) -> StatusRef {
         StatusRef { project_key: self.project_key.clone(), status_id: self.id.clone() }
     }
 }
+fn category_position(category: StatusCategory) -> u8 {
+    match category {
+        StatusCategory::Todo => 0,
+        StatusCategory::InProgress => 1,
+        StatusCategory::Done => 2,
+    }
+}
+
 impl BoardSettings {
     /// Use actual workflow status IDs, never Jira board columns or matching names.
     pub fn reconcile(&mut self, available: &[ProjectStatus]) {
+        let initial_layout = self.columns.is_empty();
         let valid: HashSet<_> = available.iter().map(ProjectStatus::reference).collect();
         let selected: HashSet<_> = self.projects.iter().map(String::as_str).collect();
         let mut seen = HashSet::new();
@@ -39,13 +51,82 @@ impl BoardSettings {
             });
         }
         self.columns.retain(|c| !c.statuses.is_empty());
+
+        // Migrate the old per-project defaults once. Only join singleton columns
+        // with equal names from different projects, keeping custom mappings intact.
+        // Explicitly separated columns stay separated on subsequent refreshes.
+        if self.grouping_version == 0 {
+            self.merge_legacy_columns();
+            self.grouping_version = 1;
+        }
+
         for status in available {
             let reference = status.reference();
             if seen.insert(reference.clone()) {
-                self.columns.push(Column { title: status.name.clone(), statuses: vec![reference] });
+                let candidates: Vec<usize> = self.columns.iter().enumerate()
+                    .filter(|(_, column)| column.title.trim().eq_ignore_ascii_case(status.name.trim())
+                        && !column.statuses.iter().any(|s| s.project_key == status.project_key))
+                    .map(|(index, _)| index)
+                    .collect();
+                if let [index] = candidates.as_slice() {
+                    self.columns[*index].statuses.push(reference);
+                } else {
+                    // A repeated name within one project, or an ambiguous split,
+                    // must never silently merge into an arbitrary column.
+                    self.columns.push(Column { title: status.name.clone(), statuses: vec![reference] });
+                }
+            }
+        }
+        // Only a new board gets the suggested order. Existing manually moved
+        // columns must never be rearranged on a refresh or project switch.
+        if initial_layout {
+            self.sort_initial_columns(available);
+        }
+    }
+
+    fn sort_initial_columns(&mut self, available: &[ProjectStatus]) {
+        // Jira's workflow transitions determine relative order when accessible.
+        // Without workflow permission, keep Jira's returned order WITHIN each
+        // status category. Do not guess from English or localized status names.
+        let metadata: HashMap<_, _> = available.iter()
+            .map(|status| (status.reference(), (status.category, status.workflow_order)))
+            .collect();
+        self.columns.sort_by_key(|column| {
+            let category = column.statuses.iter()
+                .filter_map(|reference| metadata.get(reference).and_then(|(category, _)| *category))
+                .min_by_key(|category| category_position(*category));
+            let workflow_order = column.statuses.iter()
+                .filter_map(|reference| metadata.get(reference).and_then(|(_, order)| *order))
+                .min();
+            (category.map(category_position).unwrap_or(1), workflow_order)
+        });
+    }
+
+    fn merge_legacy_columns(&mut self) {
+        let mut index = 0;
+        while index < self.columns.len() {
+            if self.columns[index].statuses.len() != 1 {
+                index += 1;
+                continue;
+            }
+            let status = &self.columns[index].statuses[0];
+            let title = &self.columns[index].title;
+            let candidates: Vec<usize> = (0..index)
+                .filter(|&candidate| {
+                    let column = &self.columns[candidate];
+                    column.title.trim().eq_ignore_ascii_case(title.trim())
+                        && column.statuses.iter().all(|s| s.project_key != status.project_key)
+                })
+                .collect();
+            if let [destination] = candidates.as_slice() {
+                let removed = self.columns.remove(index);
+                self.columns[*destination].statuses.extend(removed.statuses);
+            } else {
+                index += 1;
             }
         }
     }
+
     pub fn move_status(&mut self, reference: &StatusRef, target: Option<usize>, title: &str) {
         let source = self.columns.iter().position(|c| c.statuses.contains(reference));
         if source == target { return; }
@@ -58,6 +139,55 @@ impl BoardSettings {
         }
         self.columns.retain(|c| !c.statuses.is_empty());
     }
+    pub fn rename_column(&mut self, index: usize, title: &str) -> bool {
+        let title = title.trim();
+        if title.is_empty() {
+            return false;
+        }
+        if let Some(column) = self.columns.get_mut(index) {
+            column.title = title.to_owned();
+            return true;
+        }
+        false
+    }
+
+    pub fn reset_columns(&mut self, available: &[ProjectStatus]) {
+        self.columns.clear();
+        self.grouping_version = 1;
+        self.reconcile(available);
+    }
+
+    /// Move the column containing this status, skipping inactive project columns.
+    /// The reference identifies the column even after previous moves.
+    pub fn move_visible_column(&mut self, reference: &StatusRef, left: bool) -> bool {
+        let visible: Vec<_> = self.columns.iter().enumerate()
+            .filter(|(_, column)| column.statuses.iter()
+                .any(|status| self.projects.contains(&status.project_key)))
+            .map(|(index, _)| index)
+            .collect();
+        let Some(position) = visible.iter()
+            .position(|&index| self.columns[index].statuses.contains(reference))
+        else { return false; };
+        let destination_position = if left {
+            position.checked_sub(1)
+        } else {
+            position.checked_add(1).filter(|&next| next < visible.len())
+        };
+        let Some(destination_position) = destination_position else { return false; };
+        let source = visible[position];
+        let destination = visible[destination_position];
+        if left {
+            for index in (destination + 1..=source).rev() {
+                self.move_column(index, true);
+            }
+        } else {
+            for index in source..destination {
+                self.move_column(index, false);
+            }
+        }
+        true
+    }
+
     pub fn move_column(&mut self, index: usize, up: bool) {
         let other = if up { index.checked_sub(1) } else { index.checked_add(1) };
         if let Some(other) = other.filter(|i| *i < self.columns.len()) {
@@ -104,19 +234,168 @@ pub fn save(base_url: &str, settings: &BoardSettings) -> Result<()> {
 mod tests {
     use super::*;
     fn status(project: &str, id: &str, name: &str) -> ProjectStatus {
-        ProjectStatus { project_key: project.into(), id: id.into(), name: name.into() }
+        ProjectStatus {
+            project_key: project.into(), id: id.into(), name: name.into(),
+            category: None, workflow_order: None,
+        }
     }
     #[test]
-    fn identical_names_or_ids_across_projects_do_not_merge_automatically() {
-        let a = status("ART", "12", "Review");
-        let b = status("AFB", "12", "Review");
+    fn first_load_uses_real_workflow_order_independent_of_names() {
+        let mut board = BoardSettings {
+            projects: vec!["ART".into()],
+            ..BoardSettings::default()
+        };
+        let mut last = status("ART", "3", "Fertig");
+        last.category = Some(StatusCategory::Done);
+        last.workflow_order = Some(2);
+        let mut middle = status("ART", "2", "Spracúva sa");
+        middle.category = Some(StatusCategory::InProgress);
+        middle.workflow_order = Some(1);
+        let mut first = status("ART", "1", "Čaká");
+        first.category = Some(StatusCategory::Todo);
+        first.workflow_order = Some(0);
+        board.reconcile(&[last, middle, first]);
+        assert_eq!(
+            board.columns.iter().map(|c| c.title.as_str()).collect::<Vec<_>>(),
+            vec!["Čaká", "Spracúva sa", "Fertig"]
+        );
+    }
+
+    #[test]
+    fn workflow_order_sorts_within_category_without_name_heuristics() {
+        let mut board = BoardSettings {
+            projects: vec!["ART".into()],
+            ..BoardSettings::default()
+        };
+        let mut first = status("ART", "1", "Whatever first");
+        first.category = Some(StatusCategory::InProgress);
+        first.workflow_order = Some(0);
+        let mut second = status("ART", "2", "Whatever second");
+        second.category = Some(StatusCategory::InProgress);
+        second.workflow_order = Some(1);
+        board.reconcile(&[second, first]);
+        assert_eq!(board.columns[0].title, "Whatever first");
+        assert_eq!(board.columns[1].title, "Whatever second");
+    }
+
+    #[test]
+    fn without_workflow_access_preserves_api_order_within_categories() {
+        let mut board = BoardSettings {
+            projects: vec!["ART".into()],
+            ..BoardSettings::default()
+        };
+        let mut alpha = status("ART", "1", "Closed");
+        alpha.category = Some(StatusCategory::InProgress);
+        let mut beta = status("ART", "2", "Backlog");
+        beta.category = Some(StatusCategory::InProgress);
+        board.reconcile(&[alpha, beta]);
+        assert_eq!(
+            board.columns.iter().map(|c| c.title.as_str()).collect::<Vec<_>>(),
+            vec!["Closed", "Backlog"]
+        );
+    }
+
+    #[test]
+    fn jira_category_takes_precedence_over_workflow_position_across_categories() {
+        let mut board = BoardSettings {
+            projects: vec!["ART".into()],
+            ..BoardSettings::default()
+        };
+        let mut todo = status("ART", "11", "Indeterminate");
+        todo.category = Some(StatusCategory::Todo);
+        todo.workflow_order = Some(10);
+        let mut progress = status("ART", "12", "Working");
+        progress.category = Some(StatusCategory::InProgress);
+        progress.workflow_order = Some(0);
+        let mut done = status("ART", "13", "Final");
+        done.category = Some(StatusCategory::Done);
+        done.workflow_order = Some(1);
+        board.reconcile(&[done, progress, todo]);
+        let names: Vec<_> = board.columns.iter().map(|c| c.title.as_str()).collect();
+        assert_eq!(names, vec!["Indeterminate", "Working", "Final"]);
+    }
+
+    #[test]
+    fn manual_order_survives_refresh_but_reset_suggests_order_again() {
+        let mut board = BoardSettings {
+            projects: vec!["ART".into()],
+            ..BoardSettings::default()
+        };
+        let mut done = status("ART", "1", "Ukončené");
+        done.category = Some(StatusCategory::Done);
+        let mut progress = status("ART", "2", "Pracuje sa");
+        progress.category = Some(StatusCategory::InProgress);
+        let mut todo = status("ART", "3", "Čaká");
+        todo.category = Some(StatusCategory::Todo);
+        let statuses = vec![done, progress, todo];
+        board.reconcile(&statuses);
+        assert_eq!(board.columns[0].title, "Čaká");
+        board.move_column(2, true);
+        board.move_column(1, true);
+        assert_eq!(board.columns[0].title, "Ukončené");
+        board.reconcile(&statuses);
+        assert_eq!(board.columns[0].title, "Ukončené");
+        board.reset_columns(&statuses);
+        assert_eq!(
+            board.columns.iter().map(|c| c.title.as_str()).collect::<Vec<_>>(),
+            vec!["Čaká", "Pracuje sa", "Ukončené"]
+        );
+    }
+
+    #[test]
+    fn identical_names_across_projects_merge_by_default() {
+        let a = status("ART", "12", "Open");
+        let b = status("AFB", "12", "Open");
         let mut board = BoardSettings::default();
         board.reconcile(&[a.clone(), b.clone()]);
-        assert_eq!(board.columns.len(), 2);
-        board.move_status(&b.reference(), Some(0), &b.name);
         assert_eq!(board.columns.len(), 1);
+        assert_eq!(board.columns[0].title, "Open");
+        assert_eq!(board.columns[0].statuses, vec![a.reference(), b.reference()]);
         board.reconcile(&[a, b]);
+        assert_eq!(board.columns.len(), 1);
+    }
+
+    #[test]
+    fn explicitly_split_equal_names_stay_separate_after_reload() {
+        let art = status("ART", "1", "Open");
+        let afb = status("AFB", "2", "Open");
+        let mut board = BoardSettings::default();
+        board.reconcile(&[art.clone(), afb.clone()]);
+        board.move_status(&afb.reference(), None, "Open");
+        assert_eq!(board.columns.len(), 2);
+        let serialized = serde_json::to_vec(&board).unwrap();
+        let mut restored: BoardSettings = serde_json::from_slice(&serialized).unwrap();
+        restored.reconcile(&[art, afb]);
+        assert_eq!(restored.columns.len(), 2);
+    }
+
+    #[test]
+    fn legacy_separate_columns_merge_on_first_refresh() {
+        let old = serde_json::json!({
+            "projects": ["ART", "AFB"],
+            "columns": [
+                {"title":"Open","statuses":[{"project_key":"ART","status_id":"1"}]},
+                {"title":"In Review","statuses":[{"project_key":"ART","status_id":"2"}]},
+                {"title":"Open","statuses":[{"project_key":"AFB","status_id":"3"}]}
+            ]
+        });
+        let mut board: BoardSettings = serde_json::from_value(old).unwrap();
+        board.reconcile(&[
+            status("ART", "1", "Open"),
+            status("ART", "2", "In Review"),
+            status("AFB", "3", "Open"),
+        ]);
+        assert_eq!(board.columns.len(), 2);
+        assert_eq!(board.columns[0].title, "Open");
         assert_eq!(board.columns[0].statuses.len(), 2);
+        assert_eq!(board.grouping_version, 1);
+    }
+
+    #[test]
+    fn duplicate_names_within_one_project_stay_separate() {
+        let mut board = BoardSettings::default();
+        board.reconcile(&[status("ART", "1", "Open"), status("ART", "2", "Open")]);
+        assert_eq!(board.columns.len(), 2);
     }
     #[test]
     fn deselecting_a_project_does_not_forget_its_mappings() {
@@ -127,7 +406,6 @@ mod tests {
             ..BoardSettings::default()
         };
         board.reconcile(&[art.clone(), afb.clone()]);
-        board.move_status(&afb.reference(), Some(0), &afb.name);
         board.projects = vec!["ART".into()];
         board.reconcile(std::slice::from_ref(&art));
         assert_eq!(board.columns[0].statuses.len(), 2);
@@ -147,9 +425,86 @@ mod tests {
         assert_eq!(board.columns[0].title, "Review");
     }
     #[test]
+    fn move_eighth_column_to_first_with_repeated_left_actions() {
+        let statuses: Vec<_> = (0..8)
+            .map(|index| status("ART", &index.to_string(), &format!("Column {index}")))
+            .collect();
+        let selected = statuses[7].reference();
+        let mut board = BoardSettings {
+            projects: vec!["ART".into()],
+            ..BoardSettings::default()
+        };
+        board.reconcile(&statuses);
+
+        for expected_index in (0..7).rev() {
+            assert!(board.move_visible_column(&selected, true));
+            let actual_index = board.columns.iter().position(|column|
+                column.statuses.contains(&selected));
+            assert_eq!(actual_index, Some(expected_index));
+        }
+        assert!(!board.move_visible_column(&selected, true));
+        assert_eq!(board.columns[0].statuses, vec![selected]);
+        assert_eq!(board.columns[1].title, "Column 0");
+    }
+
+    #[test]
+    fn repeated_moves_follow_the_same_column_and_skip_inactive_projects() {
+        let first = status("ART", "1", "First");
+        let hidden = status("OTHER", "2", "Hidden");
+        let second = status("ART", "3", "Second");
+        let third = status("ART", "4", "Third");
+        let mut board = BoardSettings {
+            projects: vec!["ART".into(), "OTHER".into()],
+            ..BoardSettings::default()
+        };
+        board.reconcile(&[first.clone(), hidden, second.clone(), third.clone()]);
+        board.projects = vec!["ART".into()];
+
+        assert!(board.move_visible_column(&third.reference(), true));
+        assert!(board.move_visible_column(&third.reference(), true));
+        let active: Vec<_> = board.columns.iter()
+            .filter(|column| column.statuses.iter()
+                .any(|item| board.projects.contains(&item.project_key)))
+            .map(|column| column.title.as_str())
+            .collect();
+        assert_eq!(active, vec!["Third", "First", "Second"]);
+        assert!(!board.move_visible_column(&third.reference(), true));
+        assert!(board.move_visible_column(&third.reference(), false));
+        assert!(board.move_visible_column(&third.reference(), false));
+        assert_eq!(board.columns.iter().filter(|column| column.title == "Third").count(), 1);
+        let active: Vec<_> = board.columns.iter()
+            .filter(|column| column.statuses.iter()
+                .any(|item| board.projects.contains(&item.project_key)))
+            .map(|column| column.title.as_str())
+            .collect();
+        assert_eq!(active, vec!["First", "Second", "Third"]);
+    }
+
+    #[test]
+    fn rename_and_reset_preserve_projects_but_restore_default_grouping() {
+        let art = status("ART", "1", "Open");
+        let afb = status("AFB", "2", "Open");
+        let review = status("ART", "3", "In Review");
+        let mut board = BoardSettings {
+            projects: vec!["ART".into(), "AFB".into()],
+            ..BoardSettings::default()
+        };
+        board.reconcile(&[art.clone(), afb.clone(), review.clone()]);
+        assert!(!board.rename_column(0, "   "));
+        assert!(board.rename_column(0, "Ready"));
+        assert_eq!(board.columns[0].title, "Ready");
+        board.move_status(&afb.reference(), Some(1), &afb.name);
+        board.reset_columns(&[art, afb, review]);
+        assert_eq!(board.projects, vec!["ART", "AFB"]);
+        assert_eq!(board.columns.len(), 2);
+        assert_eq!(board.columns[0].title, "Open");
+        assert_eq!(board.columns[0].statuses.len(), 2);
+    }
+
+    #[test]
     fn per_site_roundtrip() {
         let mut prefs = Preferences::default();
-        prefs.board_by_site.insert("first".into(), BoardSettings { projects: vec!["ART".into()], columns: vec![] });
+        prefs.board_by_site.insert("first".into(), BoardSettings { projects: vec!["ART".into()], ..BoardSettings::default() });
         let decoded: Preferences = serde_json::from_slice(&serde_json::to_vec(&prefs).unwrap()).unwrap();
         assert_eq!(decoded.board_by_site["first"].projects, vec!["ART"]);
     }
