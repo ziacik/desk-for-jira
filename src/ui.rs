@@ -669,49 +669,100 @@ fn show_project_picker(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Even
     search.grab_focus();
 }
 
-// A series of clicks at one screen position must keep moving the SAME column,
-// even though a different card slides underneath that position after each move.
+// The selector and movement buttons live outside the scrolling column list.
+ // A selected status reference identifies its column across reorders.
 #[derive(Clone)]
-struct ColumnReorderSession {
-    reference: preferences::StatusRef,
-    card: gtk::Widget,
-    left: bool,
-    press: (f64, f64),
+struct ColumnOrderControls {
+    selected: Rc<RefCell<Option<preferences::StatusRef>>>,
+    updating: Rc<Cell<bool>>,
+    selector: gtk::DropDown,
+    left: gtk::Button,
+    right: gtk::Button,
+    scroll: gtk::ScrolledWindow,
 }
 
-#[derive(Clone, Default)]
-struct ColumnReorderContext {
-    active: Rc<RefCell<Option<ColumnReorderSession>>>,
-    last_press: Rc<Cell<Option<(f64, f64)>>>,
+fn visible_column_indices(settings: &BoardSettings) -> Vec<usize> {
+    settings.columns.iter().enumerate()
+        .filter(|(_, column)| column.statuses.iter()
+            .any(|status| settings.projects.contains(&status.project_key)))
+        .map(|(index, _)| index)
+        .collect()
 }
 
-fn same_click_position(a: (f64, f64), b: (f64, f64)) -> bool {
-    (a.0 - b.0).abs() <= 3.0 && (a.1 - b.1).abs() <= 3.0
+fn update_column_order_controls(controls: &ColumnOrderControls, state: &Rc<RefCell<State>>) {
+    let s = state.borrow();
+    let visible = visible_column_indices(&s.settings);
+    let selection = controls.selected.borrow().clone();
+    let position = selection.as_ref()
+        .and_then(|selected| visible.iter().position(|&index|
+            s.settings.columns[index].statuses.contains(selected)));
+    let position = position.or_else(|| (!visible.is_empty()).then_some(0));
+    *controls.selected.borrow_mut() = position
+        .and_then(|i| s.settings.columns[visible[i]].statuses.first().cloned());
+
+    let labels: Vec<String> = visible.iter().enumerate()
+        .map(|(i, &index)| format!(
+            "{}. {}", i + 1,
+            column_label(&s.settings.columns[index], &s.settings.columns, &s.settings.projects)
+        ))
+        .collect();
+    let label_refs: Vec<&str> = labels.iter().map(String::as_str).collect();
+    let model = gtk::StringList::new(&label_refs);
+    controls.updating.set(true);
+    controls.selector.set_model(Some(&model));
+    controls.selector.set_selected(position.map(|i| i as u32).unwrap_or(gtk::INVALID_LIST_POSITION));
+    controls.updating.set(false);
+    controls.left.set_sensitive(position.is_some_and(|i| i > 0));
+    controls.right.set_sensitive(position.is_some_and(|i| i + 1 < visible.len()));
 }
 
-fn move_editor_column(
+fn scroll_to_selected_column(rows: &gtk::Box, controls: &ColumnOrderControls, state: &Rc<RefCell<State>>) {
+    let position = {
+        let s = state.borrow();
+        let visible = visible_column_indices(&s.settings);
+        let selected = controls.selected.borrow();
+        selected.as_ref().and_then(|reference| visible.iter()
+            .position(|&index| s.settings.columns[index].statuses.contains(reference)))
+    };
+    let Some(position) = position else { return; };
+    let rows = rows.clone();
+    let scroll = controls.scroll.clone();
+    glib::idle_add_local_once(move || {
+        let mut card = rows.first_child();
+        for _ in 0..position {
+            card = card.and_then(|child| child.next_sibling());
+        }
+        let Some(card) = card else { return; };
+        let Some(bounds) = card.compute_bounds(&rows) else { return; };
+        let adjustment = scroll.vadjustment();
+        let top = adjustment.value();
+        let bottom = top + adjustment.page_size();
+        let card_top = f64::from(bounds.y());
+        let card_bottom = card_top + f64::from(bounds.height());
+
+        if card_top < top + 12.0 {
+            adjustment.set_value((card_top - 12.0).max(0.0));
+        } else if card_bottom > bottom - 12.0 {
+            adjustment.set_value((card_bottom - adjustment.page_size() + 12.0).max(0.0));
+        }
+    });
+}
+
+fn move_selected_column(
     rows: &gtk::Box,
     ui: &Ui,
     state: &Rc<RefCell<State>>,
-    card: &gtk::Widget,
-    reference: &preferences::StatusRef,
+    editor: &gtk::Window,
+    controls: &ColumnOrderControls,
     left: bool,
-) -> bool {
-    let neighbor = if left { card.prev_sibling() } else { card.next_sibling() };
-    let Some(neighbor) = neighbor else { return false; };
-    if !state.borrow_mut().settings.move_visible_column(reference, left) {
-        return false;
+) {
+    let selection = controls.selected.borrow().clone();
+    let Some(selection) = selection else { return; };
+    if !state.borrow_mut().settings.move_visible_column(&selection, left) {
+        return;
     }
-    if left {
-        let before = neighbor.prev_sibling();
-        rows.reorder_child_after(card, before.as_ref());
-    } else {
-        rows.reorder_child_after(card, Some(&neighbor));
-    }
-    update_editor_positions(rows, state);
-    save_settings(ui, state);
-    render_board(ui, &state.borrow());
-    true
+    refresh_column_editor(ui, state, rows, editor, controls);
+    scroll_to_selected_column(rows, controls, state);
 }
 
 fn show_column_editor(ui: &Ui, state: &Rc<RefCell<State>>) {
