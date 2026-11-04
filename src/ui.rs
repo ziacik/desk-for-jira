@@ -231,6 +231,7 @@ fn build_ui(app: &adw::Application) {
     inner_split.set_end_child(Some(&detail_panel));
     inner_split.set_position(920);
     inner_split.set_resize_start_child(true);
+    inner_split.set_resize_end_child(false);
     inner_split.set_shrink_start_child(false);
     inner_split.set_shrink_end_child(false);
     let toast = adw::ToastOverlay::new();
