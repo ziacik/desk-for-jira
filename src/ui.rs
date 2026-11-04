@@ -1477,6 +1477,80 @@ fn show_error(ui: &Ui, error: &str) {
 mod scope_tests {
     use super::*;
 
+    fn issue(key: &str, status_id: &str, summary: &str) -> Issue {
+        Issue {
+            key: key.into(),
+            project_key: "ART".into(),
+            summary: summary.into(),
+            status: format!("Status {status_id}"),
+            status_id: status_id.into(),
+            kind: String::new(),
+            priority: String::new(),
+            assignee: String::new(),
+            updated: String::new(),
+            description: String::new(),
+        }
+    }
+
+    fn board_settings() -> BoardSettings {
+        BoardSettings {
+            projects: vec!["ART".into()],
+            columns: ["Open", "Review", "Done"].iter().enumerate().map(|(i, title)| {
+                preferences::Column {
+                    title: (*title).into(),
+                    statuses: vec![preferences::StatusRef {
+                        project_key: "ART".into(),
+                        status_id: (i + 1).to_string(),
+                    }],
+                }
+            }).collect(),
+            ..BoardSettings::default()
+        }
+    }
+
+    #[test]
+    fn hides_zero_issue_columns_but_keeps_their_configuration() {
+        let settings = board_settings();
+        let issues = vec![
+            issue("ART-1", "1", "Relevant issue"),
+            issue("ART-2", "3", "Completed issue"),
+        ];
+        let groups = visible_board_groups(&settings, &issues, "");
+        assert_eq!(
+            groups.iter().map(|(name, _)| name.as_str()).collect::<Vec<_>>(),
+            vec!["Open", "Done"],
+        );
+        assert_eq!(settings.columns.len(), 3);
+    }
+
+    #[test]
+    fn hides_columns_that_become_empty_after_search_or_scope_filter() {
+        let settings = board_settings();
+        // The issues slice already represents the server-filtered Mine/Unassigned/All scope.
+        let issues = vec![
+            issue("ART-1", "1", "Relevant issue"),
+            issue("ART-2", "3", "Completed issue"),
+        ];
+        let groups = visible_board_groups(&settings, &issues, "Relevant");
+        assert_eq!(
+            groups.iter().map(|(name, _)| name.as_str()).collect::<Vec<_>>(),
+            vec!["Open"],
+        );
+        assert!(visible_board_groups(&settings, &issues, "no matches").is_empty());
+        assert!(visible_board_groups(&settings, &[], "").is_empty());
+    }
+
+    #[test]
+    fn keeps_other_column_only_when_unmapped_issues_exist() {
+        let settings = board_settings();
+        let issues = vec![issue("ART-404", "other", "Unmapped")];
+        let groups = visible_board_groups(&settings, &issues, "");
+        assert_eq!(
+            groups.iter().map(|(name, _)| name.as_str()).collect::<Vec<_>>(),
+            vec!["Other"],
+        );
+    }
+
     #[test]
     fn board_scope_uses_server_side_jql() {
         assert_eq!(IssueScope::Mine.jql(), Some("assignee = currentUser()"));
