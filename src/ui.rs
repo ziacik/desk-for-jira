@@ -1292,17 +1292,23 @@ fn column_label(
     format!("{} · {}", column.title, project_keys.join(", "))
 }
 
-fn render_board(ui: &Ui, state: &State) {
-    clear_box(&ui.board_box);
-    if state.settings.projects.is_empty() {
-        show_empty(&ui.board_box, "Choose projects", "Use Choose projects… to set up your board.");
-        return;
-    }
-    let text = ui.search.text().to_lowercase();
-    let mut groups: Vec<(String, Vec<&Issue>, Vec<preferences::StatusRef>)> = state.settings.columns.iter()
-        .filter(|c| c.statuses.iter().any(|s| state.settings.projects.contains(&s.project_key)))
-        .map(|c| (column_label(c, &state.settings.columns, &state.settings.projects), Vec::new(), c.statuses.clone())).collect();
-    for issue in &state.issues {
+fn visible_board_groups<'a>(
+    settings: &BoardSettings,
+    issues: &'a [Issue],
+    search: &str,
+) -> Vec<(String, Vec<&'a Issue>)> {
+    let text = search.to_lowercase();
+    let mut groups: Vec<(String, Vec<&Issue>, Vec<preferences::StatusRef>)> = settings.columns.iter()
+        .filter(|column| column.statuses.iter()
+            .any(|status| settings.projects.contains(&status.project_key)))
+        .map(|column| (
+            column_label(column, &settings.columns, &settings.projects),
+            Vec::new(),
+            column.statuses.clone(),
+        ))
+        .collect();
+
+    for issue in issues {
         if !text.is_empty()
             && !issue.key.to_lowercase().contains(&text)
             && !issue.summary.to_lowercase().contains(&text)
@@ -1314,23 +1320,44 @@ fn render_board(ui: &Ui, state: &State) {
             project_key: issue.project_key.clone(),
             status_id: issue.status_id.clone(),
         };
-        if let Some((_, items, _)) = groups.iter_mut().find(|(_, _, refs)| refs.contains(&reference)) {
-            items.push(issue);
+        if let Some((_, matches, _)) = groups.iter_mut()
+            .find(|(_, _, statuses)| statuses.contains(&reference))
+        {
+            matches.push(issue);
+        } else if let Some((_, matches, _)) = groups.iter_mut()
+            .find(|(title, _, _)| title == "Other")
+        {
+            matches.push(issue);
         } else {
-            let index = groups.iter().position(|(title, _, _)| title == "Other");
-            if let Some(index) = index {
-                groups[index].1.push(issue);
-            } else {
-                groups.push(("Other".into(), vec![issue], Vec::new()));
-            }
+            groups.push(("Other".into(), vec![issue], Vec::new()));
         }
     }
+
+    // Empty columns remain in board settings and the column editor.
+    // Only the current scope/search result determines what is rendered.
+    groups.into_iter()
+        .filter_map(|(name, matches, _)| (!matches.is_empty()).then_some((name, matches)))
+        .collect()
+}
+
+fn render_board(ui: &Ui, state: &State) {
+    clear_box(&ui.board_box);
+    if state.settings.projects.is_empty() {
+        show_empty(&ui.board_box, "Choose projects", "Use Choose projects… to set up your board.");
+        return;
+    }
+    let search = ui.search.text();
+    let groups = visible_board_groups(&state.settings, &state.issues, search.as_str());
     if groups.is_empty() {
-        show_empty(&ui.board_box, "No workflow statuses", "There are no statuses to display.");
+        show_empty(
+            &ui.board_box,
+            "No matching issues",
+            "No issues match the current filter or search.",
+        );
         return;
     }
     let url = state.account.as_ref().map(|a| a.base_url.as_str()).unwrap_or("");
-    for (name, issues, _) in groups {
+    for (name, issues) in groups {
         let column = gtk::Box::new(gtk::Orientation::Vertical, 8);
         column.set_width_request(280);
         let title = gtk::Label::new(Some(&format!("{name}  ({})", issues.len())));
