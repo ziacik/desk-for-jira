@@ -1,5 +1,5 @@
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     rc::Rc,
     sync::mpsc::{self, Sender},
     thread,
@@ -669,6 +669,51 @@ fn show_project_picker(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Even
     search.grab_focus();
 }
 
+// A series of clicks at one screen position must keep moving the SAME column,
+// even though a different card slides underneath that position after each move.
+#[derive(Clone)]
+struct ColumnReorderSession {
+    reference: preferences::StatusRef,
+    card: gtk::Widget,
+    left: bool,
+    press: (f64, f64),
+}
+
+#[derive(Clone, Default)]
+struct ColumnReorderContext {
+    active: Rc<RefCell<Option<ColumnReorderSession>>>,
+    last_press: Rc<Cell<Option<(f64, f64)>>>,
+}
+
+fn same_click_position(a: (f64, f64), b: (f64, f64)) -> bool {
+    (a.0 - b.0).abs() <= 3.0 && (a.1 - b.1).abs() <= 3.0
+}
+
+fn move_editor_column(
+    rows: &gtk::Box,
+    ui: &Ui,
+    state: &Rc<RefCell<State>>,
+    card: &gtk::Widget,
+    reference: &preferences::StatusRef,
+    left: bool,
+) -> bool {
+    let neighbor = if left { card.prev_sibling() } else { card.next_sibling() };
+    let Some(neighbor) = neighbor else { return false; };
+    if !state.borrow_mut().settings.move_visible_column(reference, left) {
+        return false;
+    }
+    if left {
+        let before = neighbor.prev_sibling();
+        rows.reorder_child_after(card, before.as_ref());
+    } else {
+        rows.reorder_child_after(card, Some(&neighbor));
+    }
+    update_editor_positions(rows, state);
+    save_settings(ui, state);
+    render_board(ui, &state.borrow());
+    true
+}
+
 fn show_column_editor(ui: &Ui, state: &Rc<RefCell<State>>) {
     let dialog = gtk::Window::builder()
         .title("Board columns")
@@ -692,7 +737,52 @@ fn show_column_editor(ui: &Ui, state: &Rc<RefCell<State>>) {
     content.append(&intro);
 
     let rows = gtk::Box::new(gtk::Orientation::Vertical, 12);
-    rebuild_editor(&rows, ui, state, &dialog);
+    let reorder = ColumnReorderContext::default();
+
+    // Capture mouse presses before any card button sees them. A repeated press
+    // at the same dialog coordinate is routed to the ORIGINAL column, rather
+    // than whichever different card is now underneath the stationary mouse.
+    let clicks = gtk::GestureClick::new();
+    clicks.set_button(1);
+    clicks.set_propagation_phase(gtk::PropagationPhase::Capture);
+    {
+        let reorder = reorder.clone();
+        let rows = rows.clone();
+        let ui = ui.clone();
+        let state = state.clone();
+        clicks.connect_pressed(move |gesture, _, x, y| {
+            let repeat = reorder.active.borrow().as_ref()
+                .filter(|active| active.card.parent().is_some()
+                    && same_click_position(active.press, (x, y)))
+                .cloned();
+            if let Some(active) = repeat {
+                // Prevent GTK from also clicking the unrelated button under
+                // the pointer; that would swap columns back and forth.
+                gesture.set_state(gtk::EventSequenceState::Claimed);
+                move_editor_column(
+                    &rows, &ui, &state, &active.card, &active.reference, active.left,
+                );
+            } else {
+                reorder.active.borrow_mut().take();
+                reorder.last_press.set(Some((x, y)));
+            }
+        });
+    }
+    dialog.add_controller(clicks);
+
+    let pointer = gtk::EventControllerMotion::new();
+    {
+        let reorder = reorder.clone();
+        pointer.connect_motion(move |_, x, y| {
+            let active = reorder.active.borrow().as_ref()
+                .is_some_and(|session| !same_click_position(session.press, (x, y)));
+            if active {
+                reorder.active.borrow_mut().take();
+            }
+        });
+    }
+    dialog.add_controller(pointer);
+    rebuild_editor(&rows, ui, state, &dialog, &reorder);
     let scroll = gtk::ScrolledWindow::new();
     scroll.set_vexpand(true);
     scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
@@ -720,7 +810,8 @@ fn show_column_editor(ui: &Ui, state: &Rc<RefCell<State>>) {
         let state = state.clone();
         let rows = rows.clone();
         let editor = dialog.clone();
-        reset.connect_clicked(move |_| confirm_column_reset(&ui, &state, &rows, &editor));
+        let reorder = reorder.clone();
+        reset.connect_clicked(move |_| confirm_column_reset(&ui, &state, &rows, &editor, &reorder));
     }
     dialog.present();
 }
@@ -730,7 +821,9 @@ fn rebuild_editor(
     ui: &Ui,
     state: &Rc<RefCell<State>>,
     editor: &gtk::Window,
+    reorder: &ColumnReorderContext,
 ) {
+    reorder.active.borrow_mut().take();
     clear_box(rows);
     let (columns, statuses, projects) = {
         let s = state.borrow();
@@ -786,35 +879,18 @@ fn rebuild_editor(
             let state = state.clone();
             let rows = rows.clone();
             let anchor = column.statuses[0].clone();
+            let reorder = reorder.clone();
             button.connect_clicked(move |button| {
-                // Move the existing card instead of rebuilding it: the GTK widget,
-                // its focused button and all its signal handlers stay intact.
                 let Some(card) = button.parent().and_then(|header| header.parent())
                 else { return; };
-                let sibling = if up { card.prev_sibling() } else { card.next_sibling() };
-                let Some(sibling) = sibling else { return; };
-                if !state.borrow_mut().settings.move_visible_column(&anchor, up) {
-                    return;
-                }
-
-                if up {
-                    let before = sibling.prev_sibling();
-                    rows.reorder_child_after(&card, before.as_ref());
-                } else {
-                    rows.reorder_child_after(&card, Some(&sibling));
-                }
-                update_editor_positions(&rows, &state);
-                save_settings(&ui, &state);
-                render_board(&ui, &state.borrow());
-
-                // At an edge the clicked arrow becomes disabled. Keep focus
-                // within the moved card by using its opposite arrow instead.
-                if button.is_sensitive() {
-                    button.grab_focus();
-                } else {
-                    let opposite = if up { button.next_sibling() } else { button.prev_sibling() };
-                    if let Some(opposite) = opposite.and_downcast::<gtk::Button>() {
-                        opposite.grab_focus();
+                if move_editor_column(&rows, &ui, &state, &card, &anchor, up) {
+                    if let Some(press) = reorder.last_press.get() {
+                        *reorder.active.borrow_mut() = Some(ColumnReorderSession {
+                            reference: anchor.clone(),
+                            card,
+                            left: up,
+                            press,
+                        });
                     }
                 }
             });
