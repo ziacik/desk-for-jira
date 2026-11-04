@@ -14,3 +14,6 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 oo7 = { version = "0.6", default-features = false, features = ["async-std", "native_crypto"] }
 futures-lite = "2"
+
+[lints.rust]
+warnings = "deny"

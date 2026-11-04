@@ -272,9 +272,6 @@ impl JiraClient {
         }).collect())
     }
 
-    pub fn browse_issue_url(&self, key: &str) -> String {
-        format!("{}/browse/{}", self.account.base_url, key)
-    }
 }
 
 fn parse_issues(data: &Value) -> Vec<Issue> {

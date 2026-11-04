@@ -24,5 +24,8 @@ jobs:
       - name: Cargo check
         run: cargo check --all-targets
 
+      - name: Cargo clippy
+        run: cargo clippy --all-targets -- -D warnings
+
       - name: Cargo test
         run: cargo test
