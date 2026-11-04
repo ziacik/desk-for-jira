@@ -731,7 +731,18 @@ fn rebuild_editor(
     state: &Rc<RefCell<State>>,
     editor: &gtk::Window,
 ) {
+    let _ = rebuild_editor_focused(rows, ui, state, editor, None);
+}
+
+fn rebuild_editor_focused(
+    rows: &gtk::Box,
+    ui: &Ui,
+    state: &Rc<RefCell<State>>,
+    editor: &gtk::Window,
+    focus: Option<(usize, bool)>,
+) -> Option<gtk::Button> {
     clear_box(rows);
+    let mut focus_button = None;
     let (columns, statuses, projects) = {
         let s = state.borrow();
         (s.settings.columns.clone(), s.statuses.clone(), s.settings.projects.clone())
@@ -781,13 +792,23 @@ fn rebuild_editor(
             let button = gtk::Button::builder().icon_name(icon).build();
             button.set_tooltip_text(Some(tooltip));
             button.set_sensitive(destination.is_some());
+            if focus == Some((index, up)) {
+                focus_button = Some(button.clone());
+            }
             header.append(&button);
             let ui = ui.clone();
             let state = state.clone();
             let rows = rows.clone();
             let editor = editor.clone();
             button.connect_clicked(move |_| {
-                if let Some(destination) = destination {
+                let Some(destination) = destination else { return; };
+                // Rebuilding removes all row widgets. Preserve the scroll position
+                // and focus the same arrow in the moved card for repeated moves.
+                let scroller = rows.ancestor(gtk::ScrolledWindow::static_type())
+                    .and_downcast::<gtk::ScrolledWindow>();
+                let scroll_position = scroller.as_ref().map(|s| s.vadjustment().value());
+
+                {
                     let mut s = state.borrow_mut();
                     if up {
                         for i in (destination + 1..=index).rev() {
@@ -798,8 +819,20 @@ fn rebuild_editor(
                             s.settings.move_column(i, false);
                         }
                     }
-                    drop(s);
-                    refresh_column_editor(&ui, &state, &rows, &editor);
+                }
+                save_settings(&ui, &state);
+                render_board(&ui, &state.borrow());
+                let new_focus = rebuild_editor_focused(
+                    &rows, &ui, &state, &editor, Some((destination, up)),
+                );
+                if let (Some(scroller), Some(scroll_position)) = (scroller, scroll_position) {
+                    glib::idle_add_local_once(move || {
+                        scroller.vadjustment().set_value(scroll_position);
+                        // GTK scrolls minimally if the moved card is off screen.
+                        if let Some(button) = new_focus {
+                            button.grab_focus();
+                        }
+                    });
                 }
             });
         }
@@ -904,6 +937,7 @@ fn rebuild_editor(
         empty.add_css_class("dim-label");
         rows.append(&empty);
     }
+    focus_button
 }
 
 fn show_add_status_picker(
