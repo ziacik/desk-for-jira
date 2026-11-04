@@ -29,9 +29,14 @@ impl BoardSettings {
     /// Use actual workflow status IDs, never Jira board columns or matching names.
     pub fn reconcile(&mut self, available: &[ProjectStatus]) {
         let valid: HashSet<_> = available.iter().map(ProjectStatus::reference).collect();
+        let selected: HashSet<_> = self.projects.iter().map(String::as_str).collect();
         let mut seen = HashSet::new();
         for column in &mut self.columns {
-            column.statuses.retain(|s| valid.contains(s) && seen.insert(s.clone()));
+            // Keep mappings for temporarily deselected projects.
+            column.statuses.retain(|s| {
+                (!selected.contains(s.project_key.as_str()) || valid.contains(s))
+                    && seen.insert(s.clone())
+            });
         }
         self.columns.retain(|c| !c.statuses.is_empty());
         for status in available {
@@ -111,6 +116,23 @@ mod tests {
         board.move_status(&b.reference(), Some(0), &b.name);
         assert_eq!(board.columns.len(), 1);
         board.reconcile(&[a, b]);
+        assert_eq!(board.columns[0].statuses.len(), 2);
+    }
+    #[test]
+    fn deselecting_a_project_does_not_forget_its_mappings() {
+        let art = status("ART", "1", "Review");
+        let afb = status("AFB", "2", "Review");
+        let mut board = BoardSettings {
+            projects: vec!["ART".into(), "AFB".into()],
+            ..BoardSettings::default()
+        };
+        board.reconcile(&[art.clone(), afb.clone()]);
+        board.move_status(&afb.reference(), Some(0), &afb.name);
+        board.projects = vec!["ART".into()];
+        board.reconcile(&[art.clone()]);
+        assert_eq!(board.columns[0].statuses.len(), 2);
+        board.projects.push("AFB".into());
+        board.reconcile(&[art, afb]);
         assert_eq!(board.columns[0].statuses.len(), 2);
     }
     #[test]
