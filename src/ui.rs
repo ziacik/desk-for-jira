@@ -285,7 +285,7 @@ fn build_ui(app: &adw::Application) {
         ui.window.add_controller(keys);
     }
     let css = gtk::CssProvider::new();
-    css.load_from_data(
+    css.load_from_string(
         "button.issue-card { padding: 0; border-radius: 10px; }\n\
          button.issue-card.selected-issue { outline: 2px solid @accent_color; outline-offset: -2px; }"
     );
@@ -1492,10 +1492,17 @@ fn render_board(ui: &Ui, state: &State) {
         let collapsed_content = gtk::Box::new(gtk::Orientation::Vertical, 8);
         let expand_icon = gtk::Image::from_icon_name("pan-end-symbolic");
         collapsed_content.append(&expand_icon);
-        let collapsed_title = gtk::Label::new(Some(&format!("{name} ({issue_count})")));
-        collapsed_title.add_css_class("heading");
-        collapsed_title.set_angle(270.0);
+        let abbreviation: String = if name.split_whitespace().count() > 1 {
+            name.split_whitespace().filter_map(|word| word.chars().next()).take(3).collect()
+        } else {
+            name.chars().take(3).collect()
+        };
+        let collapsed_title = gtk::Label::new(Some(&abbreviation));
+        collapsed_title.add_css_class("caption");
         collapsed_content.append(&collapsed_title);
+        let collapsed_count = gtk::Label::new(Some(&issue_count.to_string()));
+        collapsed_count.add_css_class("dim-label");
+        collapsed_content.append(&collapsed_count);
         expand.set_child(Some(&collapsed_content));
         collapsed.append(&expand);
         column.append(&collapsed);
