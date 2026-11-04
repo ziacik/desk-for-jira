@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::{collections::HashSet, time::Duration};
 
 use anyhow::{Context, Result, bail, ensure};
 use reqwest::blocking::{Client, RequestBuilder};
@@ -7,7 +7,7 @@ use serde_json::{Value, json};
 
 const PAGE_SIZE: usize = 100;
 const MAX_ITEMS: usize = 500;
-const FIELDS: [&str; 8] = [
+const FIELDS: [&str; 9] = [
     "summary",
     "status",
     "assignee",
@@ -16,6 +16,7 @@ const FIELDS: [&str; 8] = [
     "updated",
     "description",
     "reporter",
+    "project",
 ];
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -54,6 +55,7 @@ impl Credentials {
 #[derive(Clone, Debug)]
 pub struct Issue {
     pub key: String,
+    pub project_key: String,
     pub summary: String,
     pub status: String,
     pub status_id: String,
@@ -65,16 +67,16 @@ pub struct Issue {
 }
 
 #[derive(Clone, Debug)]
-pub struct Board {
-    pub id: u64,
+pub struct Project {
+    pub key: String,
     pub name: String,
-    pub board_type: String,
 }
 
 #[derive(Clone, Debug)]
-pub struct BoardColumn {
+pub struct ProjectStatus {
+    pub project_key: String,
+    pub id: String,
     pub name: String,
-    pub status_ids: Vec<String>,
 }
 
 pub struct JiraClient {
@@ -130,10 +132,6 @@ impl JiraClient {
             .unwrap_or("Jira user").to_owned())
     }
 
-    pub fn my_issues(&self) -> Result<Vec<Issue>> {
-        self.search_issues("assignee = currentUser() ORDER BY updated DESC")
-    }
-
     pub fn search_issues(&self, jql: &str) -> Result<Vec<Issue>> {
         let mut result = Vec::new();
         let mut next_token: Option<String> = None;
@@ -179,99 +177,86 @@ impl JiraClient {
         Ok(result)
     }
 
-    pub fn boards(&self) -> Result<Vec<Board>> {
-        let mut boards = Vec::new();
-        let mut start = 0usize;
-        loop {
-            let data = self.read_json(
-                self.http.get(self.url("/rest/agile/1.0/board"))
-                    .query(&[("startAt", start), ("maxResults", PAGE_SIZE)])
-            )?;
-            let page: Vec<Board> = data.get("values").and_then(Value::as_array)
-                .into_iter().flatten().filter_map(|v| {
-                    Some(Board {
-                        id: v.get("id")?.as_u64()?,
-                        name: v.get("name")?.as_str()?.to_owned(),
-                        board_type: v.get("type").and_then(Value::as_str).unwrap_or("board").to_owned(),
-                    })
-                }).collect();
-            let count = page.len();
-            boards.extend(page);
-            start += count;
-            if count == 0 || boards.len() >= MAX_ITEMS
-                || data.get("isLast").and_then(Value::as_bool) == Some(true) {
-                break;
-            }
-        }
-        boards.truncate(MAX_ITEMS);
-        Ok(boards)
-    }
-
-    pub fn board_issues(&self, board_id: u64, jql: Option<&str>) -> Result<Vec<Issue>> {
-        self.fetch_board_issues(board_id, "issue", jql)
-    }
-
-    pub fn board_backlog(&self, board_id: u64, jql: Option<&str>) -> Result<Vec<Issue>> {
-        self.fetch_board_issues(board_id, "backlog", jql)
-    }
-
-    fn fetch_board_issues(&self, board_id: u64, section: &str, jql: Option<&str>) -> Result<Vec<Issue>> {
-        let mut issues = Vec::new();
-        let mut next_token: Option<String> = None;
-        let mut start = 0usize;
-        loop {
-            let path = if self.account.mode == AuthMode::Cloud {
-                format!("/rest/software/1.0/board/{board_id}/{section}")
-            } else {
-                format!("/rest/agile/1.0/board/{board_id}/{section}")
-            };
-            let mut request = self.http.get(self.url(&path))
-                .query(&[("maxResults", PAGE_SIZE.to_string()),
-                          ("fields", FIELDS.join(","))]);
-            if let Some(jql) = jql {
-                request = request.query(&[("jql", jql)]);
-            }
-            if let Some(ref token) = next_token {
-                request = request.query(&[("nextPageToken", token)]);
-            } else if self.account.mode == AuthMode::Server {
-                request = request.query(&[("startAt", start.to_string())]);
-            }
-            let data = self.read_json(request)?;
-            let page = parse_issues(&data);
-            let count = page.len();
-            issues.extend(page);
-            if count == 0 || issues.len() >= MAX_ITEMS {
-                break;
-            }
-            if self.account.mode == AuthMode::Cloud {
-                next_token = data.get("nextPageToken").and_then(Value::as_str).map(str::to_owned);
-                if next_token.is_none() || data.get("isLast").and_then(Value::as_bool) == Some(true) {
-                    break;
-                }
-            } else {
+    pub fn projects(&self) -> Result<Vec<Project>> {
+        let mut projects = Vec::new();
+        if self.account.mode == AuthMode::Server {
+            let data = self.read_json(self.http.get(self.url("/rest/api/2/project")))?;
+            let values = data.as_array().context("Unexpected Jira projects response")?;
+            projects.extend(values.iter().filter_map(parse_project));
+        } else {
+            let mut start = 0usize;
+            loop {
+                let data = self.read_json(self.http.get(self.url("/rest/api/3/project/search"))
+                    .query(&[("startAt", start), ("maxResults", PAGE_SIZE)]))?;
+                let values = data.get("values").and_then(Value::as_array)
+                    .context("Unexpected Jira projects response")?;
+                let count = values.len();
+                projects.extend(values.iter().filter_map(parse_project));
                 start += count;
-                if start >= data.get("total").and_then(Value::as_u64).unwrap_or(start as u64) as usize {
+                if count == 0 || data.get("isLast").and_then(Value::as_bool) == Some(true) {
                     break;
                 }
             }
         }
-        issues.truncate(MAX_ITEMS);
-        Ok(issues)
+        projects.sort_by(|a, b| a.key.cmp(&b.key));
+        Ok(projects)
     }
 
-    pub fn board_columns(&self, board_id: u64) -> Result<Vec<BoardColumn>> {
-        let data = self.read_json(self.http.get(
-            self.url(&format!("/rest/agile/1.0/board/{board_id}/configuration"))
-        ))?;
-        let cols = data.pointer("/columnConfig/columns").and_then(Value::as_array);
-        Ok(cols.into_iter().flatten().map(|v| BoardColumn {
-            name: v.get("name").and_then(Value::as_str).unwrap_or("Column").to_owned(),
-            status_ids: v.get("statuses").and_then(Value::as_array)
-                .into_iter().flatten()
-                .filter_map(|s| s.get("id").and_then(Value::as_str).map(str::to_owned)).collect(),
-        }).collect())
+    pub fn project_statuses(&self, keys: &[String]) -> Result<Vec<ProjectStatus>> {
+        let version = if self.account.mode == AuthMode::Cloud { "3" } else { "2" };
+        let mut statuses = Vec::new();
+        let mut seen = HashSet::new();
+        for key in keys {
+            validate_project_key(key)?;
+            let data = self.read_json(self.http.get(
+                self.url(&format!("/rest/api/{version}/project/{key}/statuses"))
+            ))?;
+            let types = data.as_array().context("Unexpected Jira statuses response")?;
+            for issue_type in types {
+                for status in issue_type.get("statuses").and_then(Value::as_array)
+                    .into_iter().flatten() {
+                    let (Some(id), Some(name)) = (
+                        status.get("id").and_then(Value::as_str),
+                        status.get("name").and_then(Value::as_str),
+                    ) else { continue };
+                    if seen.insert((key.clone(), id.to_owned())) {
+                        statuses.push(ProjectStatus {
+                            project_key: key.clone(), id: id.to_owned(), name: name.to_owned(),
+                        });
+                    }
+                }
+            }
+        }
+        Ok(statuses)
     }
 
+    pub fn project_issues(&self, keys: &[String], scope: Option<&str>) -> Result<Vec<Issue>> {
+        if keys.is_empty() { return Ok(Vec::new()); }
+        for key in keys { validate_project_key(key)?; }
+        let projects = keys.join(", ");
+        let mut jql = format!("project IN ({projects})");
+        if let Some(scope) = scope {
+            jql.push_str(" AND (");
+            jql.push_str(scope);
+            jql.push(')');
+        }
+        jql.push_str(" ORDER BY updated DESC");
+        self.search_issues(&jql)
+    }
+
+}
+
+fn parse_project(data: &Value) -> Option<Project> {
+    Some(Project {
+        key: data.get("key")?.as_str()?.to_owned(),
+        name: data.get("name")?.as_str()?.to_owned(),
+    })
+}
+
+fn validate_project_key(key: &str) -> Result<()> {
+    ensure!(!key.is_empty() && key.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-'),
+        "Invalid Jira project key: {key}");
+    Ok(())
 }
 
 fn parse_issues(data: &Value) -> Vec<Issue> {
@@ -286,6 +271,9 @@ fn parse_issue(v: &Value) -> Option<Issue> {
     let nested = |key: &str, name: &str| f.get(key).and_then(|v| v.get(name))
         .and_then(Value::as_str).unwrap_or("").to_owned();
     Some(Issue {
+        project_key: f.get("project").and_then(|p| p.get("key"))
+            .and_then(Value::as_str).map(str::to_owned)
+            .unwrap_or_else(|| key.split('-').next().unwrap_or("").to_owned()),
         key,
         summary: field("summary"),
         status: nested("status", "name"),
