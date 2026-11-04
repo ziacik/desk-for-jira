@@ -270,25 +270,30 @@ fn wire_actions(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>) {
         let ui = ui.clone();
         let state = state.clone();
         let sender = sender.clone();
-        ui.manage_projects_button.connect_clicked(move |_| show_project_picker(&ui, &state, &sender));
+        let button = ui.manage_projects_button.clone();
+        button.connect_clicked(move |_| show_project_picker(&ui, &state, &sender));
     }
     {
         let ui = ui.clone();
         let state = state.clone();
-        ui.manage_columns_button.connect_clicked(move |_| show_column_editor(&ui, &state));
+        let button = ui.manage_columns_button.clone();
+        button.connect_clicked(move |_| show_column_editor(&ui, &state));
     }
     {
         let ui = ui.clone();
         let state = state.clone();
         let sender = sender.clone();
-        ui.connect_button.connect_clicked(move |_| show_login(&ui, &state, &sender));
+        let button = ui.connect_button.clone();
+        button.connect_clicked(move |_| show_login(&ui, &state, &sender));
     }
     {
         let ui = ui.clone();
         let state = state.clone();
         let sender = sender.clone();
-        ui.refresh_button.connect_clicked(move |_| {
-            if let Some(account) = state.borrow().account.clone() {
+        let button = ui.refresh_button.clone();
+        button.connect_clicked(move |_| {
+            let account = { state.borrow().account.clone() };
+            if let Some(account) = account {
                 start_refresh(&ui, &state, &sender, account, false);
             } else {
                 show_login(&ui, &state, &sender);
@@ -298,13 +303,15 @@ fn wire_actions(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>) {
     {
         let ui = ui.clone();
         let state = state.clone();
-        ui.search.connect_search_changed(move |_| render_board(&ui, &state.borrow()));
+        let button = ui.search.clone();
+        button.connect_search_changed(move |_| render_board(&ui, &state.borrow()));
     }
     {
         let ui = ui.clone();
         let state = state.clone();
         let sender = sender.clone();
-        ui.disconnect_button.connect_clicked(move |_| {
+        let button = ui.disconnect_button.clone();
+        button.connect_clicked(move |_| {
             let id = {
                 let mut s = state.borrow_mut();
                 s.generation += 1;
