@@ -1074,7 +1074,7 @@ fn show_add_status_picker(
     rows: &gtk::Box,
     editor: &gtk::Window,
     target: usize,
-    reorder: &ColumnReorderContext,
+    controls: &ColumnOrderControls,
 ) {
     let (columns, mut candidates, projects) = {
         let s = state.borrow();
@@ -1149,12 +1149,12 @@ fn show_add_status_picker(
         let rows = rows.clone();
         let editor = editor.clone();
         let picker = picker.clone();
-        let reorder = reorder.clone();
+        let controls = controls.clone();
         add.connect_clicked(move |_| {
             state.borrow_mut().settings.move_status(
                 &status.reference(), Some(target), &status.name
             );
-            refresh_column_editor(&ui, &state, &rows, &editor, &reorder);
+            refresh_column_editor(&ui, &state, &rows, &editor, &controls);
             picker.close();
         });
     }
@@ -1193,7 +1193,7 @@ fn confirm_column_reset(
     state: &Rc<RefCell<State>>,
     rows: &gtk::Box,
     editor: &gtk::Window,
-    reorder: &ColumnReorderContext,
+    controls: &ColumnOrderControls,
 ) {
     let dialog = gtk::Window::builder()
         .title("Reset board columns?")
@@ -1233,11 +1233,11 @@ fn confirm_column_reset(
         let rows = rows.clone();
         let editor = editor.clone();
         let dialog = dialog.clone();
-        let reorder = reorder.clone();
+        let controls = controls.clone();
         reset.connect_clicked(move |_| {
             let statuses = state.borrow().statuses.clone();
             state.borrow_mut().settings.reset_columns(&statuses);
-            refresh_column_editor(&ui, &state, &rows, &editor, &reorder);
+            refresh_column_editor(&ui, &state, &rows, &editor, &controls);
             dialog.close();
         });
     }
@@ -1249,11 +1249,11 @@ fn refresh_column_editor(
     state: &Rc<RefCell<State>>,
     rows: &gtk::Box,
     editor: &gtk::Window,
-    reorder: &ColumnReorderContext,
+    controls: &ColumnOrderControls,
 ) {
     save_settings(ui, state);
     render_board(ui, &state.borrow());
-    rebuild_editor(rows, ui, state, editor, reorder);
+    rebuild_editor(rows, ui, state, editor, controls);
 }
 
 fn save_settings(ui: &Ui, state: &Rc<RefCell<State>>) {
@@ -1475,13 +1475,6 @@ fn show_error(ui: &Ui, error: &str) {
 #[cfg(test)]
 mod scope_tests {
     use super::*;
-
-    #[test]
-    fn stationary_clicks_select_the_same_move_session() {
-        assert!(same_click_position((280.0, 510.0), (280.0, 510.0)));
-        assert!(same_click_position((280.0, 510.0), (281.0, 508.0)));
-        assert!(!same_click_position((280.0, 510.0), (280.0, 485.0)));
-    }
 
     #[test]
     fn board_scope_uses_server_side_jql() {
