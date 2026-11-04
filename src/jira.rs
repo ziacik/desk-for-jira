@@ -208,14 +208,22 @@ impl JiraClient {
     }
 
     pub fn board_issues(&self, board_id: u64) -> Result<Vec<Issue>> {
+        self.fetch_board_issues(board_id, "issue")
+    }
+
+    pub fn board_backlog(&self, board_id: u64) -> Result<Vec<Issue>> {
+        self.fetch_board_issues(board_id, "backlog")
+    }
+
+    fn fetch_board_issues(&self, board_id: u64, section: &str) -> Result<Vec<Issue>> {
         let mut issues = Vec::new();
         let mut next_token: Option<String> = None;
         let mut start = 0usize;
         loop {
             let path = if self.account.mode == AuthMode::Cloud {
-                format!("/rest/software/1.0/board/{board_id}/issue")
+                format!("/rest/software/1.0/board/{board_id}/{section}")
             } else {
-                format!("/rest/agile/1.0/board/{board_id}/issue")
+                format!("/rest/agile/1.0/board/{board_id}/{section}")
             };
             let mut request = self.http.get(self.url(&path))
                 .query(&[("maxResults", PAGE_SIZE.to_string()),

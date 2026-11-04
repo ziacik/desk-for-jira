@@ -1,4 +1,5 @@
 use std::{
+    collections::HashSet,
     cell::{Cell, RefCell},
     rc::Rc,
     sync::mpsc::{self, Sender},
@@ -32,6 +33,9 @@ struct Ui {
     stack: gtk::Stack,
     issue_box: gtk::Box,
     board_box: gtk::Box,
+    board_stack: gtk::Stack,
+    board_switcher: gtk::StackSwitcher,
+    backlog_box: gtk::Box,
     detail_box: gtk::Box,
 }
 
@@ -52,10 +56,17 @@ struct Loaded {
     boards: Result<Vec<Board>, String>,
 }
 
+struct BoardData {
+    issues: Vec<Issue>,
+    columns: Vec<BoardColumn>,
+    backlog: Option<Result<Vec<Issue>, String>>,
+    is_kanban: bool,
+}
+
 enum Event {
     Stored(Result<Option<Credentials>, String>),
     Loaded(u64, Credentials, Result<Loaded, String>),
-    BoardLoaded(u64, u64, Result<(Vec<Issue>, Vec<BoardColumn>), String>),
+    BoardLoaded(u64, u64, Result<BoardData, String>),
     Disconnected(u64, Result<(), String>),
 }
 
@@ -170,7 +181,29 @@ fn build_ui(app: &adw::Application) {
     let board_scroll = gtk::ScrolledWindow::new();
     board_scroll.set_child(Some(&board_box));
     board_scroll.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Never);
-    stack.add_named(&board_scroll, Some("board"));
+
+    let backlog_box = gtk::Box::new(gtk::Orientation::Vertical, 4);
+    backlog_box.set_margin_top(4);
+    backlog_box.set_margin_end(12);
+    let backlog_scroll = gtk::ScrolledWindow::new();
+    backlog_scroll.set_child(Some(&backlog_box));
+    backlog_scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
+
+    let board_stack = gtk::Stack::new();
+    board_stack.set_vexpand(true);
+    board_stack.add_titled(&board_scroll, Some("board"), "Board");
+    board_stack.add_titled(&backlog_scroll, Some("backlog"), "Backlog");
+
+    let board_switcher = gtk::StackSwitcher::new();
+    board_switcher.set_stack(Some(&board_stack));
+    board_switcher.set_halign(gtk::Align::Start);
+    board_switcher.set_visible(false);
+
+    let board_page = gtk::Box::new(gtk::Orientation::Vertical, 8);
+    board_page.set_vexpand(true);
+    board_page.append(&board_switcher);
+    board_page.append(&board_stack);
+    stack.add_named(&board_page, Some("board"));
     center.append(&stack);
 
     let detail_box = gtk::Box::new(gtk::Orientation::Vertical, 12);
@@ -221,6 +254,9 @@ fn build_ui(app: &adw::Application) {
         stack,
         issue_box,
         board_box,
+        board_stack,
+        board_switcher,
+        backlog_box,
         detail_box,
     };
 
@@ -321,6 +357,8 @@ fn wire_actions(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>) {
             ui.spinner.set_visible(false);
             clear_box(&ui.boards_box);
             ui.manage_boards_button.set_sensitive(false);
+            ui.board_switcher.set_visible(false);
+            clear_box(&ui.backlog_box);
             ui.center_title.set_text("My issues");
             ui.stack.set_visible_child_name("issues");
             ui.search.set_visible(true);
@@ -394,11 +432,39 @@ fn handle_event(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>, eve
             }
             set_busy(ui, state, false);
             match result {
-                Ok((issues, columns)) => {
-                    ui.status.set_text(&format!("{} issues on this board", issues.len()));
+                Ok(data) => {
                     let base_url = state.borrow().account.as_ref()
                         .map(|a| a.base_url.clone()).unwrap_or_default();
-                    render_board(ui, issues, columns, &base_url);
+
+                    // The board endpoint can include backlog issues. Do not display
+                    // the same ticket in both the Kanban board and its backlog.
+                    let backlog_keys: HashSet<&str> = data.backlog.as_ref()
+                        .and_then(|result| result.as_ref().ok())
+                        .into_iter()
+                        .flatten()
+                        .map(|issue| issue.key.as_str())
+                        .collect();
+                    let board_issues: Vec<Issue> = data.issues.into_iter()
+                        .filter(|issue| !backlog_keys.contains(issue.key.as_str()))
+                        .collect();
+                    let board_count = board_issues.len();
+                    render_board(ui, board_issues, data.columns, &base_url, data.is_kanban);
+
+                    match data.backlog {
+                        Some(Ok(backlog)) => {
+                            ui.status.set_text(&format!(
+                                "{} board issues · {} backlog issues", board_count, backlog.len()
+                            ));
+                            render_backlog(ui, &backlog, &base_url);
+                        }
+                        Some(Err(error)) => {
+                            ui.status.set_text(&format!("{} issues on this board", board_count));
+                            show_empty(&ui.backlog_box, "Backlog unavailable", &error);
+                        }
+                        None => {
+                            ui.status.set_text(&format!("{} issues on this board", board_count));
+                        }
+                    }
                 }
                 Err(error) => {
                     show_empty(&ui.board_box, "Could not load this board", &error);
@@ -449,18 +515,28 @@ fn start_board_load(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>,
     };
     ui.center_title.set_text(&format!("{} · {}", board.name, board.board_type));
     ui.stack.set_visible_child_name("board");
+    ui.board_stack.set_visible_child_name("board");
+    ui.board_switcher.set_visible(
+        board.board_type.eq_ignore_ascii_case("kanban")
+            || board.board_type.eq_ignore_ascii_case("scrum")
+    );
     ui.search.set_visible(false);
     show_empty(&ui.board_box, "Loading board…", "Fetching issues and columns");
+    show_empty(&ui.backlog_box, "Loading backlog…", "Fetching Jira backlog issues");
     show_detail_placeholder(&ui.detail_box);
     let Some(account) = account else { return; };
     set_busy(ui, state, true);
     let sender = sender.clone();
     thread::spawn(move || {
-        let result = (|| -> anyhow::Result<(Vec<Issue>, Vec<BoardColumn>)> {
+        let result = (|| -> anyhow::Result<BoardData> {
             let client = JiraClient::new(account)?;
             let issues = client.board_issues(board.id)?;
             let columns = client.board_columns(board.id).unwrap_or_default();
-            Ok((issues, columns))
+            let is_kanban = board.board_type.eq_ignore_ascii_case("kanban");
+            let has_backlog = is_kanban || board.board_type.eq_ignore_ascii_case("scrum");
+            let backlog = has_backlog
+                .then(|| client.board_backlog(board.id).map_err(|err| err.to_string()));
+            Ok(BoardData { issues, columns, backlog, is_kanban })
         })().map_err(|err| err.to_string());
         let _ = sender.send(Event::BoardLoaded(id, board.id, result));
     });
@@ -751,8 +827,12 @@ fn render_my_issues(ui: &Ui, state: &State) {
     }
 }
 
-fn render_board(ui: &Ui, issues: Vec<Issue>, columns: Vec<BoardColumn>, base_url: &str) {
+fn render_board(ui: &Ui, issues: Vec<Issue>, columns: Vec<BoardColumn>, base_url: &str, is_kanban: bool) {
     clear_box(&ui.board_box);
+    // Kanban's separately configured Backlog is not an active board column.
+    let columns: Vec<BoardColumn> = columns.into_iter()
+        .filter(|column| !(is_kanban && column.name.eq_ignore_ascii_case("backlog")))
+        .collect();
     let mut groups: Vec<(String, Vec<Issue>)> = columns.iter()
         .map(|c| (c.name.clone(), Vec::new())).collect();
     if groups.is_empty() {
@@ -797,6 +877,55 @@ fn render_board(ui: &Ui, issues: Vec<Issue>, columns: Vec<BoardColumn>, base_url
         scroll.set_vexpand(true);
         column.append(&scroll);
         ui.board_box.append(&column);
+    }
+}
+
+fn render_backlog(ui: &Ui, issues: &[Issue], base_url: &str) {
+    clear_box(&ui.backlog_box);
+    if issues.is_empty() {
+        show_empty(&ui.backlog_box, "Backlog is empty", "There are no issues in this backlog.");
+        return;
+    }
+
+    let count = gtk::Label::new(Some(&format!("{} issues · ordered by Jira rank", issues.len())));
+    count.add_css_class("dim-label");
+    count.set_xalign(0.0);
+    count.set_margin_bottom(8);
+    ui.backlog_box.append(&count);
+
+    for issue in issues {
+        let row = gtk::Button::new();
+        row.add_css_class("flat");
+        row.set_halign(gtk::Align::Fill);
+        let contents = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+        contents.set_margin_top(7);
+        contents.set_margin_bottom(7);
+        contents.set_margin_start(8);
+        contents.set_margin_end(8);
+
+        let key = gtk::Label::new(Some(&issue.key));
+        key.add_css_class("dim-label");
+        key.set_width_chars(13);
+        key.set_xalign(0.0);
+        contents.append(&key);
+
+        let summary = gtk::Label::new(Some(&issue.summary));
+        summary.set_xalign(0.0);
+        summary.set_hexpand(true);
+        summary.set_ellipsize(gtk::pango::EllipsizeMode::End);
+        contents.append(&summary);
+
+        let status = gtk::Label::new(Some(&issue.status));
+        status.add_css_class("dim-label");
+        status.set_ellipsize(gtk::pango::EllipsizeMode::End);
+        contents.append(&status);
+
+        row.set_child(Some(&contents));
+        let issue = issue.clone();
+        let detail_box = ui.detail_box.clone();
+        let base_url = base_url.to_owned();
+        row.connect_clicked(move |_| show_detail(&detail_box, &issue, &base_url));
+        ui.backlog_box.append(&row);
     }
 }
 

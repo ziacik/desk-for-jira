@@ -8,7 +8,8 @@ A native GNOME desktop client to browse **your Jira issues and boards**.
 - Credentials stored in the desktop keyring using Secret Service / oo7, not in plaintext files
 - Your assigned tickets, with local search
 - Pin a few favourite boards in the sidebar; search and select boards in **Manage boards…**
-- Browse the pinned boards and their issues, grouped by board columns when available
+- Browse pinned boards, with a separate **Board / Backlog** switch for Kanban and Scrum boards
+- Read ranked backlog issues in a compact list; board columns only show active board tickets
 - Read issue descriptions and open tickets in the browser
 - Manual refresh, account switch and disconnect
 - Nonblocking network requests; no Jira credentials in logs
