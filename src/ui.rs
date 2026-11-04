@@ -731,18 +731,7 @@ fn rebuild_editor(
     state: &Rc<RefCell<State>>,
     editor: &gtk::Window,
 ) {
-    let _ = rebuild_editor_focused(rows, ui, state, editor, None);
-}
-
-fn rebuild_editor_focused(
-    rows: &gtk::Box,
-    ui: &Ui,
-    state: &Rc<RefCell<State>>,
-    editor: &gtk::Window,
-    focus: Option<(usize, bool)>,
-) -> Option<gtk::Button> {
     clear_box(rows);
-    let mut focus_button = None;
     let (columns, statuses, projects) = {
         let s = state.borrow();
         (s.settings.columns.clone(), s.statuses.clone(), s.settings.projects.clone())
@@ -792,47 +781,41 @@ fn rebuild_editor_focused(
             let button = gtk::Button::builder().icon_name(icon).build();
             button.set_tooltip_text(Some(tooltip));
             button.set_sensitive(destination.is_some());
-            if focus == Some((index, up)) {
-                focus_button = Some(button.clone());
-            }
             header.append(&button);
             let ui = ui.clone();
             let state = state.clone();
             let rows = rows.clone();
-            let editor = editor.clone();
-            button.connect_clicked(move |_| {
-                let Some(destination) = destination else { return; };
-                // Rebuilding removes all row widgets. Preserve the scroll position
-                // and focus the same arrow in the moved card for repeated moves.
-                let scroller = rows.ancestor(gtk::ScrolledWindow::static_type())
-                    .and_downcast::<gtk::ScrolledWindow>();
-                let scroll_position = scroller.as_ref().map(|s| s.vadjustment().value());
-
-                {
-                    let mut s = state.borrow_mut();
-                    if up {
-                        for i in (destination + 1..=index).rev() {
-                            s.settings.move_column(i, true);
-                        }
-                    } else {
-                        for i in index..destination {
-                            s.settings.move_column(i, false);
-                        }
-                    }
+            let anchor = column.statuses[0].clone();
+            button.connect_clicked(move |button| {
+                // Move the existing card instead of rebuilding it: the GTK widget,
+                // its focused button and all its signal handlers stay intact.
+                let Some(card) = button.parent().and_then(|header| header.parent())
+                else { return; };
+                let sibling = if up { card.prev_sibling() } else { card.next_sibling() };
+                let Some(sibling) = sibling else { return; };
+                if !state.borrow_mut().settings.move_visible_column(&anchor, up) {
+                    return;
                 }
+
+                if up {
+                    let before = sibling.prev_sibling();
+                    rows.reorder_child_after(&card, before.as_ref());
+                } else {
+                    rows.reorder_child_after(&card, Some(&sibling));
+                }
+                update_editor_positions(&rows, &state);
                 save_settings(&ui, &state);
                 render_board(&ui, &state.borrow());
-                let new_focus = rebuild_editor_focused(
-                    &rows, &ui, &state, &editor, Some((destination, up)),
-                );
-                if let (Some(scroller), Some(scroll_position)) = (scroller, scroll_position) {
-                    glib::idle_add_local_once(move || {
-                        scroller.vadjustment().set_value(scroll_position);
-                        // GTK scrolls minimally if the moved card is off screen.
-                        if let Some(button) = new_focus {
-                            button.grab_focus();
-                        }
-                    });
+
+                // At an edge the clicked arrow becomes disabled. Keep focus
+                // within the moved card by using its opposite arrow instead.
+                if button.is_sensitive() {
+                    button.grab_focus();
+                } else {
+                    let opposite = if up { button.next_sibling() } else { button.prev_sibling() };
+                    if let Some(opposite) = opposite.and_downcast::<gtk::Button>() {
+                        opposite.grab_focus();
+                    }
                 }
             });
         }
@@ -868,8 +851,15 @@ fn rebuild_editor_focused(
             let state = state.clone();
             let rows = rows.clone();
             let editor = editor.clone();
+            let anchor = column.statuses[0].clone();
             rename.connect_clicked(move |_| {
-                if state.borrow_mut().settings.rename_column(index, &name.text()) {
+                let renamed = {
+                    let mut s = state.borrow_mut();
+                    let index = s.settings.columns.iter()
+                        .position(|column| column.statuses.contains(&anchor));
+                    index.is_some_and(|index| s.settings.rename_column(index, &name.text()))
+                };
+                if renamed {
                     refresh_column_editor(&ui, &state, &rows, &editor);
                 }
             });
@@ -924,9 +914,17 @@ fn rebuild_editor_focused(
             let state = state.clone();
             let rows = rows.clone();
             let editor = editor.clone();
-            add.connect_clicked(move |_| show_add_status_picker(
-                &ui, &state, &rows, &editor, index
-            ));
+            let anchor = column.statuses[0].clone();
+            add.connect_clicked(move |_| {
+                let target = {
+                    let s = state.borrow();
+                    s.settings.columns.iter()
+                        .position(|column| column.statuses.contains(&anchor))
+                };
+                if let Some(target) = target {
+                    show_add_status_picker(&ui, &state, &rows, &editor, target);
+                }
+            });
         }
 
         rows.append(&card);
@@ -937,7 +935,35 @@ fn rebuild_editor_focused(
         empty.add_css_class("dim-label");
         rows.append(&empty);
     }
-    focus_button
+}
+
+fn update_editor_positions(rows: &gtk::Box, state: &Rc<RefCell<State>>) {
+    let s = state.borrow();
+    let columns = &s.settings.columns;
+    let projects = &s.settings.projects;
+    let visible: Vec<_> = columns.iter()
+        .filter(|column| column.statuses.iter()
+            .any(|status| projects.contains(&status.project_key)))
+        .collect();
+
+    let mut child = rows.first_child();
+    for (position, column) in visible.iter().enumerate() {
+        let Some(card) = child else { break; };
+        let Some(header) = card.first_child() else { break; };
+        let Some(heading) = header.first_child().and_downcast::<gtk::Label>()
+        else { break; };
+        let Some(left) = heading.next_sibling().and_downcast::<gtk::Button>()
+        else { break; };
+        let Some(right) = left.next_sibling().and_downcast::<gtk::Button>()
+        else { break; };
+
+        heading.set_label(&format!(
+            "{}. {}", position + 1, column_label(column, columns, projects)
+        ));
+        left.set_sensitive(position > 0);
+        right.set_sensitive(position + 1 < visible.len());
+        child = card.next_sibling();
+    }
 }
 
 fn show_add_status_picker(
