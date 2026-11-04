@@ -712,7 +712,11 @@ fn rebuild_editor(rows: &gtk::Box, ui: &Ui, state: &Rc<RefCell<State>>) {
         let s = state.borrow();
         (s.settings.columns.clone(), s.statuses.clone(), s.settings.projects.clone())
     };
-    let choices: Vec<String> = columns.iter().map(|column| column.title.clone())
+    let visible: Vec<usize> = columns.iter().enumerate()
+        .filter(|(_, c)| c.statuses.iter().any(|s| projects.contains(&s.project_key)))
+        .map(|(i, _)| i).collect();
+    let choices: Vec<String> = visible.iter()
+        .map(|&i| column_label(&columns[i], &projects))
         .chain(std::iter::once("Separate column".to_owned())).collect();
     let names: Vec<&str> = choices.iter().map(String::as_str).collect();
     for (index, column) in columns.iter().enumerate() {
@@ -729,21 +733,38 @@ fn rebuild_editor(rows: &gtk::Box, ui: &Ui, state: &Rc<RefCell<State>>) {
         header.set_margin_top(8);
         header.set_margin_start(10);
         header.set_margin_end(10);
-        let title = gtk::Label::new(Some(&column.title));
+        let title = gtk::Label::new(Some(&column_label(column, &projects)));
         title.add_css_class("heading");
         title.set_xalign(0.0);
         title.set_hexpand(true);
         header.append(&title);
+        let position = visible.iter().position(|i| *i == index).unwrap_or(0);
         for (up, icon) in [(true, "go-up-symbolic"), (false, "go-down-symbolic")] {
+            let destination = if up {
+                position.checked_sub(1).and_then(|i| visible.get(i)).copied()
+            } else {
+                visible.get(position + 1).copied()
+            };
             let button = gtk::Button::builder().icon_name(icon).build();
             button.set_tooltip_text(Some(if up { "Move left" } else { "Move right" }));
-            button.set_sensitive(if up { index > 0 } else { index + 1 < columns.len() });
+            button.set_sensitive(destination.is_some());
             header.append(&button);
             let ui = ui.clone();
             let state = state.clone();
             let rows = rows.clone();
             button.connect_clicked(move |_| {
-                state.borrow_mut().settings.move_column(index, up);
+                if let Some(destination) = destination {
+                    let mut s = state.borrow_mut();
+                    if up {
+                        for i in (destination + 1..=index).rev() {
+                            s.settings.move_column(i, true);
+                        }
+                    } else {
+                        for i in index..destination {
+                            s.settings.move_column(i, false);
+                        }
+                    }
+                }
                 save_settings(&ui, &state);
                 render_board(&ui, &state.borrow());
                 rebuild_editor(&rows, &ui, &state);
@@ -762,19 +783,19 @@ fn rebuild_editor(rows: &gtk::Box, ui: &Ui, state: &Rc<RefCell<State>>) {
             label.set_tooltip_text(Some(&format!("Status ID {}", status.id)));
             row.append(&label);
             let dropdown = gtk::DropDown::from_strings(&names);
-            dropdown.set_selected(index as u32);
+            dropdown.set_selected(position as u32);
             dropdown.set_width_request(190);
             row.append(&dropdown);
             let ui = ui.clone();
             let state = state.clone();
             let rows = rows.clone();
+            let targets = visible.clone();
             dropdown.connect_selected_notify(move |dropdown| {
-                let target = dropdown.selected() as usize;
-                if target == index { return; }
-                let count = state.borrow().settings.columns.len();
+                let target = targets.get(dropdown.selected() as usize).copied();
+                if target == Some(index) { return; }
                 state.borrow_mut().settings.move_status(
                     &status.reference(),
-                    (target < count).then_some(target),
+                    target,
                     &status.name,
                 );
                 save_settings(&ui, &state);
@@ -799,6 +820,16 @@ fn save_settings(ui: &Ui, state: &Rc<RefCell<State>>) {
     }
 }
 
+fn column_label(column: &preferences::Column, projects: &[String]) -> String {
+    let active: Vec<_> = column.statuses.iter()
+        .filter(|s| projects.contains(&s.project_key)).collect();
+    if active.len() == 1 {
+        format!("{} · {}", active[0].project_key, column.title)
+    } else {
+        format!("{} · {} statuses", column.title, active.len())
+    }
+}
+
 fn render_board(ui: &Ui, state: &State) {
     clear_box(&ui.board_box);
     if state.settings.projects.is_empty() {
@@ -808,7 +839,7 @@ fn render_board(ui: &Ui, state: &State) {
     let text = ui.search.text().to_lowercase();
     let mut groups: Vec<(String, Vec<&Issue>, Vec<preferences::StatusRef>)> = state.settings.columns.iter()
         .filter(|c| c.statuses.iter().any(|s| state.settings.projects.contains(&s.project_key)))
-        .map(|c| (c.title.clone(), Vec::new(), c.statuses.clone())).collect();
+        .map(|c| (column_label(c, &state.settings.projects), Vec::new(), c.statuses.clone())).collect();
     for issue in &state.issues {
         if !text.is_empty()
             && !issue.key.to_lowercase().contains(&text)
