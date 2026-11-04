@@ -164,8 +164,9 @@ fn build_ui(app: &adw::Application) {
     center.append(&heading);
 
     let search = gtk::SearchEntry::new();
-    search.set_placeholder_text(Some("Search key, title or status (/)"));
-    center.append(&search);
+    search.set_placeholder_text(Some("Search issues… (/)"));
+    search.set_width_request(340);
+    search.set_hexpand(false);
     let mine_filter = gtk::ToggleButton::with_label("Mine");
     let unassigned_filter = gtk::ToggleButton::with_label("Unassigned");
     let all_filter = gtk::ToggleButton::with_label("All");
@@ -185,11 +186,14 @@ fn build_ui(app: &adw::Application) {
     status.set_halign(gtk::Align::End);
     status.set_ellipsize(gtk::pango::EllipsizeMode::End);
     filters_row.append(&status);
+    filters_row.append(&search);
     center.append(&filters_row);
 
     let board_box = gtk::Box::new(gtk::Orientation::Horizontal, 12);
-    board_box.set_hexpand(true);
-    board_box.set_halign(gtk::Align::Fill);
+    // Columns retain a useful width even on ultra-wide monitors.
+    // The horizontal scroller handles additional columns instead of stretching cards.
+    board_box.set_hexpand(false);
+    board_box.set_halign(gtk::Align::Start);
     let scroller = gtk::ScrolledWindow::new();
     scroller.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Never);
     scroller.set_hexpand(true);
@@ -285,10 +289,7 @@ fn build_ui(app: &adw::Application) {
         ui.window.add_controller(keys);
     }
     let css = gtk::CssProvider::new();
-    css.load_from_string(
-        "button.issue-card { padding: 0; border-radius: 10px; }\n\
-         button.issue-card.selected-issue { outline: 2px solid @accent_color; outline-offset: -2px; }"
-    );
+    css.load_from_string(include_str!("board.css"));
     if let Some(display) = gtk::gdk::Display::default() {
         gtk::style_context_add_provider_for_display(
             &display, &css, gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
@@ -479,7 +480,7 @@ fn handle_event(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>, eve
                         show_error(ui, &format!("Could not save board settings: {error}"));
                     }
                     ui.manage_columns_button.set_sensitive(!state.borrow().statuses.is_empty());
-                    ui.status.set_text(&format!("{issue_count} issues · {} projects", settings.projects.len()));
+                    ui.status.set_text(&format!("{issue_count} issues"));
                     render_board(ui, &state.borrow());
                 }
                 Err(error) => {
@@ -1452,28 +1453,36 @@ fn render_board(ui: &Ui, state: &State) {
         let issue_count = issues.len();
         let initially_collapsed = ui.collapsed_columns.borrow().contains(&name);
         let column = gtk::Box::new(gtk::Orientation::Vertical, 0);
-        column.set_width_request(if initially_collapsed { 48 } else { 280 });
-        column.set_hexpand(!initially_collapsed);
+        column.add_css_class("board-column");
+        if initially_collapsed {
+            column.add_css_class("collapsed-column");
+        }
+        column.set_width_request(if initially_collapsed { 68 } else { 330 });
+        column.set_hexpand(false);
+        column.set_vexpand(true);
 
         let expanded = gtk::Box::new(gtk::Orientation::Vertical, 8);
         expanded.set_visible(!initially_collapsed);
+        expanded.set_vexpand(true);
         let heading = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        heading.add_css_class("board-column-header");
         let title = gtk::Label::new(Some(&name));
-        title.add_css_class("heading");
+        title.add_css_class("board-column-title");
         title.set_xalign(0.0);
         title.set_hexpand(true);
         title.set_ellipsize(gtk::pango::EllipsizeMode::End);
         heading.append(&title);
         let count = gtk::Label::new(Some(&issue_count.to_string()));
-        count.add_css_class("dim-label");
+        count.add_css_class("board-column-count");
         heading.append(&count);
         let collapse = gtk::Button::from_icon_name("pan-start-symbolic");
         collapse.add_css_class("flat");
+        collapse.add_css_class("column-collapse");
         collapse.set_tooltip_text(Some(&format!("Collapse {name}")));
         heading.append(&collapse);
         expanded.append(&heading);
 
-        let item_box = gtk::Box::new(gtk::Orientation::Vertical, 6);
+        let item_box = gtk::Box::new(gtk::Orientation::Vertical, 7);
         for issue in issues {
             item_box.append(&issue_button(issue, ui, url));
         }
@@ -1486,22 +1495,26 @@ fn render_board(ui: &Ui, state: &State) {
 
         let collapsed = gtk::Box::new(gtk::Orientation::Vertical, 0);
         collapsed.set_visible(initially_collapsed);
+        collapsed.set_vexpand(true);
         let expand = gtk::Button::new();
         expand.add_css_class("flat");
+        expand.add_css_class("collapsed-expand");
+        expand.set_hexpand(true);
         expand.set_tooltip_text(Some(&format!("Expand {name}")));
-        let collapsed_content = gtk::Box::new(gtk::Orientation::Vertical, 8);
+        let collapsed_content = gtk::Box::new(gtk::Orientation::Vertical, 9);
+        collapsed_content.set_halign(gtk::Align::Center);
         let expand_icon = gtk::Image::from_icon_name("pan-end-symbolic");
         collapsed_content.append(&expand_icon);
         let abbreviation: String = if name.split_whitespace().count() > 1 {
             name.split_whitespace().filter_map(|word| word.chars().next()).take(3).collect()
         } else {
-            name.chars().take(3).collect()
+            name.chars().take(2).collect()
         };
         let collapsed_title = gtk::Label::new(Some(&abbreviation));
-        collapsed_title.add_css_class("caption");
+        collapsed_title.add_css_class("collapsed-title");
         collapsed_content.append(&collapsed_title);
         let collapsed_count = gtk::Label::new(Some(&issue_count.to_string()));
-        collapsed_count.add_css_class("dim-label");
+        collapsed_count.add_css_class("collapsed-count");
         collapsed_content.append(&collapsed_count);
         expand.set_child(Some(&collapsed_content));
         collapsed.append(&expand);
@@ -1519,8 +1532,8 @@ fn render_board(ui: &Ui, state: &State) {
                 collapsed_columns.borrow_mut().insert(name.clone());
                 expanded.set_visible(false);
                 collapsed.set_visible(true);
-                column.set_width_request(48);
-                column.set_hexpand(false);
+                column.set_width_request(68);
+                column.add_css_class("collapsed-column");
             });
         }
         {
@@ -1534,54 +1547,40 @@ fn render_board(ui: &Ui, state: &State) {
                 collapsed_columns.borrow_mut().remove(&name);
                 collapsed.set_visible(false);
                 expanded.set_visible(true);
-                column.set_width_request(280);
-                column.set_hexpand(true);
+                column.set_width_request(330);
+                column.remove_css_class("collapsed-column");
             });
         }
         ui.board_box.append(&column);
     }
 }
 
-fn issue_icon_name(kind: &str) -> &'static str {
-    if kind.eq_ignore_ascii_case("bug") {
-        "dialog-warning-symbolic"
-    } else if kind.eq_ignore_ascii_case("story") {
-        "bookmark-new-symbolic"
-    } else if kind.eq_ignore_ascii_case("epic") {
-        "folder-symbolic"
-    } else {
-        "view-list-symbolic"
-    }
-}
-
 fn issue_button(issue: &Issue, ui: &Ui, base_url: &str) -> gtk::Button {
     let button = gtk::Button::new();
-    button.add_css_class("card");
     button.add_css_class("issue-card");
     button.set_hexpand(true);
     button.set_tooltip_text(Some(&format!("{} · {}", issue.key, issue.summary)));
-    let content = gtk::Box::new(gtk::Orientation::Vertical, 6);
-    content.set_margin_top(10);
-    content.set_margin_bottom(10);
-    content.set_margin_start(11);
-    content.set_margin_end(11);
+    let content = gtk::Box::new(gtk::Orientation::Vertical, 7);
+    content.set_margin_top(12);
+    content.set_margin_bottom(12);
+    content.set_margin_start(12);
+    content.set_margin_end(12);
 
-    let meta = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-    let kind = gtk::Image::from_icon_name(issue_icon_name(&issue.kind));
-    kind.add_css_class("dim-label");
-    kind.set_pixel_size(14);
-    meta.append(&kind);
+    let meta = gtk::Box::new(gtk::Orientation::Horizontal, 7);
     let key = gtk::Label::new(Some(&issue.key));
-    key.add_css_class("caption");
-    key.add_css_class("dim-label");
+    key.add_css_class("ticket-key");
     key.set_hexpand(true);
     key.set_xalign(0.0);
     meta.append(&key);
+    if !issue.kind.is_empty() {
+        let kind = gtk::Label::new(Some(&issue.kind));
+        kind.add_css_class("ticket-kind");
+        meta.append(&kind);
+    }
     let priority = issue.priority.to_ascii_lowercase();
     if matches!(priority.as_str(), "highest" | "high" | "critical" | "blocker") {
         let badge = gtk::Label::new(Some(&issue.priority));
-        badge.add_css_class("caption");
-        badge.add_css_class("warning");
+        badge.add_css_class("ticket-priority");
         meta.append(&badge);
     }
     content.append(&meta);
@@ -1589,7 +1588,8 @@ fn issue_button(issue: &Issue, ui: &Ui, base_url: &str) -> gtk::Button {
     summary.set_xalign(0.0);
     summary.set_wrap(true);
     summary.set_wrap_mode(gtk::pango::WrapMode::WordChar);
-    summary.set_lines(3);
+    summary.set_max_width_chars(38);
+    summary.set_lines(4);
     summary.set_ellipsize(gtk::pango::EllipsizeMode::End);
     content.append(&summary);
     button.set_child(Some(&content));
