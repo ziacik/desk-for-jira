@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>com.github.ziacik.DeskForJira</id>
+  <name>Desk for Jira</name>
+  <summary>Browse your Jira issues and boards in a native GNOME app</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+  <description>
+    <p>A read-only Jira client built with GTK4 and libadwaita.</p>
+  </description>
+  <launchable type="desktop-id">com.github.ziacik.DeskForJira.desktop</launchable>
+  <url type="homepage">https://github.com/ziacik/desk-for-jira</url>
+</component>

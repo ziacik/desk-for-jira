@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Desk for Jira
+Comment=Browse your Jira tickets and boards
+Exec=desk-for-jira
+Icon=com.github.ziacik.DeskForJira
+Categories=Office;ProjectManagement;
+Terminal=false
+StartupNotify=true
