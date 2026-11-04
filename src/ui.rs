@@ -1,6 +1,5 @@
 use std::{
-    collections::HashSet,
-    cell::{Cell, RefCell},
+    cell::RefCell,
     rc::Rc,
     sync::mpsc::{self, Sender},
     thread,
@@ -11,8 +10,9 @@ use adw::prelude::*;
 use gtk::glib;
 
 use crate::{
-    jira::{AuthMode, Board, BoardColumn, Credentials, Issue, JiraClient},
-    preferences, secrets,
+    jira::{AuthMode, Credentials, Issue, JiraClient, Project, ProjectStatus},
+    preferences::{self, BoardSettings},
+    secrets,
 };
 
 #[derive(Clone)]
@@ -22,24 +22,19 @@ struct Ui {
     header_title: adw::WindowTitle,
     spinner: gtk::Spinner,
     status: gtk::Label,
-    my_button: gtk::Button,
+    projects_label: gtk::Label,
     connect_button: gtk::Button,
     disconnect_button: gtk::Button,
     refresh_button: gtk::Button,
-    boards_box: gtk::Box,
-    manage_boards_button: gtk::Button,
+    manage_projects_button: gtk::Button,
+    manage_columns_button: gtk::Button,
     search: gtk::SearchEntry,
     center_title: gtk::Label,
-    stack: gtk::Stack,
-    issue_box: gtk::Box,
     board_box: gtk::Box,
-    board_stack: gtk::Stack,
-    board_switcher: gtk::StackSwitcher,
+    detail_box: gtk::Box,
     mine_filter: gtk::ToggleButton,
     unassigned_filter: gtk::ToggleButton,
     all_filter: gtk::ToggleButton,
-    backlog_box: gtk::Box,
-    detail_box: gtk::Box,
 }
 
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
@@ -63,48 +58,44 @@ impl IssueScope {
 #[derive(Default)]
 struct State {
     account: Option<Credentials>,
+    projects: Vec<Project>,
+    settings: BoardSettings,
+    statuses: Vec<ProjectStatus>,
     issues: Vec<Issue>,
-    boards: Vec<Board>,
-    pinned_boards: Vec<u64>,
-    selected_board: Option<u64>,
     issue_scope: IssueScope,
-    board_request: u64,
     generation: u64,
+    board_request: u64,
     busy: bool,
 }
 
 struct Loaded {
     user: String,
-    issues: Vec<Issue>,
-    boards: Result<Vec<Board>, String>,
+    projects: Result<Vec<Project>, String>,
 }
 
 struct BoardData {
+    statuses: Vec<ProjectStatus>,
     issues: Vec<Issue>,
-    columns: Vec<BoardColumn>,
-    backlog: Option<Result<Vec<Issue>, String>>,
-    is_kanban: bool,
 }
 
 enum Event {
     Stored(Result<Option<Credentials>, String>),
     Loaded(u64, Credentials, Result<Loaded, String>),
-    BoardLoaded(u64, u64, u64, Result<BoardData, String>),
+    BoardLoaded(u64, u64, Result<BoardData, String>),
     Disconnected(u64, Result<(), String>),
 }
 
 pub fn run() -> glib::ExitCode {
-    let application = adw::Application::builder()
+    let app = adw::Application::builder()
         .application_id("com.github.ziacik.DeskForJira")
         .build();
-    application.connect_activate(build_ui);
-    application.run()
+    app.connect_activate(build_ui);
+    app.run()
 }
 
 fn build_ui(app: &adw::Application) {
     let state = Rc::new(RefCell::new(State::default()));
     let (sender, receiver) = mpsc::channel();
-
     let window = adw::ApplicationWindow::builder()
         .application(app)
         .title("Desk for Jira")
@@ -115,9 +106,8 @@ fn build_ui(app: &adw::Application) {
         .build();
 
     let header = adw::HeaderBar::new();
-    let header_title = adw::WindowTitle::new("Desk for Jira", "Jira issues & boards");
+    let header_title = adw::WindowTitle::new("Desk for Jira", "My project board");
     header.set_title_widget(Some(&header_title));
-
     let connect_button = gtk::Button::builder()
         .icon_name("emblem-system-symbolic")
         .tooltip_text("Connect or switch Jira account")
@@ -137,90 +127,47 @@ fn build_ui(app: &adw::Application) {
     header.pack_end(&refresh_button);
     header.pack_end(&spinner);
 
-    let sidebar = gtk::Box::new(gtk::Orientation::Vertical, 8);
-    sidebar.set_width_request(238);
+    let sidebar = gtk::Box::new(gtk::Orientation::Vertical, 12);
+    sidebar.set_width_request(230);
     sidebar.set_margin_top(18);
     sidebar.set_margin_bottom(14);
     sidebar.set_margin_start(14);
     sidebar.set_margin_end(14);
-    sidebar.add_css_class("sidebar");
-
-    let my_button = gtk::Button::with_label("My issues");
-    my_button.set_tooltip_text(Some("Issues assigned to me"));
-    my_button.add_css_class("suggested-action");
-    sidebar.append(&my_button);
-
-    let boards_label = gtk::Label::new(Some("PINNED BOARDS"));
-    boards_label.add_css_class("dim-label");
-    boards_label.add_css_class("heading");
-    boards_label.set_xalign(0.0);
-    boards_label.set_margin_top(18);
-    sidebar.append(&boards_label);
-
-    let boards_box = gtk::Box::new(gtk::Orientation::Vertical, 4);
-    let boards_scroll = gtk::ScrolledWindow::new();
-    boards_scroll.set_vexpand(true);
-    boards_scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
-    boards_scroll.set_child(Some(&boards_box));
-    sidebar.append(&boards_scroll);
-
-    let manage_boards_button = gtk::Button::with_label("Manage boards…");
-    manage_boards_button.set_tooltip_text(Some("Choose which boards appear in the sidebar"));
-    manage_boards_button.set_sensitive(false);
-    sidebar.append(&manage_boards_button);
-
+    let sidebar_title = gtk::Label::new(Some("MY BOARD"));
+    sidebar_title.add_css_class("heading");
+    sidebar_title.set_xalign(0.0);
+    sidebar.append(&sidebar_title);
+    let projects_label = gtk::Label::new(Some("Choose projects to begin"));
+    projects_label.set_wrap(true);
+    projects_label.set_xalign(0.0);
+    projects_label.add_css_class("dim-label");
+    sidebar.append(&projects_label);
+    let manage_projects_button = gtk::Button::with_label("Choose projects…");
+    manage_projects_button.set_sensitive(false);
+    sidebar.append(&manage_projects_button);
+    let manage_columns_button = gtk::Button::with_label("Configure columns…");
+    manage_columns_button.set_sensitive(false);
+    sidebar.append(&manage_columns_button);
     let status = gtk::Label::new(Some("Connecting to keyring…"));
     status.add_css_class("dim-label");
     status.set_xalign(0.0);
     status.set_wrap(true);
+    status.set_margin_top(16);
     sidebar.append(&status);
 
-    let center = gtk::Box::new(gtk::Orientation::Vertical, 8);
+    let center = gtk::Box::new(gtk::Orientation::Vertical, 10);
     center.set_margin_top(16);
     center.set_margin_start(16);
     center.set_margin_end(12);
     center.set_margin_bottom(12);
     center.set_hexpand(true);
-    let center_title = gtk::Label::new(Some("My issues"));
+    let center_title = gtk::Label::new(Some("My project board"));
     center_title.add_css_class("title-2");
     center_title.set_xalign(0.0);
     center.append(&center_title);
-
     let search = gtk::SearchEntry::new();
     search.set_placeholder_text(Some("Filter by key, title or status"));
     center.append(&search);
-
-    let stack = gtk::Stack::new();
-    stack.set_hexpand(true);
-    stack.set_vexpand(true);
-    let issue_box = gtk::Box::new(gtk::Orientation::Vertical, 5);
-    let issue_scroll = gtk::ScrolledWindow::new();
-    issue_scroll.set_child(Some(&issue_box));
-    issue_scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
-    stack.add_named(&issue_scroll, Some("issues"));
-
-    let board_box = gtk::Box::new(gtk::Orientation::Horizontal, 12);
-    board_box.set_halign(gtk::Align::Start);
-    let board_scroll = gtk::ScrolledWindow::new();
-    board_scroll.set_child(Some(&board_box));
-    board_scroll.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Never);
-
-    let backlog_box = gtk::Box::new(gtk::Orientation::Vertical, 4);
-    backlog_box.set_margin_top(4);
-    backlog_box.set_margin_end(12);
-    let backlog_scroll = gtk::ScrolledWindow::new();
-    backlog_scroll.set_child(Some(&backlog_box));
-    backlog_scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
-
-    let board_stack = gtk::Stack::new();
-    board_stack.set_vexpand(true);
-    board_stack.add_titled(&board_scroll, Some("board"), "Board");
-    board_stack.add_titled(&backlog_scroll, Some("backlog"), "Backlog");
-
-    let board_switcher = gtk::StackSwitcher::new();
-    board_switcher.set_stack(Some(&board_stack));
-    board_switcher.set_halign(gtk::Align::Start);
-    board_switcher.set_visible(false);
 
     let mine_filter = gtk::ToggleButton::with_label("Mine");
     let unassigned_filter = gtk::ToggleButton::with_label("Unassigned");
@@ -228,25 +175,20 @@ fn build_ui(app: &adw::Application) {
     unassigned_filter.set_group(Some(&mine_filter));
     all_filter.set_group(Some(&mine_filter));
     mine_filter.set_active(true);
+    let filters = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    filters.add_css_class("linked");
     for button in [&mine_filter, &unassigned_filter, &all_filter] {
-        button.set_tooltip_text(Some("Filter issues by assignee"));
+        filters.append(button);
     }
-    let filter_group = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-    filter_group.add_css_class("linked");
-    filter_group.append(&mine_filter);
-    filter_group.append(&unassigned_filter);
-    filter_group.append(&all_filter);
+    center.append(&filters);
 
-    let board_controls = gtk::Box::new(gtk::Orientation::Horizontal, 14);
-    board_controls.append(&board_switcher);
-    board_controls.append(&filter_group);
-
-    let board_page = gtk::Box::new(gtk::Orientation::Vertical, 8);
-    board_page.set_vexpand(true);
-    board_page.append(&board_controls);
-    board_page.append(&board_stack);
-    stack.add_named(&board_page, Some("board"));
-    center.append(&stack);
+    let board_box = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+    board_box.set_halign(gtk::Align::Start);
+    let scroller = gtk::ScrolledWindow::new();
+    scroller.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Never);
+    scroller.set_vexpand(true);
+    scroller.set_child(Some(&board_box));
+    center.append(&scroller);
 
     let detail_box = gtk::Box::new(gtk::Orientation::Vertical, 12);
     detail_box.set_margin_top(20);
@@ -264,14 +206,12 @@ fn build_ui(app: &adw::Application) {
     inner_split.set_position(560);
     inner_split.set_resize_start_child(true);
     inner_split.set_shrink_end_child(false);
-
     let split = gtk::Paned::new(gtk::Orientation::Horizontal);
     split.set_start_child(Some(&sidebar));
     split.set_end_child(Some(&inner_split));
     split.set_position(240);
     split.set_resize_start_child(false);
     split.set_shrink_start_child(false);
-
     let toast = adw::ToastOverlay::new();
     toast.set_child(Some(&split));
     let toolbar = adw::ToolbarView::new();
@@ -280,35 +220,14 @@ fn build_ui(app: &adw::Application) {
     window.set_content(Some(&toolbar));
 
     let ui = Ui {
-        window,
-        toast,
-        header_title,
-        spinner,
-        status,
-        my_button,
-        connect_button,
-        disconnect_button,
-        refresh_button,
-        boards_box,
-        manage_boards_button,
-        search,
-        center_title,
-        stack,
-        issue_box,
-        board_box,
-        board_stack,
-        board_switcher,
-        mine_filter,
-        unassigned_filter,
-        all_filter,
-        backlog_box,
-        detail_box,
+        window, toast, header_title, spinner, status, projects_label,
+        connect_button, disconnect_button, refresh_button,
+        manage_projects_button, manage_columns_button, search, center_title,
+        board_box, detail_box, mine_filter, unassigned_filter, all_filter,
     };
-
     show_detail_placeholder(&ui.detail_box);
-    show_empty(&ui.issue_box, "Connect a Jira account", "Your assigned issues will appear here.");
+    show_empty(&ui.board_box, "Connect to Jira", "Your unified project board will appear here.");
     wire_actions(&ui, &state, &sender);
-
     {
         let ui = ui.clone();
         let state = state.clone();
@@ -320,10 +239,8 @@ fn build_ui(app: &adw::Application) {
             glib::ControlFlow::Continue
         });
     }
-
     thread::spawn(move || {
-        let result = secrets::load().map_err(|err| err.to_string());
-        let _ = sender.send(Event::Stored(result));
+        let _ = sender.send(Event::Stored(secrets::load().map_err(|err| err.to_string())));
     });
     ui.window.present();
 }
@@ -338,43 +255,39 @@ fn wire_actions(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>) {
         let state = state.clone();
         let sender = sender.clone();
         button.connect_toggled(move |button| {
-            if !button.is_active() {
-                return;
-            }
-            let board = {
+            if !button.is_active() { return; }
+            let changed = {
                 let mut s = state.borrow_mut();
-                if s.issue_scope == scope {
-                    return;
+                if s.issue_scope == scope { false } else {
+                    s.issue_scope = scope;
+                    true
                 }
-                s.issue_scope = scope;
-                s.selected_board
-                    .and_then(|id| s.boards.iter().find(|board| board.id == id).cloned())
             };
-            if let Some(board) = board {
-                start_board_load(&ui, &state, &sender, board);
-            }
+            if changed { start_board_load(&ui, &state, &sender); }
         });
     }
     {
         let ui = ui.clone();
         let state = state.clone();
         let sender = sender.clone();
-        let button = ui.manage_boards_button.clone();
-        button.connect_clicked(move |_| show_board_picker(&ui, &state, &sender));
+        ui.manage_projects_button.connect_clicked(move |_| show_project_picker(&ui, &state, &sender));
+    }
+    {
+        let ui = ui.clone();
+        let state = state.clone();
+        ui.manage_columns_button.connect_clicked(move |_| show_column_editor(&ui, &state));
     }
     {
         let ui = ui.clone();
         let state = state.clone();
         let sender = sender.clone();
-        let button = ui.connect_button.clone();
-        button.connect_clicked(move |_| show_login(&ui, &state, &sender));
+        ui.connect_button.connect_clicked(move |_| show_login(&ui, &state, &sender));
     }
     {
         let ui = ui.clone();
         let state = state.clone();
         let sender = sender.clone();
-        let button = ui.refresh_button.clone();
-        button.connect_clicked(move |_| {
+        ui.refresh_button.connect_clicked(move |_| {
             if let Some(account) = state.borrow().account.clone() {
                 start_refresh(&ui, &state, &sender, account, false);
             } else {
@@ -385,62 +298,34 @@ fn wire_actions(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>) {
     {
         let ui = ui.clone();
         let state = state.clone();
-        let button = ui.my_button.clone();
-        button.connect_clicked(move |_| {
-            {
-                let mut s = state.borrow_mut();
-                s.selected_board = None;
-                s.board_request += 1;
-            }
-            set_busy(&ui, &state, false);
-            ui.stack.set_visible_child_name("issues");
-            ui.search.set_visible(true);
-            ui.center_title.set_text("My issues");
-            render_my_issues(&ui, &state.borrow());
-        });
-    }
-    {
-        let ui = ui.clone();
-        let state = state.clone();
-        let search = ui.search.clone();
-        search.connect_search_changed(move |_| {
-            if state.borrow().selected_board.is_none() {
-                render_my_issues(&ui, &state.borrow());
-            }
-        });
+        ui.search.connect_search_changed(move |_| render_board(&ui, &state.borrow()));
     }
     {
         let ui = ui.clone();
         let state = state.clone();
         let sender = sender.clone();
-        let button = ui.disconnect_button.clone();
-        button.connect_clicked(move |_| {
+        ui.disconnect_button.connect_clicked(move |_| {
             let id = {
                 let mut s = state.borrow_mut();
                 s.generation += 1;
-                s.account = None;
-                s.issues.clear();
-                s.boards.clear();
-                s.pinned_boards.clear();
-                s.selected_board = None;
                 s.board_request += 1;
+                s.account = None;
+                s.projects.clear();
+                s.issues.clear();
+                s.statuses.clear();
+                s.settings = BoardSettings::default();
                 s.issue_scope = IssueScope::Mine;
-                s.busy = false;
                 s.generation
             };
+            set_busy(&ui, &state, false);
             ui.header_title.set_subtitle("Not connected");
             ui.status.set_text("Disconnected");
-            ui.spinner.stop();
-            ui.spinner.set_visible(false);
-            clear_box(&ui.boards_box);
-            ui.manage_boards_button.set_sensitive(false);
-            ui.board_switcher.set_visible(false);
+            ui.projects_label.set_text("Choose projects to begin");
+            ui.manage_projects_button.set_sensitive(false);
+            ui.manage_columns_button.set_sensitive(false);
+            ui.center_title.set_text("My project board");
             ui.mine_filter.set_active(true);
-            clear_box(&ui.backlog_box);
-            ui.center_title.set_text("My issues");
-            ui.stack.set_visible_child_name("issues");
-            ui.search.set_visible(true);
-            show_empty(&ui.issue_box, "Not connected", "Connect to Jira to view issues.");
+            show_empty(&ui.board_box, "Not connected", "Connect to Jira to view issues.");
             show_detail_placeholder(&ui.detail_box);
             let sender = sender.clone();
             thread::spawn(move || {
@@ -463,43 +348,34 @@ fn handle_event(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>, eve
             show_login(ui, state, sender);
         }
         Event::Loaded(id, account, result) => {
-            if state.borrow().generation != id {
-                return;
-            }
+            if state.borrow().generation != id { return; }
             set_busy(ui, state, false);
             match result {
                 Ok(loaded) => {
-                    let pinned = match preferences::load_pinned(&account.base_url) {
-                        Ok(pinned) => pinned,
-                        Err(error) => {
-                            show_error(ui, &format!("Could not load pinned boards: {error}"));
-                            Vec::new()
-                        }
-                    };
+                    let settings = preferences::load(&account.base_url).unwrap_or_else(|err| {
+                        show_error(ui, &format!("Could not read board settings: {err}"));
+                        BoardSettings::default()
+                    });
+                    let project_error = loaded.projects.as_ref().err().cloned();
                     {
                         let mut s = state.borrow_mut();
                         s.account = Some(account);
-                        s.issues = loaded.issues;
-                        s.boards = loaded.boards.as_ref().cloned().unwrap_or_default();
-                        s.pinned_boards = pinned;
-                        s.selected_board = None;
-                        s.board_request += 1;
+                        s.projects = loaded.projects.unwrap_or_default();
+                        s.settings = settings;
+                        s.statuses.clear();
+                        s.issues.clear();
                         s.issue_scope = IssueScope::Mine;
                     }
                     ui.mine_filter.set_active(true);
-                    ui.manage_boards_button.set_sensitive(true);
+                    ui.manage_projects_button.set_sensitive(true);
+                    ui.manage_columns_button.set_sensitive(false);
                     ui.header_title.set_subtitle(&loaded.user);
-                    ui.status.set_text(&format!("{} assigned issues · {} boards",
-                        state.borrow().issues.len(), state.borrow().boards.len()));
-                    ui.search.set_visible(true);
-                    ui.stack.set_visible_child_name("issues");
-                    ui.center_title.set_text("My issues");
-                    render_my_issues(ui, &state.borrow());
-                    render_board_list(ui, state, sender);
+                    update_project_label(ui, &state.borrow());
                     show_detail_placeholder(&ui.detail_box);
-                    if let Err(error) = loaded.boards {
-                        show_error(ui, &format!("Boards could not be loaded: {error}"));
+                    if let Some(error) = project_error {
+                        show_error(ui, &format!("Could not list projects: {error}"));
                     }
+                    start_board_load(ui, state, sender);
                 }
                 Err(error) => {
                     ui.status.set_text("Connection failed");
@@ -507,51 +383,32 @@ fn handle_event(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>, eve
                 }
             }
         }
-        Event::BoardLoaded(id, board_id, request_id, result) => {
-            if state.borrow().generation != id
-                || state.borrow().selected_board != Some(board_id)
-                || state.borrow().board_request != request_id
-            {
-                return;
-            }
+        Event::BoardLoaded(id, request, result) => {
+            if state.borrow().generation != id || state.borrow().board_request != request { return; }
             set_busy(ui, state, false);
             match result {
                 Ok(data) => {
-                    let base_url = state.borrow().account.as_ref()
-                        .map(|a| a.base_url.clone()).unwrap_or_default();
-
-                    // The board endpoint can include backlog issues. Do not display
-                    // the same ticket in both the Kanban board and its backlog.
-                    let backlog_keys: HashSet<&str> = data.backlog.as_ref()
-                        .and_then(|result| result.as_ref().ok())
-                        .into_iter()
-                        .flatten()
-                        .map(|issue| issue.key.as_str())
-                        .collect();
-                    let board_issues: Vec<Issue> = data.issues.into_iter()
-                        .filter(|issue| !backlog_keys.contains(issue.key.as_str()))
-                        .collect();
-                    let board_count = board_issues.len();
-                    render_board(ui, board_issues, data.columns, &base_url, data.is_kanban);
-
-                    match data.backlog {
-                        Some(Ok(backlog)) => {
-                            ui.status.set_text(&format!(
-                                "{} board issues · {} backlog issues", board_count, backlog.len()
-                            ));
-                            render_backlog(ui, &backlog, &base_url);
-                        }
-                        Some(Err(error)) => {
-                            ui.status.set_text(&format!("{} issues on this board", board_count));
-                            show_empty(&ui.backlog_box, "Backlog unavailable", &error);
-                        }
-                        None => {
-                            ui.status.set_text(&format!("{} issues on this board", board_count));
-                        }
+                    let (base_url, settings, issue_count) = {
+                        let mut s = state.borrow_mut();
+                        s.issues = data.issues;
+                        s.statuses = data.statuses;
+                        let statuses = s.statuses.clone();
+                        s.settings.reconcile(&statuses);
+                        (
+                            s.account.as_ref().map(|a| a.base_url.clone()).unwrap_or_default(),
+                            s.settings.clone(),
+                            s.issues.len(),
+                        )
+                    };
+                    if let Err(error) = preferences::save(&base_url, &settings) {
+                        show_error(ui, &format!("Could not save board settings: {error}"));
                     }
+                    ui.manage_columns_button.set_sensitive(!state.borrow().statuses.is_empty());
+                    ui.status.set_text(&format!("{issue_count} issues · {} projects", settings.projects.len()));
+                    render_board(ui, &state.borrow());
                 }
                 Err(error) => {
-                    show_empty(&ui.board_box, "Could not load this board", &error);
+                    show_empty(&ui.board_box, "Could not load project board", &error);
                     show_error(ui, &error);
                 }
             }
@@ -568,64 +425,63 @@ fn start_refresh(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>, ac
         let mut s = state.borrow_mut();
         s.generation += 1;
         s.board_request += 1;
-        s.selected_board = None;
         s.generation
     };
     set_busy(ui, state, true);
     ui.status.set_text("Loading Jira…");
-    ui.stack.set_visible_child_name("issues");
-    ui.center_title.set_text("My issues");
-    ui.search.set_visible(true);
     let sender = sender.clone();
     thread::spawn(move || {
         let result = (|| -> anyhow::Result<Loaded> {
             let client = JiraClient::new(account.clone())?;
             let user = client.myself()?;
-            let issues = client.my_issues()?;
-            let boards = client.boards().map_err(|err| err.to_string());
-            if save {
-                secrets::save(&account)?;
-            }
-            Ok(Loaded { user, issues, boards })
+            let projects = client.projects().map_err(|e| e.to_string());
+            if save { secrets::save(&account)?; }
+            Ok(Loaded { user, projects })
         })().map_err(|err| err.to_string());
         let _ = sender.send(Event::Loaded(id, account, result));
     });
 }
 
-fn start_board_load(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>, board: Board) {
-    let (id, request_id, account, scope) = {
+fn start_board_load(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>) {
+    let (id, request, account, projects, scope) = {
         let mut s = state.borrow_mut();
-        s.selected_board = Some(board.id);
         s.board_request += 1;
-        (s.generation, s.board_request, s.account.clone(), s.issue_scope)
+        (s.generation, s.board_request, s.account.clone(), s.settings.projects.clone(), s.issue_scope)
     };
-    ui.center_title.set_text(&format!("{} · {}", board.name, board.board_type));
-    ui.stack.set_visible_child_name("board");
-    ui.board_stack.set_visible_child_name("board");
-    ui.board_switcher.set_visible(
-        board.board_type.eq_ignore_ascii_case("kanban")
-            || board.board_type.eq_ignore_ascii_case("scrum")
-    );
-    ui.search.set_visible(false);
-    show_empty(&ui.board_box, "Loading board…", "Fetching issues and columns");
-    show_empty(&ui.backlog_box, "Loading backlog…", "Fetching Jira backlog issues");
-    show_detail_placeholder(&ui.detail_box);
+    update_project_label(ui, &state.borrow());
+    if projects.is_empty() {
+        set_busy(ui, state, false);
+        ui.status.set_text("Select one or more projects");
+        ui.manage_columns_button.set_sensitive(false);
+        show_empty(&ui.board_box, "Choose projects", "Select ART, AFB or any other projects to build your board.");
+        return;
+    }
     let Some(account) = account else { return; };
+    ui.status.set_text("Loading project issues and workflow statuses…");
+    show_empty(&ui.board_box, "Loading board…", "Fetching real Jira workflow statuses");
+    show_detail_placeholder(&ui.detail_box);
     set_busy(ui, state, true);
     let sender = sender.clone();
     thread::spawn(move || {
         let result = (|| -> anyhow::Result<BoardData> {
             let client = JiraClient::new(account)?;
-            let issues = client.board_issues(board.id, scope.jql())?;
-            let columns = client.board_columns(board.id).unwrap_or_default();
-            let is_kanban = board.board_type.eq_ignore_ascii_case("kanban");
-            let has_backlog = is_kanban || board.board_type.eq_ignore_ascii_case("scrum");
-            let backlog = has_backlog
-                .then(|| client.board_backlog(board.id, scope.jql()).map_err(|err| err.to_string()));
-            Ok(BoardData { issues, columns, backlog, is_kanban })
+            let statuses = client.project_statuses(&projects)?;
+            let issues = client.project_issues(&projects, scope.jql())?;
+            Ok(BoardData { statuses, issues })
         })().map_err(|err| err.to_string());
-        let _ = sender.send(Event::BoardLoaded(id, board.id, request_id, result));
+        let _ = sender.send(Event::BoardLoaded(id, request, result));
     });
+}
+
+fn update_project_label(ui: &Ui, state: &State) {
+    if state.settings.projects.is_empty() {
+        ui.projects_label.set_text("No projects selected");
+        ui.center_title.set_text("My project board");
+    } else {
+        let keys = state.settings.projects.join(" · ");
+        ui.projects_label.set_text(&keys);
+        ui.center_title.set_text(&format!("Board · {keys}"));
+    }
 }
 
 fn show_login(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>) {
@@ -721,167 +577,119 @@ fn field<T: IsA<gtk::Widget>>(label: &str, widget: &T) -> gtk::Box {
     group
 }
 
-fn render_board_list(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>) {
-    clear_box(&ui.boards_box);
-    let boards = {
+fn show_project_picker(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>) {
+    let (projects, selected) = {
         let s = state.borrow();
-        s.pinned_boards.iter()
-            .filter_map(|id| s.boards.iter().find(|board| board.id == *id).cloned())
-            .collect::<Vec<_>>()
+        (s.projects.clone(), s.settings.projects.clone())
     };
-    if boards.is_empty() {
-        let message = gtk::Label::new(Some(if state.borrow().boards.is_empty() {
-            "No accessible boards"
-        } else {
-            "Pin boards using ‘Manage boards…’ below."
-        }));
-        message.set_wrap(true);
-        message.add_css_class("dim-label");
-        message.set_xalign(0.0);
-        ui.boards_box.append(&message);
-    }
-    for board in boards {
-        let button = gtk::Button::new();
-        button.add_css_class("flat");
-        button.set_halign(gtk::Align::Fill);
-        let text = gtk::Label::new(Some(&board.name));
-        text.set_xalign(0.0);
-        text.set_ellipsize(gtk::pango::EllipsizeMode::End);
-        button.set_child(Some(&text));
-        ui.boards_box.append(&button);
-        let ui = ui.clone();
-        let state = state.clone();
-        let sender = sender.clone();
-        button.connect_clicked(move |_| start_board_load(&ui, &state, &sender, board.clone()));
-    }
-}
-
-/// The complete board list lives here, never in the sidebar.
-fn show_board_picker(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>) {
-    let (mut boards, pinned) = {
-        let s = state.borrow();
-        if s.account.is_none() {
-            return;
-        }
-        (s.boards.clone(), s.pinned_boards.clone())
-    };
-    // Pinned boards appear first, then the remaining boards alphabetically.
-    boards.sort_by(|a, b| {
-        let a_pin = pinned.iter().position(|id| *id == a.id);
-        let b_pin = pinned.iter().position(|id| *id == b.id);
-        match (a_pin, b_pin) {
-            (Some(a), Some(b)) => a.cmp(&b),
-            (Some(_), None) => std::cmp::Ordering::Less,
-            (None, Some(_)) => std::cmp::Ordering::Greater,
-            (None, None) => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
-        }
-    });
-
     let dialog = gtk::Window::builder()
-        .title("Manage boards")
+        .title("Choose projects")
         .transient_for(&ui.window)
         .modal(true)
         .default_width(480)
         .default_height(560)
         .build();
-
     let content = gtk::Box::new(gtk::Orientation::Vertical, 12);
     content.set_margin_top(18);
     content.set_margin_bottom(18);
     content.set_margin_start(18);
     content.set_margin_end(18);
-
-    let intro = gtk::Label::new(Some("Select the boards you want in the sidebar."));
+    let intro = gtk::Label::new(Some("Select the projects to combine in your board."));
     intro.set_xalign(0.0);
     intro.set_wrap(true);
     content.append(&intro);
-
     let search = gtk::SearchEntry::new();
-    search.set_placeholder_text(Some("Search boards"));
+    search.set_placeholder_text(Some("Search project key or name"));
     content.append(&search);
-
-    let rows = gtk::ListBox::new();
-    rows.set_selection_mode(gtk::SelectionMode::None);
-    rows.add_css_class("boxed-list");
+    let list = gtk::ListBox::new();
+    list.set_selection_mode(gtk::SelectionMode::None);
+    list.add_css_class("boxed-list");
+    let mut choices = Vec::new();
     let mut searchable = Vec::new();
-
-    for board in boards {
-        let check = gtk::CheckButton::with_label(&board.name);
-        check.set_active(pinned.contains(&board.id));
+    for project in projects {
+        let check = gtk::CheckButton::with_label(&format!("{} · {}", project.key, project.name));
+        check.set_active(selected.contains(&project.key));
         check.set_margin_start(12);
         check.set_margin_end(12);
         check.set_margin_top(10);
         check.set_margin_bottom(10);
-        check.set_tooltip_text(Some(&format!("{} board · ID {}", board.board_type, board.id)));
-
         let row = gtk::ListBoxRow::new();
         row.set_activatable(false);
         row.set_child(Some(&check));
-        rows.append(&row);
-        searchable.push((row, board.name.to_lowercase()));
-
+        list.append(&row);
+        searchable.push((row, format!("{} {}", project.key, project.name).to_lowercase()));
+        choices.push((project.key, check));
+    }
+    search.connect_search_changed(move |search| {
+        let text = search.text().to_lowercase();
+        for (row, key) in &searchable { row.set_visible(key.contains(&text)); }
+    });
+    let scroll = gtk::ScrolledWindow::new();
+    scroll.set_vexpand(true);
+    scroll.set_child(Some(&list));
+    content.append(&scroll);
+    let actions = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    actions.set_halign(gtk::Align::End);
+    let cancel = gtk::Button::with_label("Cancel");
+    let apply = gtk::Button::with_label("Apply");
+    apply.add_css_class("suggested-action");
+    actions.append(&cancel);
+    actions.append(&apply);
+    content.append(&actions);
+    dialog.set_child(Some(&content));
+    {
+        let dialog = dialog.clone();
+        cancel.connect_clicked(move |_| dialog.close());
+    }
+    {
+        let dialog = dialog.clone();
         let ui = ui.clone();
         let state = state.clone();
         let sender = sender.clone();
-        let reverting = Rc::new(Cell::new(false));
-        check.connect_toggled(move |check| {
-            if reverting.get() {
-                return;
+        apply.connect_clicked(move |_| {
+            let selected: Vec<String> = choices.iter()
+                .filter(|(_, check)| check.is_active())
+                .map(|(key, _)| key.clone()).collect();
+            if selected != state.borrow().settings.projects {
+                state.borrow_mut().settings.projects = selected;
+                save_settings(&ui, &state);
+                start_board_load(&ui, &state, &sender);
             }
-            let (account_url, old_pinned, new_pinned) = {
-                let mut s = state.borrow_mut();
-                let Some(url) = s.account.as_ref().map(|account| account.base_url.clone()) else {
-                    return;
-                };
-                let before = s.pinned_boards.clone();
-                if check.is_active() {
-                    if !s.pinned_boards.contains(&board.id) {
-                        s.pinned_boards.push(board.id);
-                    }
-                } else {
-                    s.pinned_boards.retain(|id| *id != board.id);
-                }
-                (url, before, s.pinned_boards.clone())
-            };
-            if let Err(error) = preferences::save_pinned(&account_url, &new_pinned) {
-                state.borrow_mut().pinned_boards = old_pinned;
-                reverting.set(true);
-                check.set_active(!check.is_active());
-                reverting.set(false);
-                show_error(&ui, &format!("Could not save pinned boards: {error}"));
-            } else {
-                render_board_list(&ui, &state, &sender);
-                // A board may be removed from the sidebar while it is open;
-                // leave the current view available until the user navigates.
-            }
+            dialog.close();
         });
     }
+    dialog.present();
+    search.grab_focus();
+}
 
-    {
-        let searchable = searchable;
-        search.connect_search_changed(move |search| {
-            let query = search.text().to_lowercase();
-            for (row, name) in &searchable {
-                row.set_visible(name.contains(&query));
-            }
-        });
-    }
-
-    let scroller = gtk::ScrolledWindow::new();
-    scroller.set_vexpand(true);
-    scroller.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
-    scroller.set_child(Some(&rows));
-    content.append(&scroller);
-
-    if rows.first_child().is_none() {
-        let empty = gtk::Label::new(Some("No accessible Jira boards."));
-        empty.add_css_class("dim-label");
-        content.append(&empty);
-    }
-
+fn show_column_editor(ui: &Ui, state: &Rc<RefCell<State>>) {
+    let dialog = gtk::Window::builder()
+        .title("Configure columns")
+        .transient_for(&ui.window)
+        .modal(true)
+        .default_width(570)
+        .default_height(650)
+        .build();
+    let content = gtk::Box::new(gtk::Orientation::Vertical, 12);
+    content.set_margin_top(18);
+    content.set_margin_bottom(18);
+    content.set_margin_start(18);
+    content.set_margin_end(18);
+    let intro = gtk::Label::new(Some(
+        "Reorder columns with the arrows. To merge statuses, choose another column in the dropdown. Choose 'Separate column' to split them."
+    ));
+    intro.set_wrap(true);
+    intro.set_xalign(0.0);
+    content.append(&intro);
+    let rows = gtk::Box::new(gtk::Orientation::Vertical, 12);
+    rebuild_editor(&rows, ui, state);
+    let scroll = gtk::ScrolledWindow::new();
+    scroll.set_vexpand(true);
+    scroll.set_child(Some(&rows));
+    content.append(&scroll);
     let done = gtk::Button::with_label("Done");
-    done.set_halign(gtk::Align::End);
     done.add_css_class("suggested-action");
+    done.set_halign(gtk::Align::End);
     content.append(&done);
     dialog.set_child(Some(&content));
     {
@@ -889,129 +697,155 @@ fn show_board_picker(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>
         done.connect_clicked(move |_| dialog.close());
     }
     dialog.present();
-    search.grab_focus();
 }
 
-fn render_my_issues(ui: &Ui, state: &State) {
-    clear_box(&ui.issue_box);
-    let issues = &state.issues;
-    let filter = ui.search.text().to_lowercase();
-    let filtered: Vec<&Issue> = issues.iter().filter(|issue| {
-        filter.is_empty()
-            || issue.key.to_lowercase().contains(&filter)
-            || issue.summary.to_lowercase().contains(&filter)
-            || issue.status.to_lowercase().contains(&filter)
-    }).collect();
-    if filtered.is_empty() {
-        show_empty(&ui.issue_box, "No matching issues", "Try a different search, or refresh.");
-        return;
-    }
-    let base_url = state.account.as_ref().map(|a| a.base_url.as_str()).unwrap_or("");
-    for issue in filtered {
-        let button = issue_button(issue, &ui.detail_box, base_url);
-        ui.issue_box.append(&button);
+fn rebuild_editor(rows: &gtk::Box, ui: &Ui, state: &Rc<RefCell<State>>) {
+    clear_box(rows);
+    let (columns, statuses, projects) = {
+        let s = state.borrow();
+        (s.settings.columns.clone(), s.statuses.clone(), s.settings.projects.clone())
+    };
+    let choices: Vec<String> = columns.iter().map(|column| column.title.clone())
+        .chain(std::iter::once("Separate column".to_owned())).collect();
+    let names: Vec<&str> = choices.iter().map(String::as_str).collect();
+    for (index, column) in columns.iter().enumerate() {
+        let matching: Vec<ProjectStatus> = column.statuses.iter()
+            .filter(|reference| projects.contains(&reference.project_key))
+            .filter_map(|reference| statuses.iter().find(|status| status.reference() == *reference).cloned())
+            .collect();
+        if matching.is_empty() { continue; }
+
+        let section = gtk::Box::new(gtk::Orientation::Vertical, 6);
+        section.add_css_class("card");
+        section.set_margin_bottom(6);
+        let header = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        header.set_margin_top(8);
+        header.set_margin_start(10);
+        header.set_margin_end(10);
+        let title = gtk::Label::new(Some(&column.title));
+        title.add_css_class("heading");
+        title.set_xalign(0.0);
+        title.set_hexpand(true);
+        header.append(&title);
+        for (up, icon) in [(true, "go-up-symbolic"), (false, "go-down-symbolic")] {
+            let button = gtk::Button::builder().icon_name(icon).build();
+            button.set_tooltip_text(Some(if up { "Move left" } else { "Move right" }));
+            button.set_sensitive(if up { index > 0 } else { index + 1 < columns.len() });
+            header.append(&button);
+            let ui = ui.clone();
+            let state = state.clone();
+            let rows = rows.clone();
+            button.connect_clicked(move |_| {
+                state.borrow_mut().settings.move_column(index, up);
+                save_settings(&ui, &state);
+                render_board(&ui, &state.borrow());
+                rebuild_editor(&rows, &ui, &state);
+            });
+        }
+        section.append(&header);
+        for status in matching {
+            let row = gtk::Box::new(gtk::Orientation::Horizontal, 10);
+            row.set_margin_start(10);
+            row.set_margin_end(10);
+            row.set_margin_bottom(8);
+            let label = gtk::Label::new(Some(&format!("{} · {}", status.project_key, status.name)));
+            label.set_xalign(0.0);
+            label.set_hexpand(true);
+            label.set_ellipsize(gtk::pango::EllipsizeMode::End);
+            label.set_tooltip_text(Some(&format!("Status ID {}", status.id)));
+            row.append(&label);
+            let dropdown = gtk::DropDown::from_strings(&names);
+            dropdown.set_selected(index as u32);
+            dropdown.set_width_request(190);
+            row.append(&dropdown);
+            let ui = ui.clone();
+            let state = state.clone();
+            let rows = rows.clone();
+            dropdown.connect_selected_notify(move |dropdown| {
+                let target = dropdown.selected() as usize;
+                if target == index { return; }
+                let count = state.borrow().settings.columns.len();
+                state.borrow_mut().settings.move_status(
+                    &status.reference(),
+                    (target < count).then_some(target),
+                    &status.name,
+                );
+                save_settings(&ui, &state);
+                render_board(&ui, &state.borrow());
+                rebuild_editor(&rows, &ui, &state);
+            });
+            section.append(&row);
+        }
+        rows.append(&section);
     }
 }
 
-fn render_board(ui: &Ui, issues: Vec<Issue>, columns: Vec<BoardColumn>, base_url: &str, is_kanban: bool) {
+fn save_settings(ui: &Ui, state: &Rc<RefCell<State>>) {
+    let (url, settings) = {
+        let s = state.borrow();
+        (s.account.as_ref().map(|a| a.base_url.clone()), s.settings.clone())
+    };
+    if let Some(url) = url {
+        if let Err(error) = preferences::save(&url, &settings) {
+            show_error(ui, &format!("Could not save board settings: {error}"));
+        }
+    }
+}
+
+fn render_board(ui: &Ui, state: &State) {
     clear_box(&ui.board_box);
-    // Kanban's separately configured Backlog is not an active board column.
-    let columns: Vec<BoardColumn> = columns.into_iter()
-        .filter(|column| !(is_kanban && column.name.eq_ignore_ascii_case("backlog")))
-        .collect();
-    let mut groups: Vec<(String, Vec<Issue>)> = columns.iter()
-        .map(|c| (c.name.clone(), Vec::new())).collect();
-    if groups.is_empty() {
-        for issue in &issues {
-            if !groups.iter().any(|(name, _)| name == &issue.status) {
-                groups.push((issue.status.clone(), Vec::new()));
-            }
-        }
-    }
-    for issue in issues {
-        let idx = if columns.is_empty() {
-            groups.iter().position(|(name, _)| name == &issue.status)
-        } else {
-            columns.iter().position(|c| c.status_ids.contains(&issue.status_id))
-        };
-        if let Some(idx) = idx {
-            groups[idx].1.push(issue);
-        } else {
-            if groups.last().map(|(name, _)| name.as_str()) != Some("Other") {
-                groups.push(("Other".into(), Vec::new()));
-            }
-            groups.last_mut().unwrap().1.push(issue);
-        }
-    }
-    if groups.is_empty() {
-        show_empty(&ui.board_box, "Board is empty", "No issues are mapped to board columns.");
+    if state.settings.projects.is_empty() {
+        show_empty(&ui.board_box, "Choose projects", "Use Choose projects… to set up your board.");
         return;
     }
-    for (name, items) in groups {
+    let text = ui.search.text().to_lowercase();
+    let mut groups: Vec<(String, Vec<&Issue>, Vec<preferences::StatusRef>)> = state.settings.columns.iter()
+        .filter(|c| c.statuses.iter().any(|s| state.settings.projects.contains(&s.project_key)))
+        .map(|c| (c.title.clone(), Vec::new(), c.statuses.clone())).collect();
+    for issue in &state.issues {
+        if !text.is_empty()
+            && !issue.key.to_lowercase().contains(&text)
+            && !issue.summary.to_lowercase().contains(&text)
+            && !issue.status.to_lowercase().contains(&text)
+        {
+            continue;
+        }
+        let reference = preferences::StatusRef {
+            project_key: issue.project_key.clone(),
+            status_id: issue.status_id.clone(),
+        };
+        if let Some((_, items, _)) = groups.iter_mut().find(|(_, _, refs)| refs.contains(&reference)) {
+            items.push(issue);
+        } else {
+            let index = groups.iter().position(|(title, _, _)| title == "Other");
+            if let Some(index) = index {
+                groups[index].1.push(issue);
+            } else {
+                groups.push(("Other".into(), vec![issue], Vec::new()));
+            }
+        }
+    }
+    if groups.is_empty() {
+        show_empty(&ui.board_box, "No workflow statuses", "There are no statuses to display.");
+        return;
+    }
+    let url = state.account.as_ref().map(|a| a.base_url.as_str()).unwrap_or("");
+    for (name, issues, _) in groups {
         let column = gtk::Box::new(gtk::Orientation::Vertical, 8);
-        column.set_width_request(275);
-        let title = gtk::Label::new(Some(&format!("{name}  ({})", items.len())));
+        column.set_width_request(280);
+        let title = gtk::Label::new(Some(&format!("{name}  ({})", issues.len())));
         title.add_css_class("heading");
         title.set_xalign(0.0);
         column.append(&title);
         let item_box = gtk::Box::new(gtk::Orientation::Vertical, 6);
-        for issue in &items {
-            item_box.append(&issue_button(issue, &ui.detail_box, base_url));
+        for issue in issues {
+            item_box.append(&issue_button(issue, &ui.detail_box, url));
         }
         let scroll = gtk::ScrolledWindow::new();
         scroll.set_child(Some(&item_box));
         scroll.set_vexpand(true);
         column.append(&scroll);
         ui.board_box.append(&column);
-    }
-}
-
-fn render_backlog(ui: &Ui, issues: &[Issue], base_url: &str) {
-    clear_box(&ui.backlog_box);
-    if issues.is_empty() {
-        show_empty(&ui.backlog_box, "Backlog is empty", "There are no issues in this backlog.");
-        return;
-    }
-
-    let count = gtk::Label::new(Some(&format!("{} issues · ordered by Jira rank", issues.len())));
-    count.add_css_class("dim-label");
-    count.set_xalign(0.0);
-    count.set_margin_bottom(8);
-    ui.backlog_box.append(&count);
-
-    for issue in issues {
-        let row = gtk::Button::new();
-        row.add_css_class("flat");
-        row.set_halign(gtk::Align::Fill);
-        let contents = gtk::Box::new(gtk::Orientation::Horizontal, 12);
-        contents.set_margin_top(7);
-        contents.set_margin_bottom(7);
-        contents.set_margin_start(8);
-        contents.set_margin_end(8);
-
-        let key = gtk::Label::new(Some(&issue.key));
-        key.add_css_class("dim-label");
-        key.set_width_chars(13);
-        key.set_xalign(0.0);
-        contents.append(&key);
-
-        let summary = gtk::Label::new(Some(&issue.summary));
-        summary.set_xalign(0.0);
-        summary.set_hexpand(true);
-        summary.set_ellipsize(gtk::pango::EllipsizeMode::End);
-        contents.append(&summary);
-
-        let status = gtk::Label::new(Some(&issue.status));
-        status.add_css_class("dim-label");
-        status.set_ellipsize(gtk::pango::EllipsizeMode::End);
-        contents.append(&status);
-
-        row.set_child(Some(&contents));
-        let issue = issue.clone();
-        let detail_box = ui.detail_box.clone();
-        let base_url = base_url.to_owned();
-        row.connect_clicked(move |_| show_detail(&detail_box, &issue, &base_url));
-        ui.backlog_box.append(&row);
     }
 }
 
