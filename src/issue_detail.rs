@@ -50,7 +50,7 @@ pub fn render(
         let offset_y = (f64::from(height) - size) / 2.0;
         cr.translate(offset_x, offset_y);
         cr.scale(size / 20.0, size / 20.0);
-        let color = area.style_context().color();
+        let color = area.color();
         cr.set_source_rgba(
             f64::from(color.red()),
             f64::from(color.green()),
