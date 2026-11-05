@@ -88,3 +88,139 @@ button.collapsed-expand:hover {
   font-size: 0.88em;
   color: alpha(@window_fg_color, 0.78);
 }
+
+/* Readable, theme-aware issue inspector. Never use fixed light-only text colors. */
+.detail-panel {
+  color: @window_fg_color;
+  background-color: @window_bg_color;
+  border-left: 1px solid alpha(@window_fg_color, 0.10);
+}
+.detail-panel-header {
+  border-bottom: 1px solid alpha(@window_fg_color, 0.08);
+}
+.detail-hero {
+  padding-bottom: 3px;
+}
+.detail-key {
+  color: @accent_color;
+  font-weight: 750;
+  font-size: 0.92em;
+  letter-spacing: 0.02em;
+}
+.detail-kind {
+  color: alpha(@window_fg_color, 0.75);
+  background-color: alpha(@window_fg_color, 0.065);
+  border-radius: 7px;
+  padding: 3px 8px;
+  font-size: 0.86em;
+}
+.detail-title {
+  color: @window_fg_color;
+  font-weight: 750;
+  font-size: 1.4em;
+}
+.detail-metadata {
+  padding: 16px;
+  border-radius: 12px;
+  background-color: alpha(@window_fg_color, 0.04);
+  border: 1px solid alpha(@window_fg_color, 0.055);
+}
+.detail-field-label {
+  color: alpha(@window_fg_color, 0.66);
+  font-size: 0.86em;
+}
+.detail-field-value {
+  color: @window_fg_color;
+  font-size: 0.95em;
+  font-weight: 570;
+}
+.detail-status {
+  font-weight: 700;
+  color: @accent_color;
+}
+.detail-section {
+  padding-top: 6px;
+}
+.detail-section-title {
+  color: @window_fg_color;
+  font-size: 1em;
+  font-weight: 750;
+}
+.detail-body {
+  color: @window_fg_color;
+}
+.issue-prose {
+  color: @window_fg_color;
+}
+.issue-heading {
+  color: @window_fg_color;
+  font-size: 1.16em;
+  font-weight: 750;
+  margin-top: 8px;
+}
+.issue-subheading {
+  color: @window_fg_color;
+  font-weight: 700;
+  margin-top: 4px;
+}
+.issue-list-row {
+  color: @window_fg_color;
+}
+.issue-list-marker {
+  color: @accent_color;
+  font-weight: 700;
+  min-width: 20px;
+}
+.issue-quote {
+  border-left: 3px solid @accent_color;
+  padding: 9px 12px;
+  background-color: alpha(@accent_bg_color, 0.075);
+  border-radius: 5px;
+}
+.issue-panel {
+  background-color: alpha(@accent_bg_color, 0.10);
+  border: 1px solid alpha(@accent_color, 0.16);
+  border-radius: 10px;
+  padding: 12px;
+}
+.issue-code {
+  color: @window_fg_color;
+  font-family: monospace;
+  font-size: 0.92em;
+  background-color: alpha(@window_fg_color, 0.06);
+  border-radius: 8px;
+  padding: 12px;
+}
+.issue-table {
+  border: 1px solid alpha(@window_fg_color, 0.14);
+  border-radius: 8px;
+}
+.issue-table-row {
+  border-bottom: 1px solid alpha(@window_fg_color, 0.09);
+}
+.issue-table-cell {
+  padding: 9px;
+  border-right: 1px solid alpha(@window_fg_color, 0.09);
+}
+.issue-image-card {
+  padding: 8px;
+  border: 1px solid alpha(@window_fg_color, 0.085);
+  border-radius: 10px;
+  background-color: @card_bg_color;
+}
+.issue-image-slot {
+  color: @window_fg_color;
+  min-height: 160px;
+}
+.issue-image-caption {
+  color: alpha(@window_fg_color, 0.7);
+  font-size: 0.84em;
+}
+.detail-empty {
+  color: alpha(@window_fg_color, 0.65);
+  font-style: italic;
+}
+button.detail-open {
+  color: @window_fg_color;
+  margin-top: 8px;
+}
