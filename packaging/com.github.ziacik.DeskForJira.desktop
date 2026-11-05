@@ -1,9 +1,12 @@
 [Desktop Entry]
 Type=Application
+Version=1.0
 Name=Desk for Jira
-Comment=Browse your Jira tickets and boards
+GenericName=Jira issue browser
+Comment=Stay focused on your Jira boards and tickets
 Exec=desk-for-jira
 Icon=com.github.ziacik.DeskForJira
-Categories=Office;ProjectManagement;
+Categories=Office;Development;ProjectManagement;
+Keywords=Jira;issues;tickets;kanban;board;projects;GNOME;
 Terminal=false
 StartupNotify=true

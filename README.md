@@ -42,7 +42,15 @@ Board preferences are saved in the user's XDG configuration directory, separatel
 
 ## Desktop integration
 
-The repository includes a `.desktop` launcher and AppStream metadata in `packaging/`.
+The repository includes a custom scalable app icon, a symbolic icon, a `.desktop` launcher and AppStream metadata in `packaging/`. The workspace styling adapts to GNOME's light or dark theme.
+
+To build and install for the current user (including icons and desktop launcher):
+
+```bash
+bash packaging/install-local.sh
+```
+
+This installs into `~/.local` by default; set `PREFIX` to use a different prefix. `cargo run` remains available for development. The sidebar can be toggled from the title bar.
 
 ## Status
 

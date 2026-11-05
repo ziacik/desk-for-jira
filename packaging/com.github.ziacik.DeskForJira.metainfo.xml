@@ -2,12 +2,19 @@
 <component type="desktop-application">
   <id>com.github.ziacik.DeskForJira</id>
   <name>Desk for Jira</name>
-  <summary>Browse your Jira issues and boards in a native GNOME app</summary>
+  <summary>A focused, native Jira workspace for GNOME</summary>
   <metadata_license>CC0-1.0</metadata_license>
   <project_license>MIT</project_license>
+  <developer_name>František Žiačik</developer_name>
   <description>
-    <p>A read-only Jira client built with GTK4 and libadwaita.</p>
+    <p>Desk for Jira brings your issues together in a fast, native GNOME application.</p>
+    <p>Choose several Jira projects and browse your own work, unassigned tasks or all issues on one customizable Kanban board. Inspect issue details, descriptions and attachments without leaving the desktop.</p>
+    <p>Jira Cloud and Jira Server/Data Center are supported. The app is read-only and stores credentials in the desktop keyring.</p>
   </description>
   <launchable type="desktop-id">com.github.ziacik.DeskForJira.desktop</launchable>
   <url type="homepage">https://github.com/ziacik/desk-for-jira</url>
+  <url type="bugtracker">https://github.com/ziacik/desk-for-jira/issues</url>
+  <url type="vcs-browser">https://github.com/ziacik/desk-for-jira</url>
+  <provides><binary>desk-for-jira</binary></provides>
+  <content_rating type="oars-1.1"/>
 </component>
