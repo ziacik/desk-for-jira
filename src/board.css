@@ -499,3 +499,31 @@ button.detail-branch-menu {
   font-size: 0.86em;
   font-weight: 600;
 }
+
+
+/* Visual language shared by the header and the board controls. */
+.detail-header-key {
+  color: #4c72dc;
+  font-size: 1.14em;
+  font-weight: 800;
+  letter-spacing: 0.01em;
+}
+.scope-button-content,
+.sprint-filter-content {
+  color: inherit;
+}
+.scope-button-content image,
+.sprint-filter-content image {
+  -gtk-icon-size: 14px;
+  color: alpha(@window_fg_color, 0.72);
+}
+.scope-filters button:checked .scope-button-content image {
+  color: #3568d6;
+}
+.ticket-type-mark {
+  min-width: 24px;
+  min-height: 24px;
+}
+.ticket-type-mark image {
+  -gtk-icon-size: 14px;
+}
