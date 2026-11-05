@@ -114,17 +114,32 @@ pub fn run() -> glib::ExitCode {
 }
 
 // One helper for consistent icon/text alignment across all issue-scope filters.
-fn scope_button(label: &str, icon_name: &str) -> gtk::ToggleButton {
+fn scope_button(label: &str, icon: &impl IsA<gtk::Widget>) -> gtk::ToggleButton {
     let button = gtk::ToggleButton::new();
     let content = gtk::Box::new(gtk::Orientation::Horizontal, 6);
     content.add_css_class("scope-button-content");
-    let icon = gtk::Image::from_icon_name(icon_name);
     icon.set_valign(gtk::Align::Center);
-    content.append(&icon);
+    content.append(icon);
     content.append(&gtk::Label::new(Some(label)));
     button.set_child(Some(&content));
     button.update_property(&[gtk::accessible::Property::Label(label)]);
     button
+}
+
+// An unassigned issue has an unknown owner, not a removed or offline owner.
+fn unassigned_scope_icon() -> gtk::Overlay {
+    let icon = gtk::Overlay::new();
+    icon.set_size_request(22, 17);
+    let user = gtk::Image::from_icon_name("avatar-default-symbolic");
+    user.set_halign(gtk::Align::Start);
+    user.set_valign(gtk::Align::Center);
+    icon.set_child(Some(&user));
+    let question = gtk::Label::new(Some("?"));
+    question.add_css_class("unassigned-question");
+    question.set_halign(gtk::Align::End);
+    question.set_valign(gtk::Align::End);
+    icon.add_overlay(&question);
+    icon
 }
 
 fn build_ui(app: &adw::Application) {
@@ -217,9 +232,9 @@ fn build_ui(app: &adw::Application) {
     search.set_placeholder_text(Some("Search issues… (/)"));
     search.set_width_request(190);
     search.set_hexpand(false);
-    let mine_filter = scope_button("Mine", "avatar-default-symbolic");
-    let unassigned_filter = scope_button("Unassigned", "list-remove-symbolic");
-    let all_filter = scope_button("All", "system-users-symbolic");
+    let mine_filter = scope_button("Mine", &gtk::Image::from_icon_name("avatar-default-symbolic"));
+    let unassigned_filter = scope_button("Unassigned", &unassigned_scope_icon());
+    let all_filter = scope_button("All", &gtk::Image::from_icon_name("system-users-symbolic"));
     unassigned_filter.set_group(Some(&mine_filter));
     all_filter.set_group(Some(&mine_filter));
     mine_filter.set_active(true);
