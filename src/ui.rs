@@ -135,7 +135,7 @@ fn build_ui(app: &adw::Application) {
     sidebar_toggle.add_css_class("flat");
     sidebar_toggle.set_active(true);
     let connect_button = gtk::Button::builder()
-        .icon_name("emblem-system-symbolic")
+        .icon_name("avatar-default-symbolic")
         .tooltip_text("Connect or switch Jira account")
         .build();
     let disconnect_button = gtk::Button::builder()
