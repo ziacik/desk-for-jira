@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
+use adw::prelude::*;
 use gtk::glib;
-use gtk::prelude::*;
 use serde_json::Value;
 
 use crate::jira::{Attachment, Issue};
