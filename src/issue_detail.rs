@@ -42,8 +42,8 @@ pub fn render(
     // Draw the actual Git branching graph, rather than an ambiguous copy glyph.
     // Bundled in code so the icon works even when the system icon theme lacks one.
     let branch_icon = gtk::DrawingArea::new();
-    branch_icon.set_content_width(20);
-    branch_icon.set_content_height(20);
+    branch_icon.set_content_width(14);
+    branch_icon.set_content_height(14);
     branch_icon.set_draw_func(|area, cr, width, height| {
         let size = f64::from(width.min(height));
         let offset_x = (f64::from(width) - size) / 2.0;
