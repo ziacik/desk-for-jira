@@ -38,6 +38,22 @@ pub fn render(container: &gtk::Box, issue: &Issue, base_url: &str) -> ImageSlots
     summary.set_selectable(true);
     summary.set_xalign(0.0);
     header.append(&summary);
+    if let Some(epic) = &issue.epic {
+        let epic_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        let epic_caption = gtk::Label::new(Some("Epic"));
+        epic_caption.add_css_class("detail-field-label");
+        epic_row.append(&epic_caption);
+        let title = if epic.summary.is_empty() { &epic.key } else { &epic.summary };
+        if base_url.is_empty() {
+            epic_row.append(&gtk::Label::new(Some(title)));
+        } else {
+            let url = format!("{base_url}/browse/{}", epic.key);
+            let link = gtk::LinkButton::with_label(&url, title);
+            link.set_tooltip_text(Some(&epic.key));
+            epic_row.append(&link);
+        }
+        header.append(&epic_row);
+    }
     container.append(&header);
 
     let metadata = gtk::Grid::new();
