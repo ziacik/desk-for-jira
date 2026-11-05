@@ -800,15 +800,10 @@ fn update_project_label(ui: &Ui, state: &Rc<RefCell<State>>) {
         let button = gtk::ToggleButton::new();
         button.set_group(Some(&all_button));
         button.add_css_class("sidebar-project-filter");
-        let row = gtk::Box::new(gtk::Orientation::Horizontal, 9);
-        let mark = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-        mark.add_css_class("sidebar-project-mark");
-        row.append(&mark);
         let label = gtk::Label::new(Some(&project));
         label.set_xalign(0.0);
         label.set_hexpand(true);
-        row.append(&label);
-        button.set_child(Some(&row));
+        button.set_child(Some(&label));
         button.set_active(selected.as_deref() == Some(&project));
         {
             let ui = ui.clone();
