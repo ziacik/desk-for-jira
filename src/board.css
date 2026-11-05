@@ -133,11 +133,9 @@ button.collapsed-expand:hover {
   letter-spacing: 0.02em;
 }
 .detail-kind {
-  color: alpha(@window_fg_color, 0.75);
-  background-color: alpha(@window_fg_color, 0.065);
-  border-radius: 7px;
-  padding: 3px 8px;
-  font-size: 0.86em;
+  color: alpha(@window_fg_color, 0.65);
+  font-size: 0.9em;
+  font-weight: 500;
 }
 .detail-title {
   color: @window_fg_color;
@@ -164,11 +162,11 @@ button.collapsed-expand:hover {
   color: @accent_color;
 }
 button.detail-branch-action {
-  min-width: 28px;
-  min-height: 28px;
-  padding: 4px;
-  border-radius: 7px;
-  color: alpha(@window_fg_color, 0.62);
+  min-width: 24px;
+  min-height: 24px;
+  padding: 3px;
+  border-radius: 6px;
+  color: alpha(@window_fg_color, 0.60);
   background: transparent;
   box-shadow: none;
 }
@@ -484,10 +482,9 @@ label link:hover { color: #618bff; }
 
 /* Visual language shared by the header and the board controls. */
 .detail-header-key {
-  color: #4c72dc;
-  font-size: 1.14em;
-  font-weight: 800;
-  letter-spacing: 0.01em;
+  color: alpha(@window_fg_color, 0.82);
+  font-size: 1em;
+  font-weight: 600;
 }
 .scope-button-content {
   color: inherit;
