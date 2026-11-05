@@ -38,7 +38,39 @@ pub fn render(
 
     // Branch names are useful occasionally, so a small direct copy action is enough.
     let branch_name = suggested_branch_name(&issue.key, &issue.summary);
-    let copy_branch = gtk::Button::from_icon_name("edit-copy-symbolic");
+    let copy_branch = gtk::Button::new();
+    // Draw the actual Git branching graph, rather than an ambiguous copy glyph.
+    // Bundled in code so the icon works even when the system icon theme lacks one.
+    let branch_icon = gtk::DrawingArea::new();
+    branch_icon.set_content_width(20);
+    branch_icon.set_content_height(20);
+    branch_icon.set_draw_func(|area, cr, width, height| {
+        let size = f64::from(width.min(height));
+        let offset_x = (f64::from(width) - size) / 2.0;
+        let offset_y = (f64::from(height) - size) / 2.0;
+        cr.translate(offset_x, offset_y);
+        cr.scale(size / 20.0, size / 20.0);
+        let color = area.style_context().color();
+        cr.set_source_rgba(
+            f64::from(color.red()),
+            f64::from(color.green()),
+            f64::from(color.blue()),
+            f64::from(color.alpha()),
+        );
+        cr.set_line_width(1.7);
+        cr.set_line_cap(gtk::cairo::LineCap::Round);
+        cr.set_line_join(gtk::cairo::LineJoin::Round);
+        cr.move_to(5.0, 5.0);
+        cr.line_to(5.0, 15.0);
+        cr.move_to(5.0, 11.0);
+        cr.curve_to(10.0, 11.0, 15.0, 11.0, 15.0, 5.0);
+        cr.stroke().expect("Git branch icon stroke");
+        for (x, y) in [(5.0, 4.0), (5.0, 16.0), (15.0, 4.0)] {
+            cr.arc(x, y, 2.0, 0.0, std::f64::consts::TAU);
+            cr.fill().expect("Git branch icon node");
+        }
+    });
+    copy_branch.set_child(Some(&branch_icon));
     copy_branch.add_css_class("flat");
     copy_branch.add_css_class("detail-branch-action");
     copy_branch.set_tooltip_text(Some("Copy suggested Git branch name"));
