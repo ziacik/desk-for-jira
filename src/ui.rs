@@ -126,19 +126,11 @@ fn scope_button(label: &str, icon: &impl IsA<gtk::Widget>) -> gtk::ToggleButton 
     button
 }
 
-// An unassigned issue has an unknown owner, not a removed or offline owner.
-fn unassigned_scope_icon() -> gtk::Overlay {
-    let icon = gtk::Overlay::new();
-    icon.set_size_request(22, 17);
-    let user = gtk::Image::from_icon_name("avatar-default-symbolic");
-    user.set_halign(gtk::Align::Start);
-    user.set_valign(gtk::Align::Center);
-    icon.set_child(Some(&user));
-    let question = gtk::Label::new(Some("?"));
-    question.add_css_class("unassigned-question");
-    question.set_halign(gtk::Align::End);
-    question.set_valign(gtk::Align::End);
-    icon.add_overlay(&question);
+// A question mark clearly denotes issues with no assignee.
+fn unassigned_scope_icon() -> gtk::Label {
+    let icon = gtk::Label::new(Some("?"));
+    icon.add_css_class("unassigned-question");
+    icon.set_xalign(0.5);
     icon
 }
 
