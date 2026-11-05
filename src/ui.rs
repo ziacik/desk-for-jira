@@ -17,7 +17,8 @@ use crate::{
     secrets,
 };
 
-const COLUMN_WIDTH: i32 = 330;
+const COLUMN_WIDTH: i32 = 302;
+const DETAIL_WIDTH: i32 = 470;
 const COLLAPSED_COLUMN_WIDTH: i32 = 116;
 
 #[derive(Clone)]
@@ -39,6 +40,7 @@ struct Ui {
     board_box: gtk::Box,
     detail_box: gtk::Box,
     detail_panel: gtk::Box,
+    inner_split: gtk::Paned,
     image_slots: Rc<RefCell<issue_detail::ImageSlots>>,
     events: Sender<Event>,
     selected_issue: Rc<RefCell<Option<String>>>,
@@ -156,7 +158,7 @@ fn build_ui(app: &adw::Application) {
     center.set_margin_end(16);
     center.set_margin_bottom(12);
     center.set_hexpand(true);
-    center.set_width_request(420);
+    center.set_width_request(320);
 
     let heading = gtk::Box::new(gtk::Orientation::Horizontal, 14);
     heading.add_css_class("board-heading");
@@ -190,8 +192,8 @@ fn build_ui(app: &adw::Application) {
 
     let search = gtk::SearchEntry::new();
     search.set_placeholder_text(Some("Search issues… (/)"));
-    search.set_width_request(300);
-    search.set_hexpand(false);
+    search.set_width_request(210);
+    search.set_hexpand(true);
     let mine_filter = gtk::ToggleButton::with_label("Mine");
     let unassigned_filter = gtk::ToggleButton::with_label("Unassigned");
     let all_filter = gtk::ToggleButton::with_label("All");
@@ -205,19 +207,25 @@ fn build_ui(app: &adw::Application) {
     }
     let sprint_filter = gtk::CheckButton::with_label("Active sprint only");
     sprint_filter.set_tooltip_text(Some("Show only issues in an active sprint"));
-    let filters_row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
-    filters_row.add_css_class("board-toolbar");
+    let toolbar_rows = gtk::Box::new(gtk::Orientation::Vertical, 8);
+    toolbar_rows.add_css_class("board-toolbar");
+    let scope_row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
     filters.add_css_class("scope-filters");
-    filters_row.append(&filters);
-    filters_row.append(&sprint_filter);
+    scope_row.append(&filters);
+    scope_row.append(&sprint_filter);
+    toolbar_rows.append(&scope_row);
+
+    let tools_row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
     let status = gtk::Label::new(Some("Connecting to keyring…"));
     status.add_css_class("dim-label");
-    status.set_hexpand(true);
-    status.set_halign(gtk::Align::End);
+    status.set_halign(gtk::Align::Start);
+    status.set_valign(gtk::Align::Center);
     status.set_ellipsize(gtk::pango::EllipsizeMode::End);
-    filters_row.append(&status);
-    filters_row.append(&search);
-    center.append(&filters_row);
+    status.set_hexpand(false);
+    tools_row.append(&status);
+    tools_row.append(&search);
+    toolbar_rows.append(&tools_row);
+    center.append(&toolbar_rows);
 
     let board_box = gtk::Box::new(gtk::Orientation::Horizontal, 14);
     // Columns retain a useful width even on ultra-wide monitors.
@@ -226,6 +234,9 @@ fn build_ui(app: &adw::Application) {
     board_box.set_halign(gtk::Align::Start);
     let scroller = gtk::ScrolledWindow::new();
     scroller.add_css_class("board-scroll");
+    scroller.set_min_content_width(320);
+    scroller.set_propagate_natural_width(false);
+    scroller.set_overlay_scrolling(false);
     scroller.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Never);
     scroller.set_hexpand(true);
     scroller.set_vexpand(true);
@@ -233,7 +244,7 @@ fn build_ui(app: &adw::Application) {
     center.append(&scroller);
 
     let detail_panel = gtk::Box::new(gtk::Orientation::Vertical, 0);
-    detail_panel.set_width_request(420);
+    detail_panel.set_width_request(390);
     detail_panel.add_css_class("detail-panel");
     detail_panel.set_visible(false);
     let detail_header = gtk::Box::new(gtk::Orientation::Horizontal, 8);
@@ -258,6 +269,8 @@ fn build_ui(app: &adw::Application) {
     detail_box.set_margin_end(22);
     detail_box.set_margin_bottom(28);
     let detail_scroll = gtk::ScrolledWindow::new();
+    detail_scroll.set_min_content_width(360);
+    detail_scroll.set_propagate_natural_width(false);
     detail_scroll.set_child(Some(&detail_box));
     detail_scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
     detail_scroll.set_vexpand(true);
@@ -266,7 +279,8 @@ fn build_ui(app: &adw::Application) {
     // The sidebar exposes real actions and the actual selected project set.
     let sidebar = gtk::Box::new(gtk::Orientation::Vertical, 14);
     sidebar.add_css_class("workspace-sidebar");
-    sidebar.set_width_request(226);
+    sidebar.set_width_request(208);
+    sidebar.set_hexpand(false);
     let sidebar_intro = gtk::Box::new(gtk::Orientation::Vertical, 4);
     let eyebrow = gtk::Label::new(Some("WORKSPACE"));
     eyebrow.add_css_class("sidebar-eyebrow");
@@ -306,6 +320,7 @@ fn build_ui(app: &adw::Application) {
     sidebar.append(&sidebar_actions);
 
     let sidebar_revealer = gtk::Revealer::new();
+    sidebar_revealer.set_hexpand(false);
     sidebar_revealer.set_transition_type(gtk::RevealerTransitionType::SlideRight);
     sidebar_revealer.set_reveal_child(true);
     sidebar_revealer.set_child(Some(&sidebar));
@@ -317,11 +332,12 @@ fn build_ui(app: &adw::Application) {
     let inner_split = gtk::Paned::new(gtk::Orientation::Horizontal);
     inner_split.set_start_child(Some(&center));
     inner_split.set_end_child(Some(&detail_panel));
-    inner_split.set_position(860);
+    // Never let a long description or a wide board force sibling panes off-screen.
+    inner_split.set_position(790);
     inner_split.set_resize_start_child(true);
     inner_split.set_resize_end_child(false);
-    inner_split.set_shrink_start_child(false);
-    inner_split.set_shrink_end_child(false);
+    inner_split.set_shrink_start_child(true);
+    inner_split.set_shrink_end_child(true);
     inner_split.set_hexpand(true);
     let workspace = gtk::Box::new(gtk::Orientation::Horizontal, 0);
     workspace.add_css_class("workspace-root");
@@ -338,7 +354,7 @@ fn build_ui(app: &adw::Application) {
         window, toast, header_title, spinner, status, projects_label, sidebar_projects,
         connect_button, disconnect_button, refresh_button,
         manage_projects_button, manage_columns_button, search, center_title,
-        board_box, detail_box, detail_panel, mine_filter, unassigned_filter, all_filter, sprint_filter,
+        board_box, detail_box, detail_panel, inner_split, mine_filter, unassigned_filter, all_filter, sprint_filter,
         image_slots: Rc::new(RefCell::new(issue_detail::ImageSlots::new())),
         events: sender.clone(),
         selected_issue: Rc::new(RefCell::new(None)),
@@ -1810,6 +1826,7 @@ fn issue_button(issue: &Issue, ui: &Ui, base_url: &str, account: Option<&Credent
     let issue = issue.clone();
     let detail_box = ui.detail_box.clone();
     let detail_panel = ui.detail_panel.clone();
+    let inner_split = ui.inner_split.clone();
     let selected_button = Rc::downgrade(&ui.selected_button);
     let selected_issue = ui.selected_issue.clone();
     let base_url = base_url.to_owned();
@@ -1826,6 +1843,14 @@ fn issue_button(issue: &Issue, ui: &Ui, base_url: &str, account: Option<&Credent
         button.add_css_class("selected-issue");
         *selected_issue.borrow_mut() = Some(issue.key.clone());
         *image_slots.borrow_mut() = issue_detail::render(&detail_box, &issue, &base_url, &toast);
+        // The inspector should remain readable, but it must never take half the screen.
+        // Set a useful width only when opening it, respecting later manual resizing.
+        if !detail_panel.is_visible() {
+            let available = inner_split.width();
+            if available > DETAIL_WIDTH + 320 {
+                inner_split.set_position(available - DETAIL_WIDTH);
+            }
+        }
         detail_panel.set_visible(true);
         if let Some(account) = account.clone() {
             let attachments: Vec<_> = issue.attachments.iter()
