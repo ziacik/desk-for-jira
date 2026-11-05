@@ -1866,7 +1866,8 @@ mod scope_tests {
             key: "ART-1".into(),
             summary: epic.summary.clone(),
         });
-        let groups = visible_board_groups(&settings, &[epic, bug], "");
+        let issues = [epic, bug];
+        let groups = visible_board_groups(&settings, &issues, "");
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].1.len(), 1);
         assert_eq!(groups[0].1[0].key, "ART-2");
