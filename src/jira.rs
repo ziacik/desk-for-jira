@@ -1,4 +1,4 @@
-use std::{collections::HashSet, time::Duration};
+use std::{collections::HashSet, io::Read, time::Duration};
 
 use anyhow::{Context, Result, bail, ensure};
 use reqwest::blocking::{Client, RequestBuilder};
@@ -7,7 +7,7 @@ use serde_json::{Value, json};
 
 const PAGE_SIZE: usize = 100;
 const MAX_ITEMS: usize = 500;
-const FIELDS: [&str; 9] = [
+const FIELDS: [&str; 10] = [
     "summary",
     "status",
     "assignee",
@@ -15,6 +15,7 @@ const FIELDS: [&str; 9] = [
     "priority",
     "updated",
     "description",
+    "attachment",
     "reporter",
     "project",
 ];
@@ -64,6 +65,22 @@ pub struct Issue {
     pub assignee: String,
     pub updated: String,
     pub description: String,
+    pub description_doc: Option<Value>,
+    pub attachments: Vec<Attachment>,
+}
+
+#[derive(Clone, Debug)]
+pub struct Attachment {
+    pub id: String,
+    pub filename: String,
+    pub mime_type: String,
+    pub content_url: String,
+}
+
+impl Attachment {
+    pub fn is_image(&self) -> bool {
+        self.mime_type.to_ascii_lowercase().starts_with("image/")
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -319,6 +336,29 @@ impl JiraClient {
         result
     }
 
+    /// Download a Jira attachment using the stored credentials. Only the same
+    /// HTTPS origin may be requested; reqwest drops credentials on CDN redirects.
+    pub fn image_bytes(&self, attachment: &Attachment) -> Result<Vec<u8>> {
+        ensure!(attachment.is_image(), "Not an image attachment");
+        let base = reqwest::Url::parse(&self.account.base_url)?;
+        let url = reqwest::Url::parse(&attachment.content_url)
+            .context("Invalid attachment URL")?;
+        ensure!(url.scheme() == "https"
+            && url.host_str() == base.host_str()
+            && url.port_or_known_default() == base.port_or_known_default(),
+            "Attachment URL is not on the Jira server");
+        let response = self.authorize(self.http.get(url))
+            .send().context("Could not load Jira attachment")?;
+        ensure!(response.status().is_success(),
+            "Jira attachment HTTP {}", response.status());
+        const MAX_IMAGE_BYTES: usize = 12 * 1024 * 1024;
+        let mut bytes = Vec::new();
+        let mut stream = response.take(MAX_IMAGE_BYTES as u64 + 1);
+        stream.read_to_end(&mut bytes)?;
+        ensure!(bytes.len() <= MAX_IMAGE_BYTES, "Jira image exceeds the preview size limit");
+        Ok(bytes)
+    }
+
     pub fn project_issues(&self, keys: &[String], scope: Option<&str>, active_sprint_only: bool) -> Result<Vec<Issue>> {
         if keys.is_empty() { return Ok(Vec::new()); }
         let jql = project_issues_jql(keys, scope, active_sprint_only)?;
@@ -480,6 +520,14 @@ fn parse_issue(v: &Value) -> Option<Issue> {
         assignee: nested("assignee", "displayName"),
         updated: field("updated").chars().take(10).collect(),
         description: format_description(f.get("description")),
+        description_doc: f.get("description").filter(|value| value.is_object()).cloned(),
+        attachments: f.get("attachment").and_then(Value::as_array)
+            .into_iter().flatten().filter_map(|a| Some(Attachment {
+                id: a.get("id")?.as_str()?.to_owned(),
+                filename: a.get("filename")?.as_str()?.to_owned(),
+                mime_type: a.get("mimeType").and_then(Value::as_str).unwrap_or("").to_owned(),
+                content_url: a.get("content").and_then(Value::as_str).unwrap_or("").to_owned(),
+            })).collect(),
     })
 }
 
@@ -612,6 +660,23 @@ mod tests {
     }
 
     #[test]
+    fn retains_attachment_metadata_for_lazy_previews() {
+        let data = json!({"issues":[{"key":"ART-10","fields":{
+            "summary":"Illustrated description",
+            "description":{"type":"doc","content":[{"type":"mediaSingle","content":[{"type":"media","attrs":{"id":"uuid-image","type":"file"}}]}]},
+            "attachment":[
+                {"id":"42","filename":"screen.png","mimeType":"image/png","content":"https://jira.example.com/rest/api/3/attachment/content/42"},
+                {"id":"43","filename":"notes.txt","mimeType":"text/plain","content":"https://jira.example.com/rest/api/3/attachment/content/43"}
+            ]
+        }}]});
+        let issue = &parse_issues(&data)[0];
+        assert_eq!(issue.attachments.len(), 2);
+        assert!(issue.attachments[0].is_image());
+        assert!(!issue.attachments[1].is_image());
+        assert_eq!(issue.description_doc.as_ref().unwrap()["content"][0]["type"], "mediaSingle");
+    }
+
+    #[test]
     fn reads_cloud_adf_and_status() {
         let data = json!({"issues":[{"key":"ABC-42","fields":{
             "summary":"Fix crash",
@@ -625,5 +690,6 @@ mod tests {
         assert_eq!(issues.len(), 1);
         assert_eq!(issues[0].status_id, "3");
         assert_eq!(issues[0].description, "Hello\nWorld");
+        assert_eq!(issues[0].description_doc.as_ref().and_then(|doc| doc.get("type")).and_then(Value::as_str), Some("doc"));
     }
 }

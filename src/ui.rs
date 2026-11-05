@@ -11,6 +11,7 @@ use adw::prelude::*;
 use gtk::glib;
 
 use crate::{
+    issue_detail,
     jira::{AuthMode, Credentials, Issue, JiraClient, Project, ProjectStatus},
     preferences::{self, BoardSettings},
     secrets,
@@ -37,6 +38,8 @@ struct Ui {
     board_box: gtk::Box,
     detail_box: gtk::Box,
     detail_panel: gtk::Box,
+    image_slots: Rc<RefCell<issue_detail::ImageSlots>>,
+    events: Sender<Event>,
     selected_issue: Rc<RefCell<Option<String>>>,
     selected_button: Rc<RefCell<Option<gtk::Button>>>,
     collapsed_columns: Rc<RefCell<HashSet<String>>>,
@@ -92,6 +95,7 @@ enum Event {
     Stored(Result<Option<Credentials>, String>),
     Loaded(u64, Credentials, Result<Loaded, String>),
     BoardLoaded(u64, u64, Result<BoardData, String>),
+    ImageLoaded(u64, String, String, Result<Vec<u8>, String>),
     Disconnected(u64, Result<(), String>),
 }
 
@@ -210,13 +214,15 @@ fn build_ui(app: &adw::Application) {
     center.append(&scroller);
 
     let detail_panel = gtk::Box::new(gtk::Orientation::Vertical, 0);
-    detail_panel.set_width_request(320);
+    detail_panel.set_width_request(420);
+    detail_panel.add_css_class("detail-panel");
     detail_panel.set_visible(false);
     let detail_header = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-    detail_header.set_margin_start(16);
-    detail_header.set_margin_end(8);
-    detail_header.set_margin_top(10);
-    detail_header.set_margin_bottom(6);
+    detail_header.add_css_class("detail-panel-header");
+    detail_header.set_margin_start(22);
+    detail_header.set_margin_end(14);
+    detail_header.set_margin_top(14);
+    detail_header.set_margin_bottom(12);
     let detail_heading = gtk::Label::new(Some("Issue details"));
     detail_heading.add_css_class("heading");
     detail_heading.set_xalign(0.0);
@@ -227,11 +233,11 @@ fn build_ui(app: &adw::Application) {
     close_detail.set_tooltip_text(Some("Close issue details (Esc)"));
     detail_header.append(&close_detail);
     detail_panel.append(&detail_header);
-    let detail_box = gtk::Box::new(gtk::Orientation::Vertical, 12);
-    detail_box.set_margin_top(8);
-    detail_box.set_margin_start(16);
-    detail_box.set_margin_end(16);
-    detail_box.set_margin_bottom(20);
+    let detail_box = gtk::Box::new(gtk::Orientation::Vertical, 18);
+    detail_box.set_margin_top(20);
+    detail_box.set_margin_start(22);
+    detail_box.set_margin_end(22);
+    detail_box.set_margin_bottom(28);
     let detail_scroll = gtk::ScrolledWindow::new();
     detail_scroll.set_child(Some(&detail_box));
     detail_scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
@@ -241,7 +247,7 @@ fn build_ui(app: &adw::Application) {
     let inner_split = gtk::Paned::new(gtk::Orientation::Horizontal);
     inner_split.set_start_child(Some(&center));
     inner_split.set_end_child(Some(&detail_panel));
-    inner_split.set_position(920);
+    inner_split.set_position(860);
     inner_split.set_resize_start_child(true);
     inner_split.set_resize_end_child(false);
     inner_split.set_shrink_start_child(false);
@@ -258,6 +264,8 @@ fn build_ui(app: &adw::Application) {
         connect_button, disconnect_button, refresh_button,
         manage_projects_button, manage_columns_button, search, center_title,
         board_box, detail_box, detail_panel, mine_filter, unassigned_filter, all_filter, sprint_filter,
+        image_slots: Rc::new(RefCell::new(issue_detail::ImageSlots::new())),
+        events: sender.clone(),
         selected_issue: Rc::new(RefCell::new(None)),
         selected_button: Rc::new(RefCell::new(None)),
         collapsed_columns: Rc::new(RefCell::new(HashSet::new())),
@@ -347,7 +355,8 @@ fn wire_actions(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>) {
         let ui = ui.clone();
         let state = state.clone();
         let sender = sender.clone();
-        ui.sprint_filter.connect_toggled(move |button| {
+        let button = ui.sprint_filter.clone();
+        button.connect_toggled(move |button| {
             let active = button.is_active();
             let changed = {
                 let mut s = state.borrow_mut();
@@ -470,7 +479,7 @@ fn handle_event(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>, eve
                         s.active_sprint_only = false;
                     }
                     ui.mine_filter.set_active(true);
-                    ui.sprint_filter.set_active(false);
+            ui.sprint_filter.set_active(false);
                     ui.manage_projects_button.set_sensitive(true);
                     ui.manage_columns_button.set_sensitive(false);
                     ui.header_title.set_subtitle(&loaded.user);
@@ -516,6 +525,18 @@ fn handle_event(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>, eve
                     show_error(ui, &error);
                 }
             }
+        }
+        Event::ImageLoaded(id, key, attachment_id, result) => {
+            if state.borrow().generation != id
+                || ui.selected_issue.borrow().as_deref() != Some(key.as_str())
+            {
+                return;
+            }
+            issue_detail::set_image(
+                &ui.image_slots.borrow(),
+                &attachment_id,
+                result.as_deref().ok(),
+            );
         }
         Event::Disconnected(id, result) => {
             if state.borrow().generation != id { return; }
@@ -1512,7 +1533,7 @@ fn render_board(ui: &Ui, state: &State) {
 
         let item_box = gtk::Box::new(gtk::Orientation::Vertical, 7);
         for issue in issues {
-            item_box.append(&issue_button(issue, ui, url));
+            item_box.append(&issue_button(issue, ui, url, state.account.as_ref(), state.generation));
         }
         let scroll = gtk::ScrolledWindow::new();
         scroll.set_child(Some(&item_box));
@@ -1582,7 +1603,7 @@ fn render_board(ui: &Ui, state: &State) {
     }
 }
 
-fn issue_button(issue: &Issue, ui: &Ui, base_url: &str) -> gtk::Button {
+fn issue_button(issue: &Issue, ui: &Ui, base_url: &str, account: Option<&Credentials>, generation: u64) -> gtk::Button {
     let button = gtk::Button::new();
     button.add_css_class("issue-card");
     button.set_hexpand(true);
@@ -1632,6 +1653,9 @@ fn issue_button(issue: &Issue, ui: &Ui, base_url: &str) -> gtk::Button {
     let selected_button = Rc::downgrade(&ui.selected_button);
     let selected_issue = ui.selected_issue.clone();
     let base_url = base_url.to_owned();
+    let account = account.cloned();
+    let image_slots = ui.image_slots.clone();
+    let events = ui.events.clone();
     button.connect_clicked(move |button| {
         if let Some(selected_button) = selected_button.upgrade()
             && let Some(previous) = selected_button.borrow_mut().replace(button.clone())
@@ -1640,78 +1664,27 @@ fn issue_button(issue: &Issue, ui: &Ui, base_url: &str) -> gtk::Button {
         }
         button.add_css_class("selected-issue");
         *selected_issue.borrow_mut() = Some(issue.key.clone());
-        show_detail(&detail_box, &issue, &base_url);
+        *image_slots.borrow_mut() = issue_detail::render(&detail_box, &issue, &base_url);
         detail_panel.set_visible(true);
+        if let Some(account) = account.clone() {
+            let attachments: Vec<_> = issue.attachments.iter()
+                .filter(|a| a.is_image() && !a.content_url.is_empty()).cloned().collect();
+            if !attachments.is_empty() {
+                let events = events.clone();
+                let key = issue.key.clone();
+                thread::spawn(move || {
+                    let Ok(client) = JiraClient::new(account) else { return };
+                    for attachment in attachments {
+                        let result = client.image_bytes(&attachment).map_err(|e| e.to_string());
+                        let _ = events.send(Event::ImageLoaded(
+                            generation, key.clone(), attachment.id, result
+                        ));
+                    }
+                });
+            }
+        }
     });
     button
-}
-
-fn show_detail(container: &gtk::Box, issue: &Issue, base_url: &str) {
-    clear_box(container);
-    let key = gtk::Label::new(Some(&issue.key));
-    key.set_xalign(0.0);
-    key.add_css_class("dim-label");
-    container.append(&key);
-
-    let summary = gtk::Label::new(Some(&issue.summary));
-    summary.add_css_class("title-2");
-    summary.set_wrap(true);
-    summary.set_selectable(true);
-    summary.set_xalign(0.0);
-    container.append(&summary);
-
-
-    let fields = gtk::Grid::new();
-    fields.set_row_spacing(8);
-    fields.set_column_spacing(12);
-    for (row, (label, value)) in [
-        ("Status", issue.status.as_str()),
-        ("Type", issue.kind.as_str()),
-        ("Priority", issue.priority.as_str()),
-        ("Assignee", issue.assignee.as_str()),
-        ("Updated", issue.updated.as_str()),
-    ].into_iter().filter(|(_, value)| !value.is_empty()).enumerate() {
-        let caption = gtk::Label::new(Some(label));
-        caption.add_css_class("dim-label");
-        caption.set_xalign(0.0);
-        fields.attach(&caption, 0, row as i32, 1, 1);
-        let value = gtk::Label::new(Some(value));
-        value.set_wrap(true);
-        value.set_xalign(0.0);
-        value.set_selectable(true);
-        value.set_hexpand(true);
-        fields.attach(&value, 1, row as i32, 1, 1);
-    }
-    container.append(&fields);
-
-    let section = gtk::Label::new(Some("Description"));
-    section.add_css_class("heading");
-    section.set_xalign(0.0);
-    section.set_margin_top(14);
-    container.append(&section);
-
-    let description = gtk::Label::new(Some(if issue.description.is_empty() {
-        "No description"
-    } else {
-        &issue.description
-    }));
-    description.set_wrap(true);
-    description.set_selectable(true);
-    description.set_xalign(0.0);
-    description.set_valign(gtk::Align::Start);
-    container.append(&description);
-
-    if !base_url.is_empty() {
-        let open = gtk::Button::with_label("Open in Jira ↗");
-        open.set_halign(gtk::Align::Start);
-        let url = format!("{base_url}/browse/{}", issue.key);
-        open.connect_clicked(move |_| {
-            let _ = gtk::gio::AppInfo::launch_default_for_uri(
-                &url, None::<&gtk::gio::AppLaunchContext>
-            );
-        });
-        container.append(&open);
-    }
 }
 
 fn set_busy(ui: &Ui, state: &Rc<RefCell<State>>, busy: bool) {
@@ -1764,6 +1737,8 @@ mod scope_tests {
             assignee: String::new(),
             updated: String::new(),
             description: String::new(),
+            description_doc: None,
+            attachments: Vec::new(),
         }
     }
 

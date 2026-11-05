@@ -1,3 +1,4 @@
+mod issue_detail;
 mod jira;
 mod preferences;
 mod secrets;
