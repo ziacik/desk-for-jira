@@ -68,6 +68,31 @@ button.issue-card label.ticket-priority {
   border-radius: 6px;
   padding: 2px 6px;
 }
+/* Consistent Epic accent, without changing the card's foreground colors. */
+.epic-stripe {
+  min-width: 4px;
+  border-radius: 4px;
+}
+.epic-color-0 { background-color: #8b65c7; }
+.epic-color-1 { background-color: #278e9c; }
+.epic-color-2 { background-color: #cf7a3b; }
+.epic-color-3 { background-color: #618b39; }
+.epic-color-4 { background-color: #b05e94; }
+.epic-color-5 { background-color: #3b7cbb; }
+.epic-color-6 { background-color: #bc5966; }
+.epic-color-7 { background-color: #8d7862; }
+.ticket-epic {
+  margin-top: 2px;
+}
+.ticket-epic-icon {
+  color: alpha(@window_fg_color, 0.60);
+  -gtk-icon-size: 13px;
+}
+button.issue-card label.ticket-epic-label {
+  font-size: 0.86em;
+  color: alpha(@window_fg_color, 0.78);
+}
+
 button.collapsed-expand {
   color: @window_fg_color;
   padding: 12px 2px;
