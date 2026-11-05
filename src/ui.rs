@@ -42,6 +42,7 @@ struct Ui {
     detail_box: gtk::Box,
     detail_panel: gtk::Box,
     detail_heading: gtk::Label,
+    open_in_jira: gtk::Button,
     saved_detail_width: Rc<Cell<i32>>,
     inner_split: gtk::Paned,
     image_slots: Rc<RefCell<issue_detail::ImageSlots>>,
@@ -281,6 +282,11 @@ fn build_ui(app: &adw::Application) {
     detail_heading.add_css_class("detail-header-key");
     detail_heading.set_xalign(0.5);
     detail_header.set_title_widget(Some(&detail_heading));
+    let open_in_jira = gtk::Button::from_icon_name("go-jump-symbolic");
+    open_in_jira.add_css_class("flat");
+    open_in_jira.set_tooltip_text(Some("Open this issue in Jira"));
+    open_in_jira.set_visible(false);
+    detail_header.pack_end(&open_in_jira);
     let close_detail = gtk::Button::from_icon_name("go-next-symbolic");
     close_detail.add_css_class("flat");
     close_detail.set_tooltip_text(Some("Close issue details (Esc)"));
@@ -424,7 +430,7 @@ fn build_ui(app: &adw::Application) {
         project_filter: Rc::new(RefCell::new(None)),
         connect_button, disconnect_button, refresh_button,
         manage_projects_button, manage_columns_button, search, center_title,
-        board_box, detail_box, detail_panel, detail_heading, inner_split,
+        board_box, detail_box, detail_panel, detail_heading, open_in_jira, inner_split,
         saved_detail_width: Rc::new(Cell::new(DETAIL_WIDTH)),
         mine_filter, unassigned_filter, all_filter, sprint_filter,
         image_slots: Rc::new(RefCell::new(issue_detail::ImageSlots::new())),
@@ -433,6 +439,24 @@ fn build_ui(app: &adw::Application) {
         selected_button: Rc::new(RefCell::new(None)),
         collapsed_columns: Rc::new(RefCell::new(HashSet::new())),
     };
+    {
+        // The action always opens the currently selected issue, not the
+        // issue whose details happened to be rendered when it was created.
+        let selected_issue = ui.selected_issue.clone();
+        let state = state.clone();
+        ui.open_in_jira.connect_clicked(move |_| {
+            let key = selected_issue.borrow().clone();
+            let base_url = state.borrow().account.as_ref().map(|a| a.base_url.clone());
+            if let (Some(key), Some(base_url)) = (key, base_url)
+                && !base_url.is_empty()
+            {
+                let url = format!("{}/browse/{key}", base_url.trim_end_matches('/'));
+                let _ = gtk::gio::AppInfo::launch_default_for_uri(
+                    &url, None::<&gtk::gio::AppLaunchContext>
+                );
+            }
+        });
+    }
     {
         let panel = ui.detail_panel.downgrade();
         let saved_width = ui.saved_detail_width.clone();
@@ -1974,6 +1998,7 @@ fn issue_button(issue: &Issue, ui: &Ui, base_url: &str, account: Option<&Credent
     let detail_panel = ui.detail_panel.clone();
     let inner_split = ui.inner_split.clone();
     let detail_heading = ui.detail_heading.clone();
+    let open_in_jira = ui.open_in_jira.clone();
     let saved_detail_width = ui.saved_detail_width.clone();
     let selected_button = Rc::downgrade(&ui.selected_button);
     let selected_issue = ui.selected_issue.clone();
@@ -1991,6 +2016,7 @@ fn issue_button(issue: &Issue, ui: &Ui, base_url: &str, account: Option<&Credent
         button.add_css_class("selected-issue");
         *selected_issue.borrow_mut() = Some(issue.key.clone());
         detail_heading.set_text(&issue.key);
+        open_in_jira.set_visible(!base_url.is_empty());
         *image_slots.borrow_mut() = issue_detail::render(&detail_box, &issue, &base_url, &toast);
         if !detail_panel.is_visible() {
             detail_panel.set_visible(true);
