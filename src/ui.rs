@@ -217,8 +217,8 @@ fn build_ui(app: &adw::Application) {
     search.set_placeholder_text(Some("Search issues… (/)"));
     search.set_width_request(190);
     search.set_hexpand(false);
-    let mine_filter = scope_button("Mine", "user-available-symbolic");
-    let unassigned_filter = scope_button("Unassigned", "user-offline-symbolic");
+    let mine_filter = scope_button("Mine", "avatar-default-symbolic");
+    let unassigned_filter = scope_button("Unassigned", "list-remove-symbolic");
     let all_filter = scope_button("All", "system-users-symbolic");
     unassigned_filter.set_group(Some(&mine_filter));
     all_filter.set_group(Some(&mine_filter));
@@ -228,13 +228,7 @@ fn build_ui(app: &adw::Application) {
     for button in [&mine_filter, &unassigned_filter, &all_filter] {
         filters.append(button);
     }
-    let sprint_filter = gtk::CheckButton::new();
-    let sprint_content = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-    sprint_content.add_css_class("sprint-filter-content");
-    sprint_content.append(&gtk::Image::from_icon_name("media-playback-start-symbolic"));
-    sprint_content.append(&gtk::Label::new(Some("Active sprint only")));
-    sprint_filter.set_child(Some(&sprint_content));
-    sprint_filter.update_property(&[gtk::accessible::Property::Label("Active sprint only")]);
+    let sprint_filter = gtk::CheckButton::with_label("Active sprint only");
     sprint_filter.set_tooltip_text(Some("Show only issues in an active sprint"));
     // Filters and search share a single, compact toolbar.
     let filters_row = gtk::Box::new(gtk::Orientation::Horizontal, 9);
