@@ -336,12 +336,6 @@ button.sidebar-project-filter:checked {
 button.sidebar-project-filter.all-projects {
   font-weight: 750;
 }
-.sidebar-project-mark {
-  min-width: 9px;
-  min-height: 9px;
-  border-radius: 3px;
-  background-color: #4c7ef2;
-}
 .board-settings-menu {
   min-width: 190px;
   padding: 10px;
