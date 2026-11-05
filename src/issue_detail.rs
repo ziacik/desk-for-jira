@@ -8,7 +8,12 @@ use crate::jira::{Attachment, Issue};
 
 pub type ImageSlots = HashMap<String, Vec<gtk::Box>>;
 
-pub fn render(container: &gtk::Box, issue: &Issue, base_url: &str) -> ImageSlots {
+pub fn render(
+    container: &gtk::Box,
+    issue: &Issue,
+    base_url: &str,
+    toast: &adw::ToastOverlay,
+) -> ImageSlots {
     while let Some(child) = container.first_child() {
         container.remove(&child);
     }
@@ -85,6 +90,41 @@ pub fn render(container: &gtk::Box, issue: &Issue, base_url: &str) -> ImageSlots
     }
     container.append(&metadata);
 
+    let branch_name = suggested_branch_name(&issue.key, &issue.summary);
+    let branch_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    branch_row.add_css_class("detail-branch");
+
+    let branch_info = gtk::Box::new(gtk::Orientation::Vertical, 5);
+    branch_info.set_hexpand(true);
+    let branch_caption = gtk::Label::new(Some("Branch name"));
+    branch_caption.add_css_class("detail-field-label");
+    branch_caption.set_xalign(0.0);
+    branch_info.append(&branch_caption);
+
+    let branch_value = gtk::Label::new(Some(&branch_name));
+    branch_value.add_css_class("detail-branch-value");
+    branch_value.set_xalign(0.0);
+    branch_value.set_wrap(true);
+    branch_value.set_wrap_mode(gtk::pango::WrapMode::WordChar);
+    branch_value.set_selectable(true);
+    branch_info.append(&branch_value);
+    branch_row.append(&branch_info);
+
+    let copy = gtk::Button::from_icon_name("edit-copy-symbolic");
+    copy.add_css_class("flat");
+    copy.add_css_class("detail-branch-copy");
+    copy.set_tooltip_text(Some("Copy branch name"));
+    copy.set_valign(gtk::Align::Center);
+    let toast = toast.clone();
+    copy.connect_clicked(move |_| {
+        if let Some(display) = gtk::gdk::Display::default() {
+            display.clipboard().set_text(&branch_name);
+            toast.add_toast(adw::Toast::new("Branch name copied"));
+        }
+    });
+    branch_row.append(&copy);
+    container.append(&branch_row);
+
     let section = gtk::Box::new(gtk::Orientation::Vertical, 12);
     section.add_css_class("detail-section");
     let heading = gtk::Label::new(Some("Description"));
@@ -147,6 +187,69 @@ pub fn render(container: &gtk::Box, issue: &Issue, base_url: &str) -> ImageSlots
     }
 
     slots
+}
+
+fn suggested_branch_name(key: &str, summary: &str) -> String {
+    // Jira's default: ISSUE-123-summary-in-lowercase. Keep branch names
+    // readable and safe for Git refs, including issues titled in Slovak.
+    const MAX_LENGTH: usize = 100;
+    let key = key.trim().to_ascii_uppercase();
+    let max_slug_length = MAX_LENGTH.saturating_sub(key.len().saturating_add(1));
+    if max_slug_length == 0 {
+        return key;
+    }
+
+    let mut slug = String::new();
+    for character in summary.chars().flat_map(char::to_lowercase) {
+        let replacement = match character {
+            'a'..='z' | '0'..='9' => {
+                if slug.len() < max_slug_length {
+                    slug.push(character);
+                }
+                if slug.len() >= max_slug_length {
+                    break;
+                }
+                continue;
+            }
+            'á' | 'à' | 'â' | 'ä' | 'ã' | 'å' | 'ā' | 'ą' | 'ă' => "a",
+            'č' | 'ć' | 'ç' | 'ĉ' | 'ċ' => "c",
+            'ď' | 'đ' | 'ð' => "d",
+            'é' | 'è' | 'ê' | 'ë' | 'ě' | 'ē' | 'ę' | 'ė' => "e",
+            'í' | 'ì' | 'î' | 'ï' | 'ī' | 'ı' => "i",
+            'ľ' | 'ĺ' | 'ł' => "l",
+            'ň' | 'ń' | 'ñ' => "n",
+            'ó' | 'ò' | 'ô' | 'ö' | 'õ' | 'ø' | 'ō' | 'ő' => "o",
+            'ŕ' | 'ř' => "r",
+            'š' | 'ś' | 'ș' | 'ş' => "s",
+            'ť' | 'ț' | 'ţ' => "t",
+            'ú' | 'ù' | 'û' | 'ü' | 'ů' | 'ū' | 'ű' => "u",
+            'ý' | 'ÿ' => "y",
+            'ž' | 'ź' | 'ż' => "z",
+            'æ' => "ae",
+            'œ' => "oe",
+            'ß' => "ss",
+            'þ' => "th",
+            _ => "-",
+        };
+        for ascii in replacement.chars() {
+            if ascii == '-' {
+                if !slug.is_empty() && !slug.ends_with('-') && slug.len() < max_slug_length {
+                    slug.push('-');
+                }
+            } else if slug.len() < max_slug_length {
+                slug.push(ascii);
+            }
+        }
+        if slug.len() >= max_slug_length {
+            break;
+        }
+    }
+    let slug = slug.trim_end_matches('-');
+    if slug.is_empty() {
+        key
+    } else {
+        format!("{key}-{slug}")
+    }
 }
 
 pub fn set_image(slots: &ImageSlots, id: &str, bytes: Option<&[u8]>) {
@@ -432,6 +535,32 @@ mod tests {
             mime_type: "image/png".into(),
             content_url: format!("https://jira.example.com/attachment/{id}"),
         }
+    }
+
+    #[test]
+    fn branch_name_uses_jira_key_and_summary() {
+        assert_eq!(
+            suggested_branch_name("art-123", "Fix issue detail layout"),
+            "ART-123-fix-issue-detail-layout"
+        );
+        assert_eq!(
+            suggested_branch_name("AFB-42", "Vylepšiť zobrazenie záložiek"),
+            "AFB-42-vylepsit-zobrazenie-zaloziek"
+        );
+        assert_eq!(
+            suggested_branch_name("ART-5", "  🐛 Fix API / OAuth & SSO!  "),
+            "ART-5-fix-api-oauth-sso"
+        );
+        assert_eq!(suggested_branch_name("ART-6", "!!!"), "ART-6");
+    }
+
+    #[test]
+    fn branch_name_is_bounded_and_has_no_trailing_separator() {
+        let name = suggested_branch_name("ART-42", &format!("{}!", "Long summary ".repeat(30)));
+        assert!(name.len() <= 100);
+        assert!(name.starts_with("ART-42-"));
+        assert!(!name.ends_with('-'));
+        assert!(name.is_ascii());
     }
 
     #[test]
