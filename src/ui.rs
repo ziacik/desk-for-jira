@@ -28,6 +28,7 @@ struct Ui {
     spinner: gtk::Spinner,
     status: gtk::Label,
     projects_label: gtk::Label,
+    sidebar_projects: gtk::Box,
     connect_button: gtk::Button,
     disconnect_button: gtk::Button,
     refresh_button: gtk::Button,
@@ -113,15 +114,21 @@ fn build_ui(app: &adw::Application) {
     let window = adw::ApplicationWindow::builder()
         .application(app)
         .title("Desk for Jira")
-        .default_width(1320)
-        .default_height(790)
-        .width_request(920)
-        .height_request(520)
+        .default_width(1460)
+        .default_height(860)
+        .width_request(960)
+        .height_request(580)
         .build();
 
     let header = adw::HeaderBar::new();
     let header_title = adw::WindowTitle::new("Desk for Jira", "My project board");
     header.set_title_widget(Some(&header_title));
+    let sidebar_toggle = gtk::ToggleButton::builder()
+        .icon_name("sidebar-show-symbolic")
+        .tooltip_text("Show or hide workspace sidebar")
+        .build();
+    sidebar_toggle.add_css_class("flat");
+    sidebar_toggle.set_active(true);
     let connect_button = gtk::Button::builder()
         .icon_name("emblem-system-symbolic")
         .tooltip_text("Connect or switch Jira account")
@@ -136,6 +143,7 @@ fn build_ui(app: &adw::Application) {
         .build();
     let spinner = gtk::Spinner::new();
     spinner.set_visible(false);
+    header.pack_start(&sidebar_toggle);
     header.pack_start(&connect_button);
     header.pack_end(&disconnect_button);
     header.pack_end(&refresh_button);
@@ -150,27 +158,35 @@ fn build_ui(app: &adw::Application) {
     center.set_hexpand(true);
     center.set_width_request(420);
 
-    // Board actions belong to the board, rather than a mostly empty sidebar.
-    let heading = gtk::Box::new(gtk::Orientation::Horizontal, 10);
+    let heading = gtk::Box::new(gtk::Orientation::Horizontal, 14);
+    heading.add_css_class("board-heading");
+    let board_mark = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    board_mark.add_css_class("board-mark");
+    board_mark.append(&gtk::Image::from_icon_name("view-grid-symbolic"));
+    heading.append(&board_mark);
+    let heading_text = gtk::Box::new(gtk::Orientation::Vertical, 3);
+    heading_text.set_hexpand(true);
     let center_title = gtk::Label::new(Some("My board"));
     center_title.add_css_class("title-2");
+    center_title.add_css_class("board-title");
     center_title.set_xalign(0.0);
-    heading.append(&center_title);
+    heading_text.append(&center_title);
     let projects_label = gtk::Label::new(Some("No projects selected"));
-    projects_label.add_css_class("dim-label");
+    projects_label.add_css_class("board-subtitle");
     projects_label.set_ellipsize(gtk::pango::EllipsizeMode::End);
-    projects_label.set_hexpand(true);
     projects_label.set_xalign(0.0);
-    heading.append(&projects_label);
-    let manage_projects_button = gtk::Button::with_label("Projects…");
+    heading_text.append(&projects_label);
+    heading.append(&heading_text);
+    center.append(&heading);
+
+    let manage_projects_button = gtk::Button::with_label("Choose projects");
+    manage_projects_button.add_css_class("sidebar-action");
     manage_projects_button.set_sensitive(false);
     manage_projects_button.set_tooltip_text(Some("Choose projects for this board"));
-    heading.append(&manage_projects_button);
-    let manage_columns_button = gtk::Button::with_label("Columns…");
+    let manage_columns_button = gtk::Button::with_label("Edit columns");
+    manage_columns_button.add_css_class("sidebar-action");
     manage_columns_button.set_sensitive(false);
     manage_columns_button.set_tooltip_text(Some("Edit status columns and their order"));
-    heading.append(&manage_columns_button);
-    center.append(&heading);
 
     let search = gtk::SearchEntry::new();
     search.set_placeholder_text(Some("Search issues… (/)"));
@@ -190,6 +206,8 @@ fn build_ui(app: &adw::Application) {
     let sprint_filter = gtk::CheckButton::with_label("Active sprint only");
     sprint_filter.set_tooltip_text(Some("Show only issues in an active sprint"));
     let filters_row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+    filters_row.add_css_class("board-toolbar");
+    filters.add_css_class("scope-filters");
     filters_row.append(&filters);
     filters_row.append(&sprint_filter);
     let status = gtk::Label::new(Some("Connecting to keyring…"));
@@ -201,12 +219,13 @@ fn build_ui(app: &adw::Application) {
     filters_row.append(&search);
     center.append(&filters_row);
 
-    let board_box = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+    let board_box = gtk::Box::new(gtk::Orientation::Horizontal, 14);
     // Columns retain a useful width even on ultra-wide monitors.
     // The horizontal scroller handles additional columns instead of stretching cards.
     board_box.set_hexpand(false);
     board_box.set_halign(gtk::Align::Start);
     let scroller = gtk::ScrolledWindow::new();
+    scroller.add_css_class("board-scroll");
     scroller.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Never);
     scroller.set_hexpand(true);
     scroller.set_vexpand(true);
@@ -244,6 +263,57 @@ fn build_ui(app: &adw::Application) {
     detail_scroll.set_vexpand(true);
     detail_panel.append(&detail_scroll);
 
+    // The sidebar exposes real actions and the actual selected project set.
+    let sidebar = gtk::Box::new(gtk::Orientation::Vertical, 14);
+    sidebar.add_css_class("workspace-sidebar");
+    sidebar.set_width_request(226);
+    let sidebar_intro = gtk::Box::new(gtk::Orientation::Vertical, 4);
+    let eyebrow = gtk::Label::new(Some("WORKSPACE"));
+    eyebrow.add_css_class("sidebar-eyebrow");
+    eyebrow.set_xalign(0.0);
+    sidebar_intro.append(&eyebrow);
+    let sidebar_title = gtk::Label::new(Some("Your work"));
+    sidebar_title.add_css_class("title-3");
+    sidebar_title.set_xalign(0.0);
+    sidebar_intro.append(&sidebar_title);
+    sidebar.append(&sidebar_intro);
+
+    let board_nav = gtk::Box::new(gtk::Orientation::Horizontal, 10);
+    board_nav.add_css_class("sidebar-current");
+    board_nav.append(&gtk::Image::from_icon_name("view-grid-symbolic"));
+    let nav_label = gtk::Label::new(Some("Unified board"));
+    nav_label.set_xalign(0.0);
+    nav_label.set_hexpand(true);
+    board_nav.append(&nav_label);
+    sidebar.append(&board_nav);
+
+    let projects_heading = gtk::Label::new(Some("SELECTED PROJECTS"));
+    projects_heading.add_css_class("sidebar-eyebrow");
+    projects_heading.set_xalign(0.0);
+    projects_heading.set_margin_top(12);
+    sidebar.append(&projects_heading);
+    let sidebar_projects = gtk::Box::new(gtk::Orientation::Vertical, 7);
+    sidebar_projects.add_css_class("sidebar-projects");
+    sidebar.append(&sidebar_projects);
+
+    let sidebar_spacer = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    sidebar_spacer.set_vexpand(true);
+    sidebar.append(&sidebar_spacer);
+    let sidebar_actions = gtk::Box::new(gtk::Orientation::Vertical, 8);
+    sidebar_actions.add_css_class("sidebar-actions");
+    sidebar_actions.append(&manage_projects_button);
+    sidebar_actions.append(&manage_columns_button);
+    sidebar.append(&sidebar_actions);
+
+    let sidebar_revealer = gtk::Revealer::new();
+    sidebar_revealer.set_transition_type(gtk::RevealerTransitionType::SlideRight);
+    sidebar_revealer.set_reveal_child(true);
+    sidebar_revealer.set_child(Some(&sidebar));
+    sidebar_toggle.connect_toggled({
+        let sidebar_revealer = sidebar_revealer.clone();
+        move |button| sidebar_revealer.set_reveal_child(button.is_active())
+    });
+
     let inner_split = gtk::Paned::new(gtk::Orientation::Horizontal);
     inner_split.set_start_child(Some(&center));
     inner_split.set_end_child(Some(&detail_panel));
@@ -252,15 +322,20 @@ fn build_ui(app: &adw::Application) {
     inner_split.set_resize_end_child(false);
     inner_split.set_shrink_start_child(false);
     inner_split.set_shrink_end_child(false);
+    inner_split.set_hexpand(true);
+    let workspace = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    workspace.add_css_class("workspace-root");
+    workspace.append(&sidebar_revealer);
+    workspace.append(&inner_split);
     let toast = adw::ToastOverlay::new();
-    toast.set_child(Some(&inner_split));
+    toast.set_child(Some(&workspace));
     let toolbar = adw::ToolbarView::new();
     toolbar.add_top_bar(&header);
     toolbar.set_content(Some(&toast));
     window.set_content(Some(&toolbar));
 
     let ui = Ui {
-        window, toast, header_title, spinner, status, projects_label,
+        window, toast, header_title, spinner, status, projects_label, sidebar_projects,
         connect_button, disconnect_button, refresh_button,
         manage_projects_button, manage_columns_button, search, center_title,
         board_box, detail_box, detail_panel, mine_filter, unassigned_filter, all_filter, sprint_filter,
@@ -311,6 +386,7 @@ fn build_ui(app: &adw::Application) {
             &display, &css, gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
         );
     }
+    update_project_label(&ui, &state.borrow());
     show_empty(&ui.board_box, "Connect to Jira", "Your unified project board will appear here.");
     wire_actions(&ui, &state, &sender);
     {
@@ -431,6 +507,7 @@ fn wire_actions(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>) {
             ui.header_title.set_subtitle("Not connected");
             ui.status.set_text("Disconnected");
             ui.projects_label.set_text("Choose projects to begin");
+            clear_box(&ui.sidebar_projects);
             ui.manage_projects_button.set_sensitive(false);
             ui.manage_columns_button.set_sensitive(false);
             ui.center_title.set_text("My board");
@@ -599,13 +676,29 @@ fn start_board_load(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>)
 }
 
 fn update_project_label(ui: &Ui, state: &State) {
+    clear_box(&ui.sidebar_projects);
+    ui.center_title.set_text("My board");
     if state.settings.projects.is_empty() {
-        ui.projects_label.set_text("No projects selected");
-        ui.center_title.set_text("My board");
+        ui.projects_label.set_text("Choose projects to get started");
+        let label = gtk::Label::new(Some("No projects yet"));
+        label.add_css_class("dim-label");
+        label.set_xalign(0.0);
+        ui.sidebar_projects.append(&label);
     } else {
         let keys = state.settings.projects.join(" · ");
-        ui.projects_label.set_text(&keys);
-        ui.center_title.set_text("Board");
+        ui.projects_label.set_text(&format!("Across {keys}"));
+        for project in &state.settings.projects {
+            let row = gtk::Box::new(gtk::Orientation::Horizontal, 9);
+            row.add_css_class("sidebar-project-chip");
+            let mark = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+            mark.add_css_class("sidebar-project-mark");
+            row.append(&mark);
+            let label = gtk::Label::new(Some(project));
+            label.set_xalign(0.0);
+            label.set_ellipsize(gtk::pango::EllipsizeMode::End);
+            row.append(&label);
+            ui.sidebar_projects.append(&row);
+        }
     }
 }
 
@@ -1506,11 +1599,12 @@ fn render_board(ui: &Ui, state: &State) {
     }
 
     let url = state.account.as_ref().map(|a| a.base_url.as_str()).unwrap_or("");
-    for (name, issues) in groups {
+    for (index, (name, issues)) in groups.into_iter().enumerate() {
         let issue_count = issues.len();
         let initially_collapsed = ui.collapsed_columns.borrow().contains(&name);
         let column = gtk::Box::new(gtk::Orientation::Vertical, 0);
         column.add_css_class("board-column");
+        column.add_css_class(&format!("column-tone-{}", index % 5));
         if initially_collapsed {
             column.add_css_class("collapsed-column");
         }
@@ -1639,6 +1733,19 @@ fn issue_button(issue: &Issue, ui: &Ui, base_url: &str, account: Option<&Credent
     content.set_margin_end(12);
 
     let meta = gtk::Box::new(gtk::Orientation::Horizontal, 7);
+    let kind = issue.kind.to_ascii_lowercase();
+    let (kind_icon, kind_class) = if kind.contains("bug") {
+        ("dialog-warning-symbolic", "kind-bug")
+    } else if kind.contains("story") {
+        ("starred-symbolic", "kind-story")
+    } else {
+        ("view-list-symbolic", "kind-task")
+    };
+    let type_mark = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    type_mark.add_css_class("ticket-type-mark");
+    type_mark.add_css_class(kind_class);
+    type_mark.append(&gtk::Image::from_icon_name(kind_icon));
+    meta.append(&type_mark);
     let key = gtk::Label::new(Some(&issue.key));
     key.add_css_class("ticket-key");
     key.set_hexpand(true);
@@ -1663,6 +1770,7 @@ fn issue_button(issue: &Issue, ui: &Ui, base_url: &str, account: Option<&Credent
     summary.set_max_width_chars(38);
     summary.set_lines(4);
     summary.set_ellipsize(gtk::pango::EllipsizeMode::End);
+    summary.add_css_class("ticket-summary");
     content.append(&summary);
 
     if let Some(epic) = &issue.epic {
