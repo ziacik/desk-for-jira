@@ -1,4 +1,4 @@
-use std::{collections::HashSet, io::Read, time::Duration};
+use std::{collections::{HashMap, HashSet}, io::Read, time::Duration};
 
 use anyhow::{Context, Result, bail, ensure};
 use reqwest::blocking::{Client, RequestBuilder};
@@ -7,7 +7,7 @@ use serde_json::{Value, json};
 
 const PAGE_SIZE: usize = 100;
 const MAX_ITEMS: usize = 500;
-const FIELDS: [&str; 10] = [
+const FIELDS: [&str; 11] = [
     "summary",
     "status",
     "assignee",
@@ -18,6 +18,7 @@ const FIELDS: [&str; 10] = [
     "attachment",
     "reporter",
     "project",
+    "parent",
 ];
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -53,6 +54,12 @@ impl Credentials {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Epic {
+    pub key: String,
+    pub summary: String,
+}
+
 #[derive(Clone, Debug)]
 pub struct Issue {
     pub key: String,
@@ -67,6 +74,8 @@ pub struct Issue {
     pub description: String,
     pub description_doc: Option<Value>,
     pub attachments: Vec<Attachment>,
+    pub is_epic: bool,
+    pub epic: Option<Epic>,
 }
 
 #[derive(Clone, Debug)]
@@ -169,6 +178,14 @@ impl JiraClient {
     }
 
     pub fn search_issues(&self, jql: &str) -> Result<Vec<Issue>> {
+        self.search_issues_with_epic_link(jql, None)
+    }
+
+    fn search_issues_with_epic_link(&self, jql: &str, epic_link_field: Option<&str>) -> Result<Vec<Issue>> {
+        let mut fields = FIELDS.to_vec();
+        if let Some(field) = epic_link_field {
+            fields.push(field);
+        }
         let mut result = Vec::new();
         let mut next_token: Option<String> = None;
         let mut start_at = 0usize;
@@ -179,7 +196,7 @@ impl JiraClient {
                     let mut payload = json!({
                         "jql": jql,
                         "maxResults": PAGE_SIZE,
-                        "fields": FIELDS,
+                        "fields": fields,
                     });
                     if let Some(ref token) = next_token {
                         payload["nextPageToken"] = json!(token);
@@ -188,10 +205,14 @@ impl JiraClient {
                 }
                 AuthMode::Server => self.read_json(
                     self.http.post(self.url("/rest/api/2/search"))
-                        .json(&json!({"jql":jql, "maxResults":PAGE_SIZE, "startAt":start_at, "fields":FIELDS}))
+                        .json(&json!({"jql":jql, "maxResults":PAGE_SIZE, "startAt":start_at, "fields":fields}))
                 )?,
             };
-            let page = parse_issues(&data);
+            let page = if epic_link_field.is_some() {
+                parse_issues_with_epic_link(&data, epic_link_field)
+            } else {
+                parse_issues(&data)
+            };
             let count = page.len();
             result.extend(page);
             if count == 0 || result.len() >= MAX_ITEMS {
@@ -359,10 +380,66 @@ impl JiraClient {
         Ok(bytes)
     }
 
+    // Older Jira Server projects use the custom Epic Link field instead of parent.
+    // Field IDs vary between instances, so never hardcode customfield_10014.
+    fn legacy_epic_link_field(&self) -> Option<String> {
+        if self.account.mode != AuthMode::Server {
+            return None;
+        }
+        let fields = self.read_json(self.http.get(self.url("/rest/api/2/field"))).ok()?;
+        fields.as_array()?.iter()
+            .find(|field| {
+                field.get("schema").and_then(|schema| schema.get("custom"))
+                    .and_then(Value::as_str)
+                    .is_some_and(|kind| kind.contains("gh-epic-link"))
+                    || field.get("name").and_then(Value::as_str)
+                        .is_some_and(|name| name.eq_ignore_ascii_case("Epic Link"))
+            })
+            .and_then(|field| field.get("id").and_then(Value::as_str))
+            .map(str::to_owned)
+    }
+
+    fn resolve_epic_summaries(&self, issues: &mut [Issue]) {
+        let mut known: HashMap<String, String> = issues.iter()
+            .filter(|issue| issue.is_epic)
+            .map(|issue| (issue.key.clone(), issue.summary.clone()))
+            .collect();
+        let mut unresolved: Vec<String> = issues.iter()
+            .filter_map(|issue| issue.epic.as_ref())
+            .filter(|epic| epic.summary.is_empty() && !known.contains_key(&epic.key))
+            .filter(|epic| validate_project_key(&epic.key).is_ok())
+            .map(|epic| epic.key.clone())
+            .collect();
+        unresolved.sort();
+        unresolved.dedup();
+
+        // The user's issue scope often excludes Epics assigned to someone else.
+        // Fetch missing titles separately, without changing the visible issue scope.
+        for chunk in unresolved.chunks(50) {
+            let jql = format!("key IN ({})", chunk.join(", "));
+            if let Ok(found) = self.search_issues(&jql) {
+                for issue in found.into_iter().filter(|issue| issue.is_epic) {
+                    known.insert(issue.key, issue.summary);
+                }
+            }
+        }
+        for issue in issues {
+            if let Some(epic) = &mut issue.epic
+                && epic.summary.is_empty()
+                && let Some(summary) = known.get(&epic.key)
+            {
+                epic.summary.clone_from(summary);
+            }
+        }
+    }
+
     pub fn project_issues(&self, keys: &[String], scope: Option<&str>, active_sprint_only: bool) -> Result<Vec<Issue>> {
         if keys.is_empty() { return Ok(Vec::new()); }
         let jql = project_issues_jql(keys, scope, active_sprint_only)?;
-        self.search_issues(&jql)
+        let epic_link_field = self.legacy_epic_link_field();
+        let mut issues = self.search_issues_with_epic_link(&jql, epic_link_field.as_deref())?;
+        self.resolve_epic_summaries(&mut issues);
+        Ok(issues)
     }
 
 }
@@ -497,16 +574,44 @@ fn validate_project_key(key: &str) -> Result<()> {
 }
 
 fn parse_issues(data: &Value) -> Vec<Issue> {
-    data.get("issues").and_then(Value::as_array)
-        .into_iter().flatten().filter_map(parse_issue).collect()
+    parse_issues_with_epic_link(data, None)
 }
 
-fn parse_issue(v: &Value) -> Option<Issue> {
+fn parse_issues_with_epic_link(data: &Value, epic_link_field: Option<&str>) -> Vec<Issue> {
+    data.get("issues").and_then(Value::as_array)
+        .into_iter().flatten()
+        .filter_map(|value| parse_issue(value, epic_link_field))
+        .collect()
+}
+
+fn parse_issue(v: &Value, epic_link_field: Option<&str>) -> Option<Issue> {
     let key = v.get("key")?.as_str()?.to_owned();
     let f = v.get("fields")?;
     let field = |name: &str| f.get(name).and_then(Value::as_str).unwrap_or("").to_owned();
     let nested = |key: &str, name: &str| f.get(key).and_then(|v| v.get(name))
         .and_then(Value::as_str).unwrap_or("").to_owned();
+    let kind = nested("issuetype", "name");
+    let is_epic = kind.eq_ignore_ascii_case("epic")
+        || f.get("issuetype").and_then(|kind| kind.get("hierarchyLevel"))
+            .and_then(Value::as_i64) == Some(1);
+    let epic = f.get("parent")
+        .filter(|parent| {
+            let kind = parent.get("fields").and_then(|fields| fields.get("issuetype"));
+            kind.and_then(|kind| kind.get("hierarchyLevel"))
+                .and_then(Value::as_i64) == Some(1)
+                || kind.and_then(|kind| kind.get("name"))
+                    .and_then(Value::as_str)
+                    .is_some_and(|name| name.eq_ignore_ascii_case("epic"))
+        })
+        .and_then(|parent| Some(Epic {
+            key: parent.get("key")?.as_str()?.to_owned(),
+            summary: parent.get("fields").and_then(|fields| fields.get("summary"))
+                .and_then(Value::as_str).unwrap_or("").to_owned(),
+        }))
+        .or_else(|| {
+            let key = f.get(epic_link_field?)?.as_str()?;
+            Some(Epic { key: key.to_owned(), summary: String::new() })
+        });
     Some(Issue {
         project_key: f.get("project").and_then(|p| p.get("key"))
             .and_then(Value::as_str).map(str::to_owned)
@@ -515,7 +620,7 @@ fn parse_issue(v: &Value) -> Option<Issue> {
         summary: field("summary"),
         status: nested("status", "name"),
         status_id: nested("status", "id"),
-        kind: nested("issuetype", "name"),
+        kind,
         priority: nested("priority", "name"),
         assignee: nested("assignee", "displayName"),
         updated: field("updated").chars().take(10).collect(),
@@ -528,6 +633,8 @@ fn parse_issue(v: &Value) -> Option<Issue> {
                 mime_type: a.get("mimeType").and_then(Value::as_str).unwrap_or("").to_owned(),
                 content_url: a.get("content").and_then(Value::as_str).unwrap_or("").to_owned(),
             })).collect(),
+        is_epic,
+        epic,
     })
 }
 
@@ -674,6 +781,47 @@ mod tests {
         assert!(issue.attachments[0].is_image());
         assert!(!issue.attachments[1].is_image());
         assert_eq!(issue.description_doc.as_ref().unwrap()["content"][0]["type"], "mediaSingle");
+    }
+
+    #[test]
+    fn recognizes_epic_parents_but_not_subtask_parents() {
+        let data = json!({"issues":[
+            {"key":"ART-1","fields":{
+                "summary":"An Epic","issuetype":{"name":"Initiative","hierarchyLevel":1}
+            }},
+            {"key":"ART-2","fields":{
+                "summary":"Story","issuetype":{"name":"Story","hierarchyLevel":0},
+                "parent":{"key":"ART-1","fields":{
+                    "summary":"An Epic","issuetype":{"name":"Initiative","hierarchyLevel":1}
+                }}
+            }},
+            {"key":"ART-3","fields":{
+                "summary":"Subtask","issuetype":{"name":"Sub-task","hierarchyLevel":-1},
+                "parent":{"key":"ART-2","fields":{
+                    "summary":"Story","issuetype":{"name":"Story","hierarchyLevel":0}
+                }}
+            }}
+        ]});
+        let issues = parse_issues(&data);
+        assert!(issues[0].is_epic);
+        assert!(!issues[1].is_epic);
+        assert_eq!(issues[1].epic, Some(Epic {
+            key: "ART-1".into(), summary: "An Epic".into()
+        }));
+        assert!(issues[2].epic.is_none());
+    }
+
+    #[test]
+    fn reads_legacy_server_epic_link_by_discovered_field_id() {
+        let data = json!({"issues":[{"key":"ART-4","fields":{
+            "summary":"Bug","issuetype":{"name":"Bug"},
+            "customfield_12345":"ART-1"
+        }}]});
+        let issues = parse_issues_with_epic_link(&data, Some("customfield_12345"));
+        assert_eq!(issues[0].epic, Some(Epic {
+            key: "ART-1".into(), summary: String::new()
+        }));
+        assert!(parse_issues(&data)[0].epic.is_none());
     }
 
     #[test]
