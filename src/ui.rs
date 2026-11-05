@@ -1685,6 +1685,12 @@ fn render_board(ui: &Ui, state: &State) {
     let search = ui.search.text();
     let mut groups = visible_board_groups(&state.settings, &state.issues, search.as_str());
     filter_project_groups(&mut groups, ui.project_filter.borrow().as_deref());
+    let shown = groups.iter().map(|(_, issues)| issues.len()).sum::<usize>();
+    if ui.project_filter.borrow().is_some() || !search.is_empty() {
+        ui.status.set_text(&format!("{shown} shown"));
+    } else {
+        ui.status.set_text(&format!("{} issues", state.issues.len()));
+    }
     if let Some(project) = ui.project_filter.borrow().as_deref() {
         ui.projects_label.set_text(&format!("{project} · filtered"));
     } else if !state.settings.projects.is_empty() {
@@ -2112,6 +2118,25 @@ mod scope_tests {
         assert_eq!(visible_board_groups(&settings, &issues, "redesign").len(), 1);
         assert_eq!(visible_board_groups(&settings, &issues, "ART-1").len(), 1);
         assert!(visible_board_groups(&settings, &issues, "different").is_empty());
+    }
+
+    #[test]
+    fn project_filter_keeps_only_the_selected_project_and_hides_empty_columns() {
+        let art = issue("ART-1", "1", "Work for ART");
+        let mut afb = issue("AFB-2", "2", "Work for AFB");
+        afb.project_key = "AFB".into();
+        let issues = [art, afb];
+        let mut groups = vec![
+            ("Open".into(), vec![&issues[0]]),
+            ("Review".into(), vec![&issues[1]]),
+        ];
+        filter_project_groups(&mut groups, Some("AFB"));
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].0, "Review");
+        assert_eq!(groups[0].1[0].key, "AFB-2");
+
+        filter_project_groups(&mut groups, None);
+        assert_eq!(groups.len(), 1);
     }
 
     #[test]
