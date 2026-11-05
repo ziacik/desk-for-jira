@@ -1708,6 +1708,7 @@ fn issue_button(issue: &Issue, ui: &Ui, base_url: &str, account: Option<&Credent
     let account = account.cloned();
     let image_slots = ui.image_slots.clone();
     let events = ui.events.clone();
+    let toast = ui.toast.clone();
     button.connect_clicked(move |button| {
         if let Some(selected_button) = selected_button.upgrade()
             && let Some(previous) = selected_button.borrow_mut().replace(button.clone())
@@ -1716,7 +1717,7 @@ fn issue_button(issue: &Issue, ui: &Ui, base_url: &str, account: Option<&Credent
         }
         button.add_css_class("selected-issue");
         *selected_issue.borrow_mut() = Some(issue.key.clone());
-        *image_slots.borrow_mut() = issue_detail::render(&detail_box, &issue, &base_url);
+        *image_slots.borrow_mut() = issue_detail::render(&detail_box, &issue, &base_url, &toast);
         detail_panel.set_visible(true);
         if let Some(account) = account.clone() {
             let attachments: Vec<_> = issue.attachments.iter()
