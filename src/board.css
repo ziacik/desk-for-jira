@@ -266,3 +266,185 @@ button.detail-open {
   color: @window_fg_color;
   margin-top: 8px;
 }
+
+
+/* Desk for Jira: native, light/dark-aware workspace surfaces. */
+.workspace-root {
+  background-color: @window_bg_color;
+}
+.workspace-sidebar {
+  padding: 24px 16px 18px;
+  color: @window_fg_color;
+  background-color: @sidebar_bg_color;
+  border-right: 1px solid alpha(@window_fg_color, 0.09);
+}
+.sidebar-eyebrow {
+  font-weight: 800;
+  font-size: 0.77em;
+  letter-spacing: 0.08em;
+  color: alpha(@window_fg_color, 0.55);
+}
+.sidebar-current {
+  padding: 12px 13px;
+  border-radius: 12px;
+  color: @window_fg_color;
+  font-weight: 750;
+  background-color: alpha(@accent_bg_color, 0.16);
+  border: 1px solid alpha(@accent_color, 0.22);
+}
+.sidebar-current image {
+  color: @accent_color;
+}
+.sidebar-project-chip {
+  border-radius: 9px;
+  padding: 9px 10px;
+  color: @window_fg_color;
+  background-color: alpha(@window_fg_color, 0.04);
+  font-weight: 600;
+}
+.sidebar-project-mark {
+  min-width: 9px;
+  min-height: 9px;
+  border-radius: 3px;
+  background-color: @accent_bg_color;
+}
+button.sidebar-action {
+  border-radius: 10px;
+  padding: 9px 12px;
+  font-weight: 650;
+}
+.sidebar-actions {
+  padding-top: 12px;
+  border-top: 1px solid alpha(@window_fg_color, 0.10);
+}
+.board-heading {
+  padding: 3px 0px 12px;
+}
+.board-mark {
+  min-width: 46px;
+  min-height: 46px;
+  border-radius: 14px;
+  background-image: linear-gradient(140deg, #30b0ee, #4b5cda 67%, #30339d);
+  box-shadow: 0 2px 6px alpha(@window_fg_color, 0.12);
+}
+.board-mark image {
+  -gtk-icon-size: 22px;
+  color: white;
+}
+.board-title {
+  font-weight: 800;
+}
+.board-subtitle {
+  color: alpha(@window_fg_color, 0.64);
+  font-size: 0.92em;
+}
+.board-toolbar {
+  padding: 7px 0px 13px;
+}
+.scope-filters button {
+  padding: 7px 12px;
+  font-weight: 650;
+}
+.scope-filters button:checked {
+  color: @accent_color;
+  background-color: alpha(@accent_bg_color, 0.18);
+}
+.board-scroll {
+  padding-bottom: 7px;
+}
+.board-column {
+  background-color: alpha(@window_fg_color, 0.025);
+  border: 1px solid alpha(@window_fg_color, 0.07);
+  border-radius: 16px;
+  padding: 10px;
+}
+.board-column-header {
+  padding: 9px 11px;
+  margin-bottom: 4px;
+  border-radius: 11px;
+  background-color: alpha(@accent_bg_color, 0.13);
+}
+.board-column-title {
+  font-size: 1.02em;
+  font-weight: 800;
+  color: @window_fg_color;
+}
+.board-column-count {
+  color: @window_fg_color;
+  background-color: alpha(@window_bg_color, 0.56);
+  border: 1px solid alpha(@window_fg_color, 0.07);
+  font-weight: 750;
+}
+.board-column.column-tone-0 .board-column-header { background-color: alpha(#3299e6, 0.16); }
+.board-column.column-tone-1 .board-column-header { background-color: alpha(#8b72df, 0.16); }
+.board-column.column-tone-2 .board-column-header { background-color: alpha(#d5a048, 0.17); }
+.board-column.column-tone-3 .board-column-header { background-color: alpha(#41ad86, 0.15); }
+.board-column.column-tone-4 .board-column-header { background-color: alpha(#bc76a7, 0.16); }
+button.issue-card {
+  color: @window_fg_color;
+  background-color: @card_bg_color;
+  border: 1px solid alpha(@window_fg_color, 0.10);
+  border-radius: 12px;
+  box-shadow: 0 2px 5px alpha(@window_fg_color, 0.06);
+}
+button.issue-card:hover {
+  color: @window_fg_color;
+  background-color: @card_bg_color;
+  border-color: alpha(@accent_color, 0.48);
+  box-shadow: 0 4px 10px alpha(@window_fg_color, 0.10);
+}
+button.issue-card.selected-issue {
+  color: @window_fg_color;
+  background-color: @card_bg_color;
+  border: 2px solid @accent_color;
+  box-shadow: 0 0 0 2px alpha(@accent_color, 0.14);
+}
+.ticket-type-mark {
+  min-width: 23px;
+  min-height: 23px;
+  border-radius: 7px;
+  color: #1876c6;
+  background-color: alpha(#3299e6, 0.15);
+}
+.ticket-type-mark image { -gtk-icon-size: 14px; }
+.ticket-type-mark.kind-bug {
+  color: #bd5843;
+  background-color: alpha(#eb7655, 0.16);
+}
+.ticket-type-mark.kind-story {
+  color: #7551bb;
+  background-color: alpha(#9a78e8, 0.16);
+}
+.ticket-key {
+  font-size: 0.83em;
+  color: alpha(@window_fg_color, 0.65);
+  font-weight: 750;
+}
+button.issue-card label.ticket-kind {
+  color: alpha(@window_fg_color, 0.72);
+  border-radius: 999px;
+  background-color: alpha(@window_fg_color, 0.06);
+  padding: 3px 7px;
+  font-size: 0.77em;
+}
+button.issue-card label.ticket-summary {
+  font-weight: 720;
+  font-size: 1.02em;
+  color: @window_fg_color;
+}
+button.issue-card label.ticket-epic-label {
+  color: alpha(@window_fg_color, 0.80);
+  font-size: 0.82em;
+}
+.detail-panel {
+  background-color: @window_bg_color;
+  border-left: 1px solid alpha(@window_fg_color, 0.13);
+}
+.detail-metadata {
+  border-radius: 14px;
+  padding: 18px;
+  background-color: alpha(@window_fg_color, 0.038);
+}
+.detail-section-title {
+  font-size: 1.04em;
+}
