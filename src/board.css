@@ -448,3 +448,42 @@ button.issue-card label.ticket-epic-label {
 .detail-section-title {
   font-size: 1.04em;
 }
+
+
+/* Brand accents are deliberately blue; the GNOME system accent may be red. */
+.sidebar-current {
+  color: @window_fg_color;
+  background-color: alpha(#4679eb, 0.14);
+  border-color: alpha(#4679eb, 0.32);
+}
+.sidebar-current image { color: #4d7aeb; }
+.sidebar-project-mark { background-color: #4d7aeb; }
+.scope-filters button:checked {
+  color: #3f6ddf;
+  background-color: alpha(#4679eb, 0.14);
+}
+button.issue-card.selected-issue {
+  color: @window_fg_color;
+  background-color: @card_bg_color;
+  border-color: #4d7aeb;
+  box-shadow: 0 0 0 2px alpha(#4679eb, 0.16);
+}
+button.issue-card:hover {
+  color: @window_fg_color;
+  border-color: alpha(#4679eb, 0.46);
+}
+.detail-key, .detail-status, .issue-list-marker {
+  color: #4c72dc;
+}
+button.link, label link, label link:visited {
+  color: #416dde;
+}
+button.link:hover, label link:hover {
+  color: #618bff;
+}
+.ticket-summary {
+  line-height: 1.3;
+}
+.board-scroll {
+  border-radius: 12px;
+}
