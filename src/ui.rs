@@ -277,6 +277,7 @@ fn build_ui(app: &adw::Application) {
     let detail_content = gtk::Box::new(gtk::Orientation::Vertical, 0);
     detail_content.append(&detail_scroll);
     let detail_toolbar = adw::ToolbarView::new();
+    detail_toolbar.set_vexpand(true);
     detail_toolbar.add_top_bar(&detail_header);
     detail_toolbar.set_content(Some(&detail_content));
     detail_panel.append(&detail_toolbar);
@@ -305,6 +306,7 @@ fn build_ui(app: &adw::Application) {
     sidebar_header.set_show_end_title_buttons(false);
     sidebar_header.pack_end(&connect_button);
     let sidebar_toolbar = adw::ToolbarView::new();
+    sidebar_toolbar.set_vexpand(true);
     sidebar_toolbar.add_top_bar(&sidebar_header);
     sidebar_toolbar.set_content(Some(&sidebar_content));
     sidebar.append(&sidebar_toolbar);
