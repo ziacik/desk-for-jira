@@ -506,3 +506,18 @@ label link:hover { color: #618bff; }
 .ticket-type-mark image {
   -gtk-icon-size: 14px;
 }
+
+
+/* An unknown assignee, not an offline user or a removed assignment. */
+.unassigned-question {
+  font-size: 0.68em;
+  font-weight: 850;
+  padding: 0 2px;
+  border-radius: 4px;
+  color: @window_fg_color;
+  background-color: @card_bg_color;
+}
+button:checked .unassigned-question {
+  color: #3568d6;
+  background-color: @window_bg_color;
+}
