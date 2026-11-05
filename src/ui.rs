@@ -1427,10 +1427,18 @@ fn visible_board_groups<'a>(
         .collect();
 
     for issue in issues {
+        // Epics organize work; only their child issues should appear as cards.
+        if issue.is_epic {
+            continue;
+        }
         if !text.is_empty()
             && !issue.key.to_lowercase().contains(&text)
             && !issue.summary.to_lowercase().contains(&text)
             && !issue.status.to_lowercase().contains(&text)
+            && !issue.epic.as_ref().is_some_and(|epic| {
+                epic.key.to_lowercase().contains(&text)
+                    || epic.summary.to_lowercase().contains(&text)
+            })
         {
             continue;
         }
@@ -1603,12 +1611,28 @@ fn render_board(ui: &Ui, state: &State) {
     }
 }
 
+// Fixed FNV-1a hashing keeps an Epic's accent stable across launches and scopes.
+fn epic_color_index(key: &str) -> u32 {
+    key.bytes().fold(0x811c9dc5_u32, |hash, byte| {
+        (hash ^ u32::from(byte)).wrapping_mul(0x01000193)
+    }) % 8
+}
+
 fn issue_button(issue: &Issue, ui: &Ui, base_url: &str, account: Option<&Credentials>, generation: u64) -> gtk::Button {
     let button = gtk::Button::new();
     button.add_css_class("issue-card");
     button.set_hexpand(true);
     button.set_tooltip_text(Some(&format!("{} · {}", issue.key, issue.summary)));
+    let surface = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    if let Some(epic) = &issue.epic {
+        let stripe = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        stripe.add_css_class("epic-stripe");
+        stripe.add_css_class(&format!("epic-color-{}", epic_color_index(&epic.key)));
+        stripe.set_vexpand(true);
+        surface.append(&stripe);
+    }
     let content = gtk::Box::new(gtk::Orientation::Vertical, 7);
+    content.set_hexpand(true);
     content.set_margin_top(12);
     content.set_margin_bottom(12);
     content.set_margin_start(12);
@@ -1640,7 +1664,35 @@ fn issue_button(issue: &Issue, ui: &Ui, base_url: &str, account: Option<&Credent
     summary.set_lines(4);
     summary.set_ellipsize(gtk::pango::EllipsizeMode::End);
     content.append(&summary);
-    button.set_child(Some(&content));
+
+    if let Some(epic) = &issue.epic {
+        let epic_row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        epic_row.add_css_class("ticket-epic");
+        let icon = gtk::Image::from_icon_name("view-grid-symbolic");
+        icon.add_css_class("ticket-epic-icon");
+        epic_row.append(&icon);
+        let title = if epic.summary.is_empty() { &epic.key } else { &epic.summary };
+        let label = gtk::Label::new(None);
+        label.add_css_class("ticket-epic-label");
+        if base_url.is_empty() {
+            label.set_text(title);
+        } else {
+            let url = format!("{base_url}/browse/{}", epic.key);
+            label.set_markup(&format!(
+                "<a href=\"{}\">{}</a>",
+                glib::markup_escape_text(&url),
+                glib::markup_escape_text(title),
+            ));
+        }
+        label.set_xalign(0.0);
+        label.set_hexpand(true);
+        label.set_ellipsize(gtk::pango::EllipsizeMode::End);
+        label.set_tooltip_text(Some(&format!("{} · {}", epic.key, title)));
+        epic_row.append(&label);
+        content.append(&epic_row);
+    }
+    surface.append(&content);
+    button.set_child(Some(&surface));
 
     if ui.selected_issue.borrow().as_deref() == Some(issue.key.as_str()) {
         button.add_css_class("selected-issue");
@@ -1739,6 +1791,8 @@ mod scope_tests {
             description: String::new(),
             description_doc: None,
             attachments: Vec::new(),
+            is_epic: false,
+            epic: None,
         }
     }
 
@@ -1799,6 +1853,43 @@ mod scope_tests {
             groups.iter().map(|(name, _)| name.as_str()).collect::<Vec<_>>(),
             vec!["Other"],
         );
+    }
+
+    #[test]
+    fn epic_cards_are_hidden_but_children_keep_their_place() {
+        let settings = board_settings();
+        let mut epic = issue("ART-1", "1", "Improve questionnaire");
+        epic.kind = "Epic".into();
+        epic.is_epic = true;
+        let mut bug = issue("ART-2", "1", "Fix validation");
+        bug.epic = Some(crate::jira::Epic {
+            key: "ART-1".into(),
+            summary: epic.summary.clone(),
+        });
+        let groups = visible_board_groups(&settings, &[epic, bug], "");
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].1.len(), 1);
+        assert_eq!(groups[0].1[0].key, "ART-2");
+    }
+
+    #[test]
+    fn searches_issues_by_epic_title_or_key() {
+        let settings = board_settings();
+        let mut bug = issue("ART-2", "1", "Fix validation");
+        bug.epic = Some(crate::jira::Epic {
+            key: "ART-1".into(),
+            summary: "Questionnaire redesign".into(),
+        });
+        let issues = [bug];
+        assert_eq!(visible_board_groups(&settings, &issues, "redesign").len(), 1);
+        assert_eq!(visible_board_groups(&settings, &issues, "ART-1").len(), 1);
+        assert!(visible_board_groups(&settings, &issues, "different").is_empty());
+    }
+
+    #[test]
+    fn epic_accent_is_deterministic() {
+        assert_eq!(epic_color_index("ART-123"), epic_color_index("ART-123"));
+        assert!(epic_color_index("ART-123") < 8);
     }
 
     #[test]
