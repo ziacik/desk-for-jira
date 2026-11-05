@@ -268,101 +268,115 @@ button.detail-open {
 }
 
 
-/* Desk for Jira: native, light/dark-aware workspace surfaces. */
+/* Desk for Jira: visual system built on theme-aware Adwaita surfaces. */
 .workspace-root {
   background-color: @window_bg_color;
 }
 .workspace-sidebar {
-  padding: 24px 16px 18px;
+  padding: 20px 12px 16px;
   color: @window_fg_color;
   background-color: @sidebar_bg_color;
-  border-right: 1px solid alpha(@window_fg_color, 0.09);
 }
 .sidebar-eyebrow {
-  font-weight: 800;
-  font-size: 0.77em;
-  letter-spacing: 0.08em;
-  color: alpha(@window_fg_color, 0.55);
+  font-weight: 750;
+  font-size: 0.75em;
+  letter-spacing: 0.065em;
+  color: alpha(@window_fg_color, 0.52);
 }
 .sidebar-current {
-  padding: 12px 13px;
-  border-radius: 12px;
+  padding: 11px 12px;
+  border-radius: 11px;
   color: @window_fg_color;
   font-weight: 750;
-  background-color: alpha(@accent_bg_color, 0.16);
-  border: 1px solid alpha(@accent_color, 0.22);
+  background-color: alpha(#4679eb, 0.13);
+  border: 1px solid alpha(#4679eb, 0.26);
 }
-.sidebar-current image {
-  color: @accent_color;
-}
-.sidebar-project-chip {
-  border-radius: 9px;
-  padding: 9px 10px;
+.sidebar-current image { color: #4679eb; }
+button.sidebar-project-filter {
   color: @window_fg_color;
-  background-color: alpha(@window_fg_color, 0.04);
-  font-weight: 600;
+  background-color: transparent;
+  background-image: none;
+  box-shadow: none;
+  border: 1px solid transparent;
+  border-radius: 9px;
+  padding: 9px 11px;
+  font-weight: 650;
+  min-height: 20px;
+}
+button.sidebar-project-filter:hover {
+  color: @window_fg_color;
+  background-color: alpha(@window_fg_color, 0.055);
+}
+button.sidebar-project-filter:checked {
+  color: @window_fg_color;
+  background-color: alpha(#4679eb, 0.15);
+  border-color: alpha(#4679eb, 0.26);
+}
+button.sidebar-project-filter.all-projects {
+  font-weight: 750;
 }
 .sidebar-project-mark {
   min-width: 9px;
   min-height: 9px;
   border-radius: 3px;
-  background-color: @accent_bg_color;
+  background-color: #4c7ef2;
+}
+.board-settings-menu {
+  min-width: 190px;
+  padding: 10px;
 }
 button.sidebar-action {
-  border-radius: 10px;
-  padding: 9px 12px;
-  font-weight: 650;
-}
-.sidebar-actions {
-  padding-top: 12px;
-  border-top: 1px solid alpha(@window_fg_color, 0.10);
+  border-radius: 8px;
+  padding: 7px 10px;
+  font-weight: 600;
 }
 .board-heading {
-  padding: 3px 0px 12px;
+  padding: 2px 0px 8px;
 }
 .board-mark {
-  min-width: 46px;
-  min-height: 46px;
-  border-radius: 14px;
+  min-width: 44px;
+  min-height: 44px;
+  border-radius: 12px;
   background-image: linear-gradient(140deg, #30b0ee, #4b5cda 67%, #30339d);
-  box-shadow: 0 2px 6px alpha(@window_fg_color, 0.12);
+  box-shadow: 0 2px 6px alpha(@window_fg_color, 0.10);
 }
 .board-mark image {
-  -gtk-icon-size: 22px;
+  -gtk-icon-size: 21px;
   color: white;
 }
 .board-title {
   font-weight: 800;
 }
 .board-subtitle {
-  color: alpha(@window_fg_color, 0.64);
-  font-size: 0.92em;
+  color: alpha(@window_fg_color, 0.62);
+  font-size: 0.91em;
 }
 .board-toolbar {
-  padding: 7px 0px 13px;
+  padding: 3px 0px 9px;
 }
 .scope-filters button {
-  padding: 7px 12px;
+  padding: 6px 11px;
   font-weight: 650;
 }
 .scope-filters button:checked {
-  color: @accent_color;
-  background-color: alpha(@accent_bg_color, 0.18);
+  color: #3568d6;
+  background-color: alpha(#4679eb, 0.14);
 }
 .board-scroll {
-  padding-bottom: 7px;
+  padding-bottom: 6px;
+  border-radius: 12px;
 }
 .board-column {
   background-color: alpha(@window_fg_color, 0.025);
-  border: 1px solid alpha(@window_fg_color, 0.07);
-  border-radius: 16px;
-  padding: 10px;
+  border: 1px solid alpha(@window_fg_color, 0.065);
+  border-radius: 15px;
+  padding: 9px;
 }
 .board-column-header {
-  padding: 9px 11px;
-  margin-bottom: 4px;
-  border-radius: 11px;
-  background-color: alpha(@accent_bg_color, 0.13);
+  padding: 8px 10px;
+  margin-bottom: 3px;
+  border-radius: 10px;
+  background-color: alpha(#4679eb, 0.13);
 }
 .board-column-title {
   font-size: 1.02em;
@@ -372,7 +386,7 @@ button.sidebar-action {
 .board-column-count {
   color: @window_fg_color;
   background-color: alpha(@window_bg_color, 0.56);
-  border: 1px solid alpha(@window_fg_color, 0.07);
+  border: 1px solid alpha(@window_fg_color, 0.06);
   font-weight: 750;
 }
 .board-column.column-tone-0 .board-column-header { background-color: alpha(#3299e6, 0.16); }
@@ -383,21 +397,21 @@ button.sidebar-action {
 button.issue-card {
   color: @window_fg_color;
   background-color: @card_bg_color;
-  border: 1px solid alpha(@window_fg_color, 0.10);
+  border: 1px solid alpha(@window_fg_color, 0.09);
   border-radius: 12px;
   box-shadow: 0 2px 5px alpha(@window_fg_color, 0.06);
 }
 button.issue-card:hover {
   color: @window_fg_color;
   background-color: @card_bg_color;
-  border-color: alpha(@accent_color, 0.48);
-  box-shadow: 0 4px 10px alpha(@window_fg_color, 0.10);
+  border-color: alpha(#4679eb, 0.46);
+  box-shadow: 0 4px 10px alpha(@window_fg_color, 0.09);
 }
 button.issue-card.selected-issue {
   color: @window_fg_color;
   background-color: @card_bg_color;
-  border: 2px solid @accent_color;
-  box-shadow: 0 0 0 2px alpha(@accent_color, 0.14);
+  border: 2px solid #4679eb;
+  box-shadow: 0 0 0 2px alpha(#4679eb, 0.15);
 }
 .ticket-type-mark {
   min-width: 23px;
@@ -423,7 +437,7 @@ button.issue-card.selected-issue {
 button.issue-card label.ticket-kind {
   color: alpha(@window_fg_color, 0.72);
   border-radius: 999px;
-  background-color: alpha(@window_fg_color, 0.06);
+  background-color: alpha(@window_fg_color, 0.055);
   padding: 3px 7px;
   font-size: 0.77em;
 }
@@ -433,57 +447,31 @@ button.issue-card label.ticket-summary {
   color: @window_fg_color;
 }
 button.issue-card label.ticket-epic-label {
-  color: alpha(@window_fg_color, 0.80);
+  color: alpha(@window_fg_color, 0.78);
   font-size: 0.82em;
 }
 .detail-panel {
   background-color: @window_bg_color;
-  border-left: 1px solid alpha(@window_fg_color, 0.13);
+  border-left: 1px solid alpha(@window_fg_color, 0.11);
 }
 .detail-metadata {
-  border-radius: 14px;
-  padding: 18px;
+  border-radius: 13px;
+  padding: 15px;
   background-color: alpha(@window_fg_color, 0.038);
 }
 .detail-section-title {
   font-size: 1.04em;
 }
-
-
-/* Brand accents are deliberately blue; the GNOME system accent may be red. */
-.sidebar-current {
-  color: @window_fg_color;
-  background-color: alpha(#4679eb, 0.14);
-  border-color: alpha(#4679eb, 0.32);
+.detail-key, .detail-status, .issue-list-marker { color: #4c72dc; }
+label link, label link:visited { color: #416dde; }
+label link:hover { color: #618bff; }
+.branch-popover-content {
+  padding: 15px;
+  min-width: 270px;
 }
-.sidebar-current image { color: #4d7aeb; }
-.sidebar-project-mark { background-color: #4d7aeb; }
-.scope-filters button:checked {
-  color: #3f6ddf;
-  background-color: alpha(#4679eb, 0.14);
-}
-button.issue-card.selected-issue {
-  color: @window_fg_color;
-  background-color: @card_bg_color;
-  border-color: #4d7aeb;
-  box-shadow: 0 0 0 2px alpha(#4679eb, 0.16);
-}
-button.issue-card:hover {
-  color: @window_fg_color;
-  border-color: alpha(#4679eb, 0.46);
-}
-.detail-key, .detail-status, .issue-list-marker {
-  color: #4c72dc;
-}
-button.link, label link, label link:visited {
-  color: #416dde;
-}
-button.link:hover, label link:hover {
-  color: #618bff;
-}
-.ticket-summary {
-  line-height: 1.3;
-}
-.board-scroll {
-  border-radius: 12px;
+button.detail-branch-menu {
+  border-radius: 8px;
+  padding: 3px 9px;
+  font-size: 0.86em;
+  font-weight: 600;
 }
