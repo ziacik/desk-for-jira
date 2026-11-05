@@ -1,5 +1,6 @@
 use std::{
     cell::{Cell, RefCell},
+    collections::HashSet,
     rc::Rc,
     sync::mpsc::{self, Sender},
     thread,
@@ -14,6 +15,9 @@ use crate::{
     preferences::{self, BoardSettings},
     secrets,
 };
+
+const COLUMN_WIDTH: i32 = 330;
+const COLLAPSED_COLUMN_WIDTH: i32 = 116;
 
 #[derive(Clone)]
 struct Ui {
@@ -32,6 +36,10 @@ struct Ui {
     center_title: gtk::Label,
     board_box: gtk::Box,
     detail_box: gtk::Box,
+    detail_panel: gtk::Box,
+    selected_issue: Rc<RefCell<Option<String>>>,
+    selected_button: Rc<RefCell<Option<gtk::Button>>>,
+    collapsed_columns: Rc<RefCell<HashSet<String>>>,
     mine_filter: gtk::ToggleButton,
     unassigned_filter: gtk::ToggleButton,
     all_filter: gtk::ToggleButton,
@@ -127,48 +135,41 @@ fn build_ui(app: &adw::Application) {
     header.pack_end(&refresh_button);
     header.pack_end(&spinner);
 
-    let sidebar = gtk::Box::new(gtk::Orientation::Vertical, 12);
-    sidebar.set_width_request(230);
-    sidebar.set_margin_top(18);
-    sidebar.set_margin_bottom(14);
-    sidebar.set_margin_start(14);
-    sidebar.set_margin_end(14);
-    let sidebar_title = gtk::Label::new(Some("MY BOARD"));
-    sidebar_title.add_css_class("heading");
-    sidebar_title.set_xalign(0.0);
-    sidebar.append(&sidebar_title);
-    let projects_label = gtk::Label::new(Some("Choose projects to begin"));
-    projects_label.set_wrap(true);
-    projects_label.set_xalign(0.0);
-    projects_label.add_css_class("dim-label");
-    sidebar.append(&projects_label);
-    let manage_projects_button = gtk::Button::with_label("Choose projects…");
-    manage_projects_button.set_sensitive(false);
-    sidebar.append(&manage_projects_button);
-    let manage_columns_button = gtk::Button::with_label("Edit columns…");
-    manage_columns_button.set_sensitive(false);
-    sidebar.append(&manage_columns_button);
-    let status = gtk::Label::new(Some("Connecting to keyring…"));
-    status.add_css_class("dim-label");
-    status.set_xalign(0.0);
-    status.set_wrap(true);
-    status.set_margin_top(16);
-    sidebar.append(&status);
 
     let center = gtk::Box::new(gtk::Orientation::Vertical, 10);
     center.set_margin_top(16);
     center.set_margin_start(16);
-    center.set_margin_end(12);
+    center.set_margin_end(16);
     center.set_margin_bottom(12);
     center.set_hexpand(true);
-    let center_title = gtk::Label::new(Some("My project board"));
+    center.set_width_request(420);
+
+    // Board actions belong to the board, rather than a mostly empty sidebar.
+    let heading = gtk::Box::new(gtk::Orientation::Horizontal, 10);
+    let center_title = gtk::Label::new(Some("My board"));
     center_title.add_css_class("title-2");
     center_title.set_xalign(0.0);
-    center.append(&center_title);
-    let search = gtk::SearchEntry::new();
-    search.set_placeholder_text(Some("Filter by key, title or status"));
-    center.append(&search);
+    heading.append(&center_title);
+    let projects_label = gtk::Label::new(Some("No projects selected"));
+    projects_label.add_css_class("dim-label");
+    projects_label.set_ellipsize(gtk::pango::EllipsizeMode::End);
+    projects_label.set_hexpand(true);
+    projects_label.set_xalign(0.0);
+    heading.append(&projects_label);
+    let manage_projects_button = gtk::Button::with_label("Projects…");
+    manage_projects_button.set_sensitive(false);
+    manage_projects_button.set_tooltip_text(Some("Choose projects for this board"));
+    heading.append(&manage_projects_button);
+    let manage_columns_button = gtk::Button::with_label("Columns…");
+    manage_columns_button.set_sensitive(false);
+    manage_columns_button.set_tooltip_text(Some("Edit status columns and their order"));
+    heading.append(&manage_columns_button);
+    center.append(&heading);
 
+    let search = gtk::SearchEntry::new();
+    search.set_placeholder_text(Some("Search issues… (/)"));
+    search.set_width_request(300);
+    search.set_hexpand(false);
     let mine_filter = gtk::ToggleButton::with_label("Mine");
     let unassigned_filter = gtk::ToggleButton::with_label("Unassigned");
     let all_filter = gtk::ToggleButton::with_label("All");
@@ -180,40 +181,68 @@ fn build_ui(app: &adw::Application) {
     for button in [&mine_filter, &unassigned_filter, &all_filter] {
         filters.append(button);
     }
-    center.append(&filters);
+    let filters_row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+    filters_row.append(&filters);
+    let status = gtk::Label::new(Some("Connecting to keyring…"));
+    status.add_css_class("dim-label");
+    status.set_hexpand(true);
+    status.set_halign(gtk::Align::End);
+    status.set_ellipsize(gtk::pango::EllipsizeMode::End);
+    filters_row.append(&status);
+    filters_row.append(&search);
+    center.append(&filters_row);
 
     let board_box = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+    // Columns retain a useful width even on ultra-wide monitors.
+    // The horizontal scroller handles additional columns instead of stretching cards.
+    board_box.set_hexpand(false);
     board_box.set_halign(gtk::Align::Start);
     let scroller = gtk::ScrolledWindow::new();
     scroller.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Never);
+    scroller.set_hexpand(true);
     scroller.set_vexpand(true);
     scroller.set_child(Some(&board_box));
     center.append(&scroller);
 
+    let detail_panel = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    detail_panel.set_width_request(320);
+    detail_panel.set_visible(false);
+    let detail_header = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    detail_header.set_margin_start(16);
+    detail_header.set_margin_end(8);
+    detail_header.set_margin_top(10);
+    detail_header.set_margin_bottom(6);
+    let detail_heading = gtk::Label::new(Some("Issue details"));
+    detail_heading.add_css_class("heading");
+    detail_heading.set_xalign(0.0);
+    detail_heading.set_hexpand(true);
+    detail_header.append(&detail_heading);
+    let close_detail = gtk::Button::from_icon_name("window-close-symbolic");
+    close_detail.add_css_class("flat");
+    close_detail.set_tooltip_text(Some("Close issue details (Esc)"));
+    detail_header.append(&close_detail);
+    detail_panel.append(&detail_header);
     let detail_box = gtk::Box::new(gtk::Orientation::Vertical, 12);
-    detail_box.set_margin_top(20);
+    detail_box.set_margin_top(8);
     detail_box.set_margin_start(16);
     detail_box.set_margin_end(16);
     detail_box.set_margin_bottom(20);
-    detail_box.set_width_request(300);
     let detail_scroll = gtk::ScrolledWindow::new();
     detail_scroll.set_child(Some(&detail_box));
     detail_scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
+    detail_scroll.set_vexpand(true);
+    detail_panel.append(&detail_scroll);
 
     let inner_split = gtk::Paned::new(gtk::Orientation::Horizontal);
     inner_split.set_start_child(Some(&center));
-    inner_split.set_end_child(Some(&detail_scroll));
-    inner_split.set_position(560);
+    inner_split.set_end_child(Some(&detail_panel));
+    inner_split.set_position(920);
     inner_split.set_resize_start_child(true);
+    inner_split.set_resize_end_child(false);
+    inner_split.set_shrink_start_child(false);
     inner_split.set_shrink_end_child(false);
-    let split = gtk::Paned::new(gtk::Orientation::Horizontal);
-    split.set_start_child(Some(&sidebar));
-    split.set_end_child(Some(&inner_split));
-    split.set_position(240);
-    split.set_resize_start_child(false);
-    split.set_shrink_start_child(false);
     let toast = adw::ToastOverlay::new();
-    toast.set_child(Some(&split));
+    toast.set_child(Some(&inner_split));
     let toolbar = adw::ToolbarView::new();
     toolbar.add_top_bar(&header);
     toolbar.set_content(Some(&toast));
@@ -223,9 +252,52 @@ fn build_ui(app: &adw::Application) {
         window, toast, header_title, spinner, status, projects_label,
         connect_button, disconnect_button, refresh_button,
         manage_projects_button, manage_columns_button, search, center_title,
-        board_box, detail_box, mine_filter, unassigned_filter, all_filter,
+        board_box, detail_box, detail_panel, mine_filter, unassigned_filter, all_filter,
+        selected_issue: Rc::new(RefCell::new(None)),
+        selected_button: Rc::new(RefCell::new(None)),
+        collapsed_columns: Rc::new(RefCell::new(HashSet::new())),
     };
-    show_detail_placeholder(&ui.detail_box);
+    {
+        let panel = ui.detail_panel.downgrade();
+        let selected_issue = ui.selected_issue.clone();
+        let selected_button = ui.selected_button.clone();
+        close_detail.connect_clicked(move |_| {
+            if let Some(panel) = panel.upgrade() {
+                close_issue_pane(&panel, &selected_issue, &selected_button);
+            }
+        });
+    }
+    {
+        let panel = ui.detail_panel.downgrade();
+        let search = ui.search.downgrade();
+        let selected_issue = ui.selected_issue.clone();
+        let selected_button = ui.selected_button.clone();
+        let keys = gtk::EventControllerKey::new();
+        keys.connect_key_pressed(move |_, key, _, modifiers| {
+            let (Some(panel), Some(search)) = (panel.upgrade(), search.upgrade())
+                else { return glib::Propagation::Proceed };
+            if key == gtk::gdk::Key::Escape && panel.is_visible() && !search.has_focus() {
+                close_issue_pane(&panel, &selected_issue, &selected_button);
+                return glib::Propagation::Stop;
+            }
+            if key == gtk::gdk::Key::slash
+                && !search.has_focus()
+                && !modifiers.intersects(gtk::gdk::ModifierType::CONTROL_MASK | gtk::gdk::ModifierType::ALT_MASK)
+            {
+                search.grab_focus();
+                return glib::Propagation::Stop;
+            }
+            glib::Propagation::Proceed
+        });
+        ui.window.add_controller(keys);
+    }
+    let css = gtk::CssProvider::new();
+    css.load_from_string(include_str!("board.css"));
+    if let Some(display) = gtk::gdk::Display::default() {
+        gtk::style_context_add_provider_for_display(
+            &display, &css, gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
+        );
+    }
     show_empty(&ui.board_box, "Connect to Jira", "Your unified project board will appear here.");
     wire_actions(&ui, &state, &sender);
     {
@@ -330,10 +402,10 @@ fn wire_actions(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>) {
             ui.projects_label.set_text("Choose projects to begin");
             ui.manage_projects_button.set_sensitive(false);
             ui.manage_columns_button.set_sensitive(false);
-            ui.center_title.set_text("My project board");
+            ui.center_title.set_text("My board");
             ui.mine_filter.set_active(true);
             show_empty(&ui.board_box, "Not connected", "Connect to Jira to view issues.");
-            show_detail_placeholder(&ui.detail_box);
+            close_issue_details(&ui);
             let sender = sender.clone();
             thread::spawn(move || {
                 let _ = sender.send(Event::Disconnected(id, secrets::delete().map_err(|e| e.to_string())));
@@ -378,7 +450,7 @@ fn handle_event(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>, eve
                     ui.manage_columns_button.set_sensitive(false);
                     ui.header_title.set_subtitle(&loaded.user);
                     update_project_label(ui, &state.borrow());
-                    show_detail_placeholder(&ui.detail_box);
+                    close_issue_details(ui);
                     if let Some(error) = project_error {
                         show_error(ui, &format!("Could not list projects: {error}"));
                     }
@@ -411,7 +483,7 @@ fn handle_event(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>, eve
                         show_error(ui, &format!("Could not save board settings: {error}"));
                     }
                     ui.manage_columns_button.set_sensitive(!state.borrow().statuses.is_empty());
-                    ui.status.set_text(&format!("{issue_count} issues · {} projects", settings.projects.len()));
+                    ui.status.set_text(&format!("{issue_count} issues"));
                     render_board(ui, &state.borrow());
                 }
                 Err(error) => {
@@ -456,6 +528,7 @@ fn start_board_load(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>)
         (s.generation, s.board_request, s.account.clone(), s.settings.projects.clone(), s.issue_scope)
     };
     update_project_label(ui, &state.borrow());
+    close_issue_details(ui);
     if projects.is_empty() {
         set_busy(ui, state, false);
         ui.status.set_text("Select one or more projects");
@@ -466,7 +539,6 @@ fn start_board_load(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>)
     let Some(account) = account else { return; };
     ui.status.set_text("Loading project issues and workflow statuses…");
     show_empty(&ui.board_box, "Loading board…", "Fetching real Jira workflow statuses");
-    show_detail_placeholder(&ui.detail_box);
     set_busy(ui, state, true);
     let sender = sender.clone();
     thread::spawn(move || {
@@ -483,11 +555,11 @@ fn start_board_load(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>)
 fn update_project_label(ui: &Ui, state: &State) {
     if state.settings.projects.is_empty() {
         ui.projects_label.set_text("No projects selected");
-        ui.center_title.set_text("My project board");
+        ui.center_title.set_text("My board");
     } else {
         let keys = state.settings.projects.join(" · ");
         ui.projects_label.set_text(&keys);
-        ui.center_title.set_text(&format!("Board · {keys}"));
+        ui.center_title.set_text("Board");
     }
 }
 
@@ -1340,70 +1412,213 @@ fn visible_board_groups<'a>(
         .collect()
 }
 
+
+fn close_issue_details(ui: &Ui) {
+    close_issue_pane(&ui.detail_panel, &ui.selected_issue, &ui.selected_button);
+}
+
+fn close_issue_pane(
+    panel: &gtk::Box,
+    selected_issue: &Rc<RefCell<Option<String>>>,
+    selected_button: &Rc<RefCell<Option<gtk::Button>>>,
+) {
+    panel.set_visible(false);
+    *selected_issue.borrow_mut() = None;
+    if let Some(button) = selected_button.borrow_mut().take() {
+        button.remove_css_class("selected-issue");
+    }
+}
+
 fn render_board(ui: &Ui, state: &State) {
     clear_box(&ui.board_box);
+    *ui.selected_button.borrow_mut() = None;
     if state.settings.projects.is_empty() {
-        show_empty(&ui.board_box, "Choose projects", "Use Choose projects… to set up your board.");
+        close_issue_details(ui);
+        show_empty(&ui.board_box, "Choose projects", "Use Projects… to set up your board.");
         return;
     }
     let search = ui.search.text();
     let groups = visible_board_groups(&state.settings, &state.issues, search.as_str());
     if groups.is_empty() {
-        show_empty(
-            &ui.board_box,
-            "No matching issues",
-            "No issues match the current filter or search.",
-        );
+        close_issue_details(ui);
+        show_empty(&ui.board_box, "No matching issues", "No issues match the current filter or search.");
         return;
     }
+    let selected_key = ui.selected_issue.borrow().clone();
+    if let Some(key) = selected_key
+        && !groups.iter().any(|(_, issues)| issues.iter().any(|issue| issue.key == key))
+    {
+        close_issue_details(ui);
+    }
+
     let url = state.account.as_ref().map(|a| a.base_url.as_str()).unwrap_or("");
     for (name, issues) in groups {
-        let column = gtk::Box::new(gtk::Orientation::Vertical, 8);
-        column.set_width_request(280);
-        let title = gtk::Label::new(Some(&format!("{name}  ({})", issues.len())));
-        title.add_css_class("heading");
+        let issue_count = issues.len();
+        let initially_collapsed = ui.collapsed_columns.borrow().contains(&name);
+        let column = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        column.add_css_class("board-column");
+        if initially_collapsed {
+            column.add_css_class("collapsed-column");
+        }
+        column.set_width_request(if initially_collapsed { COLLAPSED_COLUMN_WIDTH } else { COLUMN_WIDTH });
+        column.set_hexpand(false);
+        column.set_vexpand(true);
+
+        let expanded = gtk::Box::new(gtk::Orientation::Vertical, 8);
+        expanded.set_visible(!initially_collapsed);
+        expanded.set_vexpand(true);
+        let heading = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        heading.add_css_class("board-column-header");
+        let title = gtk::Label::new(Some(&name));
+        title.add_css_class("board-column-title");
         title.set_xalign(0.0);
-        column.append(&title);
-        let item_box = gtk::Box::new(gtk::Orientation::Vertical, 6);
+        title.set_hexpand(true);
+        title.set_ellipsize(gtk::pango::EllipsizeMode::End);
+        heading.append(&title);
+        let count = gtk::Label::new(Some(&issue_count.to_string()));
+        count.add_css_class("board-column-count");
+        heading.append(&count);
+        let collapse = gtk::Button::from_icon_name("pan-start-symbolic");
+        collapse.add_css_class("flat");
+        collapse.add_css_class("column-collapse");
+        collapse.set_tooltip_text(Some(&format!("Collapse {name}")));
+        heading.append(&collapse);
+        expanded.append(&heading);
+
+        let item_box = gtk::Box::new(gtk::Orientation::Vertical, 7);
         for issue in issues {
-            item_box.append(&issue_button(issue, &ui.detail_box, url));
+            item_box.append(&issue_button(issue, ui, url));
         }
         let scroll = gtk::ScrolledWindow::new();
         scroll.set_child(Some(&item_box));
         scroll.set_vexpand(true);
-        column.append(&scroll);
+        scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
+        expanded.append(&scroll);
+        column.append(&expanded);
+
+        let collapsed = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        collapsed.set_visible(initially_collapsed);
+        collapsed.set_vexpand(true);
+        let expand = gtk::Button::new();
+        expand.add_css_class("flat");
+        expand.add_css_class("collapsed-expand");
+        expand.set_hexpand(true);
+        expand.set_tooltip_text(Some(&format!("Expand {name}")));
+        let collapsed_content = gtk::Box::new(gtk::Orientation::Vertical, 9);
+        collapsed_content.set_halign(gtk::Align::Center);
+        let expand_icon = gtk::Image::from_icon_name("pan-end-symbolic");
+        collapsed_content.append(&expand_icon);
+        let collapsed_title = gtk::Label::new(Some(&name));
+        collapsed_title.add_css_class("collapsed-title");
+        collapsed_title.set_wrap(true);
+        collapsed_title.set_justify(gtk::Justification::Center);
+        collapsed_title.set_max_width_chars(12);
+        collapsed_title.set_xalign(0.5);
+        collapsed_content.append(&collapsed_title);
+        let collapsed_count = gtk::Label::new(Some(&issue_count.to_string()));
+        collapsed_count.add_css_class("collapsed-count");
+        collapsed_content.append(&collapsed_count);
+        expand.set_child(Some(&collapsed_content));
+        collapsed.append(&expand);
+        column.append(&collapsed);
+
+        {
+            let collapsed_columns = ui.collapsed_columns.clone();
+            let name = name.clone();
+            let column = column.downgrade();
+            let expanded = expanded.downgrade();
+            let collapsed = collapsed.downgrade();
+            collapse.connect_clicked(move |_| {
+                let (Some(column), Some(expanded), Some(collapsed)) =
+                    (column.upgrade(), expanded.upgrade(), collapsed.upgrade()) else { return };
+                collapsed_columns.borrow_mut().insert(name.clone());
+                expanded.set_visible(false);
+                collapsed.set_visible(true);
+                column.set_width_request(COLLAPSED_COLUMN_WIDTH);
+                column.add_css_class("collapsed-column");
+            });
+        }
+        {
+            let collapsed_columns = ui.collapsed_columns.clone();
+            let column = column.downgrade();
+            let expanded = expanded.downgrade();
+            let collapsed = collapsed.downgrade();
+            expand.connect_clicked(move |_| {
+                let (Some(column), Some(expanded), Some(collapsed)) =
+                    (column.upgrade(), expanded.upgrade(), collapsed.upgrade()) else { return };
+                collapsed_columns.borrow_mut().remove(&name);
+                collapsed.set_visible(false);
+                expanded.set_visible(true);
+                column.set_width_request(COLUMN_WIDTH);
+                column.remove_css_class("collapsed-column");
+            });
+        }
         ui.board_box.append(&column);
     }
 }
 
-fn issue_button(issue: &Issue, detail: &gtk::Box, base_url: &str) -> gtk::Button {
+fn issue_button(issue: &Issue, ui: &Ui, base_url: &str) -> gtk::Button {
     let button = gtk::Button::new();
-    button.add_css_class("card");
-    let content = gtk::Box::new(gtk::Orientation::Vertical, 5);
-    content.set_margin_top(10);
-    content.set_margin_bottom(10);
-    content.set_margin_start(10);
-    content.set_margin_end(10);
+    button.add_css_class("issue-card");
+    button.set_hexpand(true);
+    button.set_tooltip_text(Some(&format!("{} · {}", issue.key, issue.summary)));
+    let content = gtk::Box::new(gtk::Orientation::Vertical, 7);
+    content.set_margin_top(12);
+    content.set_margin_bottom(12);
+    content.set_margin_start(12);
+    content.set_margin_end(12);
 
-    let key = gtk::Label::new(Some(&format!("{} · {}", issue.key, issue.status)));
-    key.add_css_class("dim-label");
+    let meta = gtk::Box::new(gtk::Orientation::Horizontal, 7);
+    let key = gtk::Label::new(Some(&issue.key));
+    key.add_css_class("ticket-key");
+    key.set_hexpand(true);
     key.set_xalign(0.0);
-    content.append(&key);
+    meta.append(&key);
+    if !issue.kind.is_empty() {
+        let kind = gtk::Label::new(Some(&issue.kind));
+        kind.add_css_class("ticket-kind");
+        meta.append(&kind);
+    }
+    let priority = issue.priority.to_ascii_lowercase();
+    if matches!(priority.as_str(), "highest" | "high" | "critical" | "blocker") {
+        let badge = gtk::Label::new(Some(&issue.priority));
+        badge.add_css_class("ticket-priority");
+        meta.append(&badge);
+    }
+    content.append(&meta);
     let summary = gtk::Label::new(Some(&issue.summary));
     summary.set_xalign(0.0);
     summary.set_wrap(true);
+    summary.set_wrap_mode(gtk::pango::WrapMode::WordChar);
+    summary.set_max_width_chars(38);
+    summary.set_lines(4);
+    summary.set_ellipsize(gtk::pango::EllipsizeMode::End);
     content.append(&summary);
     button.set_child(Some(&content));
 
-    let issue = issue.clone();
-    let detail = detail.clone();
-    let base_url = base_url.to_owned();
-    button.connect_clicked(move |_| show_detail(&detail, &issue, &base_url));
-    button
-}
+    if ui.selected_issue.borrow().as_deref() == Some(issue.key.as_str()) {
+        button.add_css_class("selected-issue");
+        *ui.selected_button.borrow_mut() = Some(button.clone());
+    }
 
-fn show_detail_placeholder(container: &gtk::Box) {
-    show_empty(container, "Select an issue", "Choose a ticket to read its details.");
+    let issue = issue.clone();
+    let detail_box = ui.detail_box.clone();
+    let detail_panel = ui.detail_panel.clone();
+    let selected_button = Rc::downgrade(&ui.selected_button);
+    let selected_issue = ui.selected_issue.clone();
+    let base_url = base_url.to_owned();
+    button.connect_clicked(move |button| {
+        if let Some(selected_button) = selected_button.upgrade()
+            && let Some(previous) = selected_button.borrow_mut().replace(button.clone())
+        {
+            previous.remove_css_class("selected-issue");
+        }
+        button.add_css_class("selected-issue");
+        *selected_issue.borrow_mut() = Some(issue.key.clone());
+        show_detail(&detail_box, &issue, &base_url);
+        detail_panel.set_visible(true);
+    });
+    button
 }
 
 fn show_detail(container: &gtk::Box, issue: &Issue, base_url: &str) {
@@ -1420,21 +1635,29 @@ fn show_detail(container: &gtk::Box, issue: &Issue, base_url: &str) {
     summary.set_xalign(0.0);
     container.append(&summary);
 
-    for (label, value) in [
+
+    let fields = gtk::Grid::new();
+    fields.set_row_spacing(8);
+    fields.set_column_spacing(12);
+    for (row, (label, value)) in [
         ("Status", issue.status.as_str()),
         ("Type", issue.kind.as_str()),
         ("Priority", issue.priority.as_str()),
         ("Assignee", issue.assignee.as_str()),
         ("Updated", issue.updated.as_str()),
-    ] {
-        if !value.is_empty() {
-            let row = gtk::Label::new(Some(&format!("{label}: {value}")));
-            row.set_wrap(true);
-            row.set_xalign(0.0);
-            row.set_selectable(true);
-            container.append(&row);
-        }
+    ].into_iter().filter(|(_, value)| !value.is_empty()).enumerate() {
+        let caption = gtk::Label::new(Some(label));
+        caption.add_css_class("dim-label");
+        caption.set_xalign(0.0);
+        fields.attach(&caption, 0, row as i32, 1, 1);
+        let value = gtk::Label::new(Some(value));
+        value.set_wrap(true);
+        value.set_xalign(0.0);
+        value.set_selectable(true);
+        value.set_hexpand(true);
+        fields.attach(&value, 1, row as i32, 1, 1);
     }
+    container.append(&fields);
 
     let section = gtk::Label::new(Some("Description"));
     section.add_css_class("heading");
