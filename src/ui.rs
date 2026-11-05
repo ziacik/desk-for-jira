@@ -1599,12 +1599,12 @@ fn render_board(ui: &Ui, state: &State) {
     }
 
     let url = state.account.as_ref().map(|a| a.base_url.as_str()).unwrap_or("");
-    for (index, (name, issues)) in groups.into_iter().enumerate() {
+    for (name, issues) in groups {
         let issue_count = issues.len();
         let initially_collapsed = ui.collapsed_columns.borrow().contains(&name);
         let column = gtk::Box::new(gtk::Orientation::Vertical, 0);
         column.add_css_class("board-column");
-        column.add_css_class(&format!("column-tone-{}", index % 5));
+        column.add_css_class(&format!("column-tone-{}", epic_color_index(&name) % 5));
         if initially_collapsed {
             column.add_css_class("collapsed-column");
         }
