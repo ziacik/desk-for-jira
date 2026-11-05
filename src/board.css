@@ -68,19 +68,20 @@ button.issue-card label.ticket-priority {
   border-radius: 6px;
   padding: 2px 6px;
 }
-/* Consistent Epic accent, without changing the card's foreground colors. */
-.epic-stripe {
-  min-width: 4px;
-  border-radius: 4px;
+/* Epic identification is a colored part of the *card border*.
+   It follows border-radius automatically, including selected cards. */
+button.issue-card.has-epic {
+  border-left-width: 4px;
+  border-left-style: solid;
 }
-.epic-color-0 { background-color: #8b65c7; }
-.epic-color-1 { background-color: #278e9c; }
-.epic-color-2 { background-color: #cf7a3b; }
-.epic-color-3 { background-color: #618b39; }
-.epic-color-4 { background-color: #b05e94; }
-.epic-color-5 { background-color: #3b7cbb; }
-.epic-color-6 { background-color: #bc5966; }
-.epic-color-7 { background-color: #8d7862; }
+button.issue-card.has-epic.epic-color-0 { border-left-color: #8b65c7; }
+button.issue-card.has-epic.epic-color-1 { border-left-color: #278e9c; }
+button.issue-card.has-epic.epic-color-2 { border-left-color: #cf7a3b; }
+button.issue-card.has-epic.epic-color-3 { border-left-color: #618b39; }
+button.issue-card.has-epic.epic-color-4 { border-left-color: #b05e94; }
+button.issue-card.has-epic.epic-color-5 { border-left-color: #3b7cbb; }
+button.issue-card.has-epic.epic-color-6 { border-left-color: #bc5966; }
+button.issue-card.has-epic.epic-color-7 { border-left-color: #8d7862; }
 .ticket-epic {
   margin-top: 2px;
 }
