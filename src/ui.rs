@@ -184,12 +184,10 @@ fn build_ui(app: &adw::Application) {
     heading.append(&heading_text);
     center.append(&heading);
 
-    let manage_projects_button = gtk::Button::builder()
-        .icon_name("folder-open-symbolic")
-        .tooltip_text("Choose projects for this board")
-        .build();
+    let manage_projects_button = gtk::Button::with_label("Choose projects…");
     manage_projects_button.add_css_class("flat");
-    manage_projects_button.add_css_class("sidebar-projects-action");
+    manage_projects_button.add_css_class("sidebar-action");
+    manage_projects_button.set_tooltip_text(Some("Choose the projects included in this board"));
     manage_projects_button.set_sensitive(false);
     let manage_columns_button = gtk::Button::with_label("Edit columns");
     manage_columns_button.add_css_class("sidebar-action");
@@ -300,7 +298,13 @@ fn build_ui(app: &adw::Application) {
     nav_label.set_xalign(0.0);
     nav_label.set_hexpand(true);
     board_nav.append(&nav_label);
-    board_nav.append(&manage_projects_button);
+    // All board-level settings live in one contextual menu next to Unified board.
+    let board_menu = gtk::MenuButton::new();
+    board_menu.set_icon_name("emblem-system-symbolic");
+    board_menu.set_tooltip_text(Some("Configure unified board"));
+    board_menu.add_css_class("flat");
+    board_menu.add_css_class("board-settings-trigger");
+    board_nav.append(&board_menu);
     sidebar.append(&board_nav);
 
     let projects_heading = gtk::Label::new(Some("SELECTED PROJECTS"));
@@ -312,18 +316,17 @@ fn build_ui(app: &adw::Application) {
     sidebar_projects.add_css_class("sidebar-projects");
     sidebar.append(&sidebar_projects);
 
-    // Rare column configuration stays in the titlebar; projects are changed beside the board.
-    let board_menu = gtk::MenuButton::new();
-    board_menu.set_icon_name("open-menu-symbolic");
-    board_menu.set_tooltip_text(Some("Board settings"));
-    board_menu.add_css_class("flat");
     let board_popover = gtk::Popover::new();
-    let settings_actions = gtk::Box::new(gtk::Orientation::Vertical, 7);
+    let settings_actions = gtk::Box::new(gtk::Orientation::Vertical, 5);
     settings_actions.add_css_class("board-settings-menu");
+    settings_actions.append(&manage_projects_button);
     settings_actions.append(&manage_columns_button);
     board_popover.set_child(Some(&settings_actions));
     board_menu.set_popover(Some(&board_popover));
-    header.pack_end(&board_menu);
+    for action in [&manage_projects_button, &manage_columns_button] {
+        let popover = board_popover.clone();
+        action.connect_clicked(move |_| popover.popdown());
+    }
 
     // A splitter gives the sidebar a draggable edge; the titlebar toggles it.
     let workspace_split = gtk::Paned::new(gtk::Orientation::Horizontal);
