@@ -186,19 +186,6 @@ pub fn render(
         container.append(&attachments);
     }
 
-    if !base_url.is_empty() {
-        let open = gtk::Button::with_label("Open in Jira ↗");
-        open.add_css_class("detail-open");
-        open.set_halign(gtk::Align::Start);
-        let url = format!("{base_url}/browse/{}", issue.key);
-        open.connect_clicked(move |_| {
-            let _ = gtk::gio::AppInfo::launch_default_for_uri(
-                &url, None::<&gtk::gio::AppLaunchContext>
-            );
-        });
-        container.append(&open);
-    }
-
     slots
 }
 
