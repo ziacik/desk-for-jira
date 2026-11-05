@@ -548,6 +548,7 @@ fn wire_actions(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>) {
             ui.status.set_text("Disconnected");
             ui.projects_label.set_text("Choose projects to begin");
             clear_box(&ui.sidebar_projects);
+            *ui.project_filter.borrow_mut() = None;
             ui.manage_projects_button.set_sensitive(false);
             ui.manage_columns_button.set_sensitive(false);
             ui.center_title.set_text("My board");
@@ -715,30 +716,68 @@ fn start_board_load(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>)
     });
 }
 
-fn update_project_label(ui: &Ui, state: &State) {
+fn update_project_label(ui: &Ui, state: &Rc<RefCell<State>>) {
+    let projects = state.borrow().settings.projects.clone();
     clear_box(&ui.sidebar_projects);
     ui.center_title.set_text("My board");
-    if state.settings.projects.is_empty() {
+
+    // The local project filter survives server-side scope and sprint changes.
+    if ui.project_filter.borrow().as_ref()
+        .is_some_and(|project| !projects.contains(project))
+    {
+        *ui.project_filter.borrow_mut() = None;
+    }
+    if projects.is_empty() {
         ui.projects_label.set_text("Choose projects to get started");
         let label = gtk::Label::new(Some("No projects yet"));
         label.add_css_class("dim-label");
         label.set_xalign(0.0);
         ui.sidebar_projects.append(&label);
-    } else {
-        let keys = state.settings.projects.join(" · ");
-        ui.projects_label.set_text(&format!("Across {keys}"));
-        for project in &state.settings.projects {
-            let row = gtk::Box::new(gtk::Orientation::Horizontal, 9);
-            row.add_css_class("sidebar-project-chip");
-            let mark = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-            mark.add_css_class("sidebar-project-mark");
-            row.append(&mark);
-            let label = gtk::Label::new(Some(project));
-            label.set_xalign(0.0);
-            label.set_ellipsize(gtk::pango::EllipsizeMode::End);
-            row.append(&label);
-            ui.sidebar_projects.append(&row);
+        return;
+    }
+
+    let selected = ui.project_filter.borrow().clone();
+    let all_button = gtk::ToggleButton::with_label("All projects");
+    all_button.add_css_class("sidebar-project-filter");
+    all_button.add_css_class("all-projects");
+    all_button.set_active(selected.is_none());
+    {
+        let ui = ui.clone();
+        let state = state.clone();
+        all_button.connect_toggled(move |button| {
+            if button.is_active() {
+                *ui.project_filter.borrow_mut() = None;
+                render_board(&ui, &state.borrow());
+            }
+        });
+    }
+    ui.sidebar_projects.append(&all_button);
+
+    for project in projects {
+        let button = gtk::ToggleButton::new();
+        button.set_group(Some(&all_button));
+        button.add_css_class("sidebar-project-filter");
+        let row = gtk::Box::new(gtk::Orientation::Horizontal, 9);
+        let mark = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        mark.add_css_class("sidebar-project-mark");
+        row.append(&mark);
+        let label = gtk::Label::new(Some(&project));
+        label.set_xalign(0.0);
+        label.set_hexpand(true);
+        row.append(&label);
+        button.set_child(Some(&row));
+        button.set_active(selected.as_deref() == Some(&project));
+        {
+            let ui = ui.clone();
+            let state = state.clone();
+            button.connect_toggled(move |button| {
+                if button.is_active() {
+                    *ui.project_filter.borrow_mut() = Some(project.clone());
+                    render_board(&ui, &state.borrow());
+                }
+            });
         }
+        ui.sidebar_projects.append(&button);
     }
 }
 
@@ -1601,18 +1640,37 @@ fn visible_board_groups<'a>(
 
 
 fn close_issue_details(ui: &Ui) {
-    close_issue_pane(&ui.detail_panel, &ui.selected_issue, &ui.selected_button);
+    close_issue_pane(
+        &ui.detail_panel,
+        &ui.saved_detail_width,
+        &ui.selected_issue,
+        &ui.selected_button,
+    );
 }
 
 fn close_issue_pane(
     panel: &gtk::Box,
+    saved_width: &Cell<i32>,
     selected_issue: &Rc<RefCell<Option<String>>>,
     selected_button: &Rc<RefCell<Option<gtk::Button>>>,
 ) {
+    // GTK resets hidden Paned children; preserve the actual user-resized width first.
+    if panel.is_visible() && panel.width() >= 320 {
+        saved_width.set(panel.width());
+    }
     panel.set_visible(false);
     *selected_issue.borrow_mut() = None;
     if let Some(button) = selected_button.borrow_mut().take() {
         button.remove_css_class("selected-issue");
+    }
+}
+
+fn filter_project_groups(groups: &mut Vec<(String, Vec<&Issue>)>, project: Option<&str>) {
+    if let Some(project) = project {
+        for (_, issues) in groups.iter_mut() {
+            issues.retain(|issue| issue.project_key == project);
+        }
+        groups.retain(|(_, issues)| !issues.is_empty());
     }
 }
 
@@ -1625,7 +1683,13 @@ fn render_board(ui: &Ui, state: &State) {
         return;
     }
     let search = ui.search.text();
-    let groups = visible_board_groups(&state.settings, &state.issues, search.as_str());
+    let mut groups = visible_board_groups(&state.settings, &state.issues, search.as_str());
+    filter_project_groups(&mut groups, ui.project_filter.borrow().as_deref());
+    if let Some(project) = ui.project_filter.borrow().as_deref() {
+        ui.projects_label.set_text(&format!("{project} · filtered"));
+    } else if !state.settings.projects.is_empty() {
+        ui.projects_label.set_text(&format!("Across {}", state.settings.projects.join(" · ")));
+    }
     if groups.is_empty() {
         close_issue_details(ui);
         show_empty(&ui.board_box, "No matching issues", "No issues match the current filter or search.");
@@ -1756,13 +1820,16 @@ fn issue_button(issue: &Issue, ui: &Ui, base_url: &str, account: Option<&Credent
     let button = gtk::Button::new();
     button.add_css_class("issue-card");
     button.set_hexpand(true);
+    button.set_vexpand(false);
     button.set_tooltip_text(Some(&format!("{} · {}", issue.key, issue.summary)));
     let surface = gtk::Box::new(gtk::Orientation::Horizontal, 0);
     if let Some(epic) = &issue.epic {
         let stripe = gtk::Box::new(gtk::Orientation::Vertical, 0);
         stripe.add_css_class("epic-stripe");
         stripe.add_css_class(&format!("epic-color-{}", epic_color_index(&epic.key)));
-        stripe.set_vexpand(true);
+        // Fill the card height without requesting vertical expansion in GtkBox.
+        stripe.set_valign(gtk::Align::Fill);
+        stripe.set_vexpand(false);
         surface.append(&stripe);
     }
     let content = gtk::Box::new(gtk::Orientation::Vertical, 7);
@@ -1851,6 +1918,8 @@ fn issue_button(issue: &Issue, ui: &Ui, base_url: &str, account: Option<&Credent
     let detail_box = ui.detail_box.clone();
     let detail_panel = ui.detail_panel.clone();
     let inner_split = ui.inner_split.clone();
+    let detail_heading = ui.detail_heading.clone();
+    let saved_detail_width = ui.saved_detail_width.clone();
     let selected_button = Rc::downgrade(&ui.selected_button);
     let selected_issue = ui.selected_issue.clone();
     let base_url = base_url.to_owned();
@@ -1866,16 +1935,16 @@ fn issue_button(issue: &Issue, ui: &Ui, base_url: &str, account: Option<&Credent
         }
         button.add_css_class("selected-issue");
         *selected_issue.borrow_mut() = Some(issue.key.clone());
+        detail_heading.set_text(&issue.key);
         *image_slots.borrow_mut() = issue_detail::render(&detail_box, &issue, &base_url, &toast);
-        // The inspector should remain readable, but it must never take half the screen.
-        // Set a useful width only when opening it, respecting later manual resizing.
         if !detail_panel.is_visible() {
+            detail_panel.set_visible(true);
             let available = inner_split.width();
-            if available > DETAIL_WIDTH + 320 {
-                inner_split.set_position(available - DETAIL_WIDTH);
+            if available >= 640 {
+                let width = saved_detail_width.get().min(available - 300).max(320);
+                inner_split.set_position(available - width);
             }
         }
-        detail_panel.set_visible(true);
         if let Some(account) = account.clone() {
             let attachments: Vec<_> = issue.attachments.iter()
                 .filter(|a| a.is_image() && !a.content_url.is_empty()).cloned().collect();
