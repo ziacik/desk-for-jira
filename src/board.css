@@ -70,7 +70,8 @@ button.issue-card label.ticket-priority {
 }
 /* Epic identification is a colored part of the *card border*.
    It follows border-radius automatically, including selected cards. */
-button.issue-card.has-epic {
+button.issue-card.has-epic,
+button.issue-card.has-epic.selected-issue {
   border-left-width: 4px;
   border-left-style: solid;
 }
