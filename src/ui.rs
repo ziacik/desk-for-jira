@@ -1873,19 +1873,11 @@ fn issue_button(issue: &Issue, ui: &Ui, base_url: &str, account: Option<&Credent
     button.set_hexpand(true);
     button.set_vexpand(false);
     button.set_tooltip_text(Some(&format!("{} · {}", issue.key, issue.summary)));
-    let surface = gtk::Box::new(gtk::Orientation::Horizontal, 0);
     if let Some(epic) = &issue.epic {
-        let stripe = gtk::Box::new(gtk::Orientation::Vertical, 0);
-        stripe.add_css_class("epic-stripe");
-        stripe.add_css_class(&format!("epic-color-{}", epic_color_index(&epic.key)));
-        // Keep the Epic accent fully inside the rounded card. GTK button
-        // border-radius does not clip the painting of its children.
-        stripe.set_margin_start(5);
-        stripe.set_margin_top(6);
-        stripe.set_margin_bottom(6);
-        stripe.set_valign(gtk::Align::Fill);
-        stripe.set_vexpand(false);
-        surface.append(&stripe);
+        // Paint the Epic accent as part of the card's own border so its rounded
+        // corners, selected outline and hit area remain one continuous surface.
+        button.add_css_class("has-epic");
+        button.add_css_class(&format!("epic-color-{}", epic_color_index(&epic.key)));
     }
     let content = gtk::Box::new(gtk::Orientation::Vertical, 7);
     content.set_hexpand(true);
@@ -1968,8 +1960,7 @@ fn issue_button(issue: &Issue, ui: &Ui, base_url: &str, account: Option<&Credent
         epic_row.append(&label);
         content.append(&epic_row);
     }
-    surface.append(&content);
-    button.set_child(Some(&surface));
+    button.set_child(Some(&content));
 
     if ui.selected_issue.borrow().as_deref() == Some(issue.key.as_str()) {
         button.add_css_class("selected-issue");
