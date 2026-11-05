@@ -34,6 +34,45 @@ pub fn render(
         kind.add_css_class("detail-kind");
         eyebrow.append(&kind);
     }
+    // Rare branch-name action: available on demand, not a permanent inspector card.
+    let branch_name = suggested_branch_name(&issue.key, &issue.summary);
+    let branch_menu = gtk::MenuButton::new();
+    branch_menu.set_label("Branch");
+    branch_menu.add_css_class("flat");
+    branch_menu.add_css_class("detail-branch-menu");
+    branch_menu.set_tooltip_text(Some("Generate and copy a Git branch name"));
+
+    let popover = gtk::Popover::new();
+    let popover_body = gtk::Box::new(gtk::Orientation::Vertical, 9);
+    popover_body.add_css_class("branch-popover-content");
+    let caption = gtk::Label::new(Some("Suggested branch name"));
+    caption.add_css_class("detail-field-label");
+    caption.set_xalign(0.0);
+    popover_body.append(&caption);
+
+    let value = gtk::Label::new(Some(&branch_name));
+    value.add_css_class("detail-branch-value");
+    value.set_wrap(true);
+    value.set_wrap_mode(gtk::pango::WrapMode::WordChar);
+    value.set_xalign(0.0);
+    value.set_selectable(true);
+    popover_body.append(&value);
+
+    let copy = gtk::Button::with_label("Copy branch name");
+    copy.add_css_class("suggested-action");
+    let toast = toast.clone();
+    let popover_copy = popover.clone();
+    copy.connect_clicked(move |_| {
+        if let Some(display) = gtk::gdk::Display::default() {
+            display.clipboard().set_text(&branch_name);
+            toast.add_toast(adw::Toast::new("Branch name copied"));
+            popover_copy.popdown();
+        }
+    });
+    popover_body.append(&copy);
+    popover.set_child(Some(&popover_body));
+    branch_menu.set_popover(Some(&popover));
+    eyebrow.append(&branch_menu);
     header.append(&eyebrow);
 
     let summary = gtk::Label::new(Some(&issue.summary));
@@ -89,41 +128,6 @@ pub fn render(
         metadata.attach(&cell, (index % 2) as i32, (index / 2) as i32, 1, 1);
     }
     container.append(&metadata);
-
-    let branch_name = suggested_branch_name(&issue.key, &issue.summary);
-    let branch_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-    branch_row.add_css_class("detail-branch");
-
-    let branch_info = gtk::Box::new(gtk::Orientation::Vertical, 5);
-    branch_info.set_hexpand(true);
-    let branch_caption = gtk::Label::new(Some("Branch name"));
-    branch_caption.add_css_class("detail-field-label");
-    branch_caption.set_xalign(0.0);
-    branch_info.append(&branch_caption);
-
-    let branch_value = gtk::Label::new(Some(&branch_name));
-    branch_value.add_css_class("detail-branch-value");
-    branch_value.set_xalign(0.0);
-    branch_value.set_wrap(true);
-    branch_value.set_wrap_mode(gtk::pango::WrapMode::WordChar);
-    branch_value.set_selectable(true);
-    branch_info.append(&branch_value);
-    branch_row.append(&branch_info);
-
-    let copy = gtk::Button::from_icon_name("edit-copy-symbolic");
-    copy.add_css_class("flat");
-    copy.add_css_class("detail-branch-copy");
-    copy.set_tooltip_text(Some("Copy branch name"));
-    copy.set_valign(gtk::Align::Center);
-    let toast = toast.clone();
-    copy.connect_clicked(move |_| {
-        if let Some(display) = gtk::gdk::Display::default() {
-            display.clipboard().set_text(&branch_name);
-            toast.add_toast(adw::Toast::new("Branch name copied"));
-        }
-    });
-    branch_row.append(&copy);
-    container.append(&branch_row);
 
     let section = gtk::Box::new(gtk::Orientation::Vertical, 12);
     section.add_css_class("detail-section");
