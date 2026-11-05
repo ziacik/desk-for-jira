@@ -184,10 +184,13 @@ fn build_ui(app: &adw::Application) {
     heading.append(&heading_text);
     center.append(&heading);
 
-    let manage_projects_button = gtk::Button::with_label("Choose projects");
-    manage_projects_button.add_css_class("sidebar-action");
+    let manage_projects_button = gtk::Button::builder()
+        .icon_name("folder-open-symbolic")
+        .tooltip_text("Choose projects for this board")
+        .build();
+    manage_projects_button.add_css_class("flat");
+    manage_projects_button.add_css_class("sidebar-projects-action");
     manage_projects_button.set_sensitive(false);
-    manage_projects_button.set_tooltip_text(Some("Choose projects for this board"));
     let manage_columns_button = gtk::Button::with_label("Edit columns");
     manage_columns_button.add_css_class("sidebar-action");
     manage_columns_button.set_sensitive(false);
@@ -297,6 +300,7 @@ fn build_ui(app: &adw::Application) {
     nav_label.set_xalign(0.0);
     nav_label.set_hexpand(true);
     board_nav.append(&nav_label);
+    board_nav.append(&manage_projects_button);
     sidebar.append(&board_nav);
 
     let projects_heading = gtk::Label::new(Some("SELECTED PROJECTS"));
@@ -308,7 +312,7 @@ fn build_ui(app: &adw::Application) {
     sidebar_projects.add_css_class("sidebar-projects");
     sidebar.append(&sidebar_projects);
 
-    // Configuration is available from a compact titlebar menu.
+    // Rare column configuration stays in the titlebar; projects are changed beside the board.
     let board_menu = gtk::MenuButton::new();
     board_menu.set_icon_name("open-menu-symbolic");
     board_menu.set_tooltip_text(Some("Board settings"));
@@ -316,7 +320,6 @@ fn build_ui(app: &adw::Application) {
     let board_popover = gtk::Popover::new();
     let settings_actions = gtk::Box::new(gtk::Orientation::Vertical, 7);
     settings_actions.add_css_class("board-settings-menu");
-    settings_actions.append(&manage_projects_button);
     settings_actions.append(&manage_columns_button);
     board_popover.set_child(Some(&settings_actions));
     board_menu.set_popover(Some(&board_popover));
