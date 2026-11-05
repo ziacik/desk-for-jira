@@ -508,16 +508,13 @@ label link:hover { color: #618bff; }
 }
 
 
-/* An unknown assignee, not an offline user or a removed assignment. */
+/* A single question mark for issues without an assignee. */
 .unassigned-question {
-  font-size: 0.68em;
-  font-weight: 850;
-  padding: 0 2px;
-  border-radius: 4px;
-  color: @window_fg_color;
-  background-color: @card_bg_color;
+  min-width: 16px;
+  font-size: 1.2em;
+  font-weight: 800;
+  color: alpha(@window_fg_color, 0.76);
 }
 button:checked .unassigned-question {
   color: #3568d6;
-  background-color: @window_bg_color;
 }
