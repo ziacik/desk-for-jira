@@ -113,6 +113,20 @@ pub fn run() -> glib::ExitCode {
     app.run()
 }
 
+// One helper for consistent icon/text alignment across all issue-scope filters.
+fn scope_button(label: &str, icon_name: &str) -> gtk::ToggleButton {
+    let button = gtk::ToggleButton::new();
+    let content = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    content.add_css_class("scope-button-content");
+    let icon = gtk::Image::from_icon_name(icon_name);
+    icon.set_valign(gtk::Align::Center);
+    content.append(&icon);
+    content.append(&gtk::Label::new(Some(label)));
+    button.set_child(Some(&content));
+    button.update_property(&[gtk::accessible::Property::Label(label)]);
+    button
+}
+
 fn build_ui(app: &adw::Application) {
     let state = Rc::new(RefCell::new(State::default()));
     let (sender, receiver) = mpsc::channel();
@@ -132,7 +146,7 @@ fn build_ui(app: &adw::Application) {
     header.add_css_class("board-pane-header");
     header.set_show_start_title_buttons(false);
     header.set_show_end_title_buttons(true);
-    let header_title = adw::WindowTitle::new("Desk for Jira", "Your Jira workspace");
+    let header_title = adw::WindowTitle::new("Desk for Jira", "Jira issues and boards");
     header.set_title_widget(Some(&header_title));
     let sidebar_toggle = gtk::ToggleButton::builder()
         .icon_name("sidebar-show-symbolic")
@@ -176,7 +190,7 @@ fn build_ui(app: &adw::Application) {
     heading.append(&board_mark);
     let heading_text = gtk::Box::new(gtk::Orientation::Vertical, 3);
     heading_text.set_hexpand(true);
-    let center_title = gtk::Label::new(Some("My board"));
+    let center_title = gtk::Label::new(Some("Unified board"));
     center_title.add_css_class("title-2");
     center_title.add_css_class("board-title");
     center_title.set_xalign(0.0);
@@ -203,9 +217,9 @@ fn build_ui(app: &adw::Application) {
     search.set_placeholder_text(Some("Search issues… (/)"));
     search.set_width_request(190);
     search.set_hexpand(false);
-    let mine_filter = gtk::ToggleButton::with_label("Mine");
-    let unassigned_filter = gtk::ToggleButton::with_label("Unassigned");
-    let all_filter = gtk::ToggleButton::with_label("All");
+    let mine_filter = scope_button("Mine", "user-available-symbolic");
+    let unassigned_filter = scope_button("Unassigned", "user-offline-symbolic");
+    let all_filter = scope_button("All", "system-users-symbolic");
     unassigned_filter.set_group(Some(&mine_filter));
     all_filter.set_group(Some(&mine_filter));
     mine_filter.set_active(true);
@@ -214,7 +228,13 @@ fn build_ui(app: &adw::Application) {
     for button in [&mine_filter, &unassigned_filter, &all_filter] {
         filters.append(button);
     }
-    let sprint_filter = gtk::CheckButton::with_label("Active sprint only");
+    let sprint_filter = gtk::CheckButton::new();
+    let sprint_content = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    sprint_content.add_css_class("sprint-filter-content");
+    sprint_content.append(&gtk::Image::from_icon_name("media-playback-start-symbolic"));
+    sprint_content.append(&gtk::Label::new(Some("Active sprint only")));
+    sprint_filter.set_child(Some(&sprint_content));
+    sprint_filter.update_property(&[gtk::accessible::Property::Label("Active sprint only")]);
     sprint_filter.set_tooltip_text(Some("Show only issues in an active sprint"));
     // Filters and search share a single, compact toolbar.
     let filters_row = gtk::Box::new(gtk::Orientation::Horizontal, 9);
@@ -257,7 +277,8 @@ fn build_ui(app: &adw::Application) {
     detail_header.set_show_start_title_buttons(false);
     detail_header.set_show_end_title_buttons(true);
     let detail_heading = gtk::Label::new(Some("Ticket"));
-    detail_heading.add_css_class("heading");
+    detail_heading.add_css_class("detail-header-key");
+    detail_heading.set_xalign(0.5);
     detail_header.set_title_widget(Some(&detail_heading));
     let close_detail = gtk::Button::from_icon_name("go-next-symbolic");
     close_detail.add_css_class("flat");
@@ -310,17 +331,6 @@ fn build_ui(app: &adw::Application) {
     sidebar_toolbar.add_top_bar(&sidebar_header);
     sidebar_toolbar.set_content(Some(&sidebar_content));
     sidebar.append(&sidebar_toolbar);
-    let sidebar_intro = gtk::Box::new(gtk::Orientation::Vertical, 4);
-    let eyebrow = gtk::Label::new(Some("WORKSPACE"));
-    eyebrow.add_css_class("sidebar-eyebrow");
-    eyebrow.set_xalign(0.0);
-    sidebar_intro.append(&eyebrow);
-    let sidebar_title = gtk::Label::new(Some("Your work"));
-    sidebar_title.add_css_class("title-3");
-    sidebar_title.set_xalign(0.0);
-    sidebar_intro.append(&sidebar_title);
-    sidebar_content.append(&sidebar_intro);
-
     let board_nav = gtk::Box::new(gtk::Orientation::Horizontal, 10);
     board_nav.add_css_class("sidebar-current");
     board_nav.append(&gtk::Image::from_icon_name("view-grid-symbolic"));
@@ -590,7 +600,7 @@ fn wire_actions(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>) {
             *ui.project_filter.borrow_mut() = None;
             ui.manage_projects_button.set_sensitive(false);
             ui.manage_columns_button.set_sensitive(false);
-            ui.center_title.set_text("My board");
+            ui.center_title.set_text("Unified board");
             ui.mine_filter.set_active(true);
             ui.sprint_filter.set_active(false);
             show_empty(&ui.board_box, "Not connected", "Connect to Jira to view issues.");
@@ -758,7 +768,7 @@ fn start_board_load(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>)
 fn update_project_label(ui: &Ui, state: &Rc<RefCell<State>>) {
     let projects = state.borrow().settings.projects.clone();
     clear_box(&ui.sidebar_projects);
-    ui.center_title.set_text("My board");
+    ui.center_title.set_text("Unified board");
 
     // The local project filter survives server-side scope and sprint changes.
     if ui.project_filter.borrow().as_ref()
@@ -1893,10 +1903,17 @@ fn issue_button(issue: &Issue, ui: &Ui, base_url: &str, account: Option<&Credent
     } else {
         ("view-list-symbolic", "kind-task")
     };
-    let type_mark = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    // GtkCenterBox centres the glyph within its square background, instead of
+    // letting GtkBox position the glyph against the leading edge.
+    let type_mark = gtk::CenterBox::new();
     type_mark.add_css_class("ticket-type-mark");
     type_mark.add_css_class(kind_class);
-    type_mark.append(&gtk::Image::from_icon_name(kind_icon));
+    type_mark.set_valign(gtk::Align::Center);
+    type_mark.set_size_request(24, 24);
+    let kind_image = gtk::Image::from_icon_name(kind_icon);
+    kind_image.set_valign(gtk::Align::Center);
+    kind_image.set_halign(gtk::Align::Center);
+    type_mark.set_center_widget(Some(&kind_image));
     meta.append(&type_mark);
     let key = gtk::Label::new(Some(&issue.key));
     key.add_css_class("ticket-key");
