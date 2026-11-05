@@ -1793,6 +1793,8 @@ fn render_board(ui: &Ui, state: &State) {
             item_box.append(&issue_button(issue, ui, url, state.account.as_ref(), state.generation));
         }
         let scroll = gtk::ScrolledWindow::new();
+        // Reserve space for the scrollbar instead of painting it across cards.
+        scroll.set_overlay_scrolling(false);
         scroll.set_child(Some(&item_box));
         scroll.set_vexpand(true);
         scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
