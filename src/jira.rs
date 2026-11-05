@@ -319,20 +319,28 @@ impl JiraClient {
         result
     }
 
-    pub fn project_issues(&self, keys: &[String], scope: Option<&str>) -> Result<Vec<Issue>> {
+    pub fn project_issues(&self, keys: &[String], scope: Option<&str>, active_sprint_only: bool) -> Result<Vec<Issue>> {
         if keys.is_empty() { return Ok(Vec::new()); }
-        for key in keys { validate_project_key(key)?; }
-        let projects = keys.join(", ");
-        let mut jql = format!("project IN ({projects})");
-        if let Some(scope) = scope {
-            jql.push_str(" AND (");
-            jql.push_str(scope);
-            jql.push(')');
-        }
-        jql.push_str(" ORDER BY updated DESC");
+        let jql = project_issues_jql(keys, scope, active_sprint_only)?;
         self.search_issues(&jql)
     }
 
+}
+
+fn project_issues_jql(keys: &[String], scope: Option<&str>, active_sprint_only: bool) -> Result<String> {
+    for key in keys { validate_project_key(key)?; }
+    let projects = keys.join(", ");
+    let mut jql = format!("project IN ({projects})");
+    if let Some(scope) = scope {
+        jql.push_str(" AND (");
+        jql.push_str(scope);
+        jql.push(')');
+    }
+    if active_sprint_only {
+        jql.push_str(" AND sprint IN openSprints()");
+    }
+    jql.push_str(" ORDER BY updated DESC");
+    Ok(jql)
 }
 
 /// Derive ordering from actual workflow transitions; no status-name guesses.
@@ -504,6 +512,27 @@ fn append_adf(node: &Value, out: &mut String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn project_jql_combines_sprint_and_assignee_filters() {
+        let projects = vec!["ART".to_owned(), "AFB".to_owned()];
+        assert_eq!(
+            project_issues_jql(&projects, Some("assignee = currentUser()"), true).unwrap(),
+            "project IN (ART, AFB) AND (assignee = currentUser()) AND sprint IN openSprints() ORDER BY updated DESC"
+        );
+        assert_eq!(
+            project_issues_jql(&projects, Some("assignee IS EMPTY"), true).unwrap(),
+            "project IN (ART, AFB) AND (assignee IS EMPTY) AND sprint IN openSprints() ORDER BY updated DESC"
+        );
+        assert_eq!(
+            project_issues_jql(&projects, None, true).unwrap(),
+            "project IN (ART, AFB) AND sprint IN openSprints() ORDER BY updated DESC"
+        );
+        assert_eq!(
+            project_issues_jql(&projects, Some("assignee = currentUser()"), false).unwrap(),
+            "project IN (ART, AFB) AND (assignee = currentUser()) ORDER BY updated DESC"
+        );
+    }
 
     #[test]
     fn rejects_http_and_paths() {

@@ -43,6 +43,7 @@ struct Ui {
     mine_filter: gtk::ToggleButton,
     unassigned_filter: gtk::ToggleButton,
     all_filter: gtk::ToggleButton,
+    sprint_filter: gtk::CheckButton,
 }
 
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
@@ -71,6 +72,7 @@ struct State {
     statuses: Vec<ProjectStatus>,
     issues: Vec<Issue>,
     issue_scope: IssueScope,
+    active_sprint_only: bool,
     generation: u64,
     board_request: u64,
     busy: bool,
@@ -181,8 +183,11 @@ fn build_ui(app: &adw::Application) {
     for button in [&mine_filter, &unassigned_filter, &all_filter] {
         filters.append(button);
     }
+    let sprint_filter = gtk::CheckButton::with_label("Active sprint only");
+    sprint_filter.set_tooltip_text(Some("Show only issues in an active sprint"));
     let filters_row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
     filters_row.append(&filters);
+    filters_row.append(&sprint_filter);
     let status = gtk::Label::new(Some("Connecting to keyring…"));
     status.add_css_class("dim-label");
     status.set_hexpand(true);
@@ -252,7 +257,7 @@ fn build_ui(app: &adw::Application) {
         window, toast, header_title, spinner, status, projects_label,
         connect_button, disconnect_button, refresh_button,
         manage_projects_button, manage_columns_button, search, center_title,
-        board_box, detail_box, detail_panel, mine_filter, unassigned_filter, all_filter,
+        board_box, detail_box, detail_panel, mine_filter, unassigned_filter, all_filter, sprint_filter,
         selected_issue: Rc::new(RefCell::new(None)),
         selected_button: Rc::new(RefCell::new(None)),
         collapsed_columns: Rc::new(RefCell::new(HashSet::new())),
@@ -342,6 +347,22 @@ fn wire_actions(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>) {
         let ui = ui.clone();
         let state = state.clone();
         let sender = sender.clone();
+        ui.sprint_filter.connect_toggled(move |button| {
+            let active = button.is_active();
+            let changed = {
+                let mut s = state.borrow_mut();
+                if s.active_sprint_only == active { false } else {
+                    s.active_sprint_only = active;
+                    true
+                }
+            };
+            if changed { start_board_load(&ui, &state, &sender); }
+        });
+    }
+    {
+        let ui = ui.clone();
+        let state = state.clone();
+        let sender = sender.clone();
         let button = ui.manage_projects_button.clone();
         button.connect_clicked(move |_| show_project_picker(&ui, &state, &sender));
     }
@@ -394,6 +415,7 @@ fn wire_actions(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>) {
                 s.statuses.clear();
                 s.settings = BoardSettings::default();
                 s.issue_scope = IssueScope::Mine;
+                s.active_sprint_only = false;
                 s.generation
             };
             set_busy(&ui, &state, false);
@@ -404,6 +426,7 @@ fn wire_actions(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>) {
             ui.manage_columns_button.set_sensitive(false);
             ui.center_title.set_text("My board");
             ui.mine_filter.set_active(true);
+            ui.sprint_filter.set_active(false);
             show_empty(&ui.board_box, "Not connected", "Connect to Jira to view issues.");
             close_issue_details(&ui);
             let sender = sender.clone();
@@ -444,8 +467,10 @@ fn handle_event(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>, eve
                         s.statuses.clear();
                         s.issues.clear();
                         s.issue_scope = IssueScope::Mine;
+                        s.active_sprint_only = false;
                     }
                     ui.mine_filter.set_active(true);
+                    ui.sprint_filter.set_active(false);
                     ui.manage_projects_button.set_sensitive(true);
                     ui.manage_columns_button.set_sensitive(false);
                     ui.header_title.set_subtitle(&loaded.user);
@@ -522,10 +547,10 @@ fn start_refresh(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>, ac
 }
 
 fn start_board_load(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>) {
-    let (id, request, account, projects, scope) = {
+    let (id, request, account, projects, scope, active_sprint_only) = {
         let mut s = state.borrow_mut();
         s.board_request += 1;
-        (s.generation, s.board_request, s.account.clone(), s.settings.projects.clone(), s.issue_scope)
+        (s.generation, s.board_request, s.account.clone(), s.settings.projects.clone(), s.issue_scope, s.active_sprint_only)
     };
     update_project_label(ui, &state.borrow());
     close_issue_details(ui);
@@ -545,7 +570,7 @@ fn start_board_load(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>)
         let result = (|| -> anyhow::Result<BoardData> {
             let client = JiraClient::new(account)?;
             let statuses = client.project_statuses(&projects)?;
-            let issues = client.project_issues(&projects, scope.jql())?;
+            let issues = client.project_issues(&projects, scope.jql(), active_sprint_only)?;
             Ok(BoardData { statuses, issues })
         })().map_err(|err| err.to_string());
         let _ = sender.send(Event::BoardLoaded(id, request, result));
