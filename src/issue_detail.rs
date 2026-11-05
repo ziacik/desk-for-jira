@@ -24,16 +24,12 @@ pub fn render(
     let header = gtk::Box::new(gtk::Orientation::Vertical, 10);
     header.add_css_class("detail-hero");
     let eyebrow = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-    let key = gtk::Label::new(Some(&issue.key));
-    key.add_css_class("detail-key");
-    key.set_xalign(0.0);
-    key.set_hexpand(true);
-    eyebrow.append(&key);
-    if !issue.kind.is_empty() {
-        let kind = gtk::Label::new(Some(&issue.kind));
-        kind.add_css_class("detail-kind");
-        eyebrow.append(&kind);
-    }
+    let kind_label = if issue.kind.is_empty() { "Ticket" } else { &issue.kind };
+    let kind = gtk::Label::new(Some(kind_label));
+    kind.add_css_class("detail-kind");
+    kind.set_xalign(0.0);
+    kind.set_hexpand(true);
+    eyebrow.append(&kind);
     // Rare branch-name action: available on demand, not a permanent inspector card.
     let branch_name = suggested_branch_name(&issue.key, &issue.summary);
     let branch_menu = gtk::MenuButton::new();
