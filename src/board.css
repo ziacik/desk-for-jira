@@ -273,9 +273,20 @@ button.detail-open {
   background-color: @window_bg_color;
 }
 .workspace-sidebar {
-  padding: 20px 12px 16px;
   color: @window_fg_color;
   background-color: @sidebar_bg_color;
+}
+.pane-header {
+  min-height: 46px;
+  border-bottom: 1px solid alpha(@window_fg_color, 0.075);
+  box-shadow: none;
+}
+.sidebar-pane-header {
+  background-color: @sidebar_bg_color;
+}
+.board-pane-header,
+.detail-pane-header {
+  background-color: @window_bg_color;
 }
 .sidebar-eyebrow {
   font-weight: 750;
