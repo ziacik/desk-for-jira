@@ -1878,7 +1878,11 @@ fn issue_button(issue: &Issue, ui: &Ui, base_url: &str, account: Option<&Credent
         let stripe = gtk::Box::new(gtk::Orientation::Vertical, 0);
         stripe.add_css_class("epic-stripe");
         stripe.add_css_class(&format!("epic-color-{}", epic_color_index(&epic.key)));
-        // Fill the card height without requesting vertical expansion in GtkBox.
+        // Keep the Epic accent fully inside the rounded card. GTK button
+        // border-radius does not clip the painting of its children.
+        stripe.set_margin_start(5);
+        stripe.set_margin_top(6);
+        stripe.set_margin_bottom(6);
         stripe.set_valign(gtk::Align::Fill);
         stripe.set_vexpand(false);
         surface.append(&stripe);
