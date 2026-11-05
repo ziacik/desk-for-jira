@@ -125,7 +125,13 @@ fn build_ui(app: &adw::Application) {
         .height_request(580)
         .build();
 
+    // Each split pane owns its own header so backgrounds and dividers continue
+    // uninterrupted from the top of the window.
     let header = adw::HeaderBar::new();
+    header.add_css_class("pane-header");
+    header.add_css_class("board-pane-header");
+    header.set_show_start_title_buttons(false);
+    header.set_show_end_title_buttons(true);
     let header_title = adw::WindowTitle::new("Desk for Jira", "Your Jira workspace");
     header.set_title_widget(Some(&header_title));
     let sidebar_toggle = gtk::ToggleButton::builder()
@@ -149,7 +155,6 @@ fn build_ui(app: &adw::Application) {
     let spinner = gtk::Spinner::new();
     spinner.set_visible(false);
     header.pack_start(&sidebar_toggle);
-    header.pack_start(&connect_button);
     header.pack_end(&disconnect_button);
     header.pack_end(&refresh_button);
     header.pack_end(&spinner);
@@ -246,22 +251,18 @@ fn build_ui(app: &adw::Application) {
     detail_panel.set_width_request(390);
     detail_panel.add_css_class("detail-panel");
     detail_panel.set_visible(false);
-    let detail_header = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-    detail_header.add_css_class("detail-panel-header");
-    detail_header.set_margin_start(22);
-    detail_header.set_margin_end(14);
-    detail_header.set_margin_top(14);
-    detail_header.set_margin_bottom(12);
+    let detail_header = adw::HeaderBar::new();
+    detail_header.add_css_class("pane-header");
+    detail_header.add_css_class("detail-pane-header");
+    detail_header.set_show_start_title_buttons(false);
+    detail_header.set_show_end_title_buttons(true);
     let detail_heading = gtk::Label::new(Some("Ticket"));
     detail_heading.add_css_class("heading");
-    detail_heading.set_xalign(0.0);
-    detail_heading.set_hexpand(true);
-    detail_header.append(&detail_heading);
-    let close_detail = gtk::Button::from_icon_name("window-close-symbolic");
+    detail_header.set_title_widget(Some(&detail_heading));
+    let close_detail = gtk::Button::from_icon_name("go-next-symbolic");
     close_detail.add_css_class("flat");
     close_detail.set_tooltip_text(Some("Close issue details (Esc)"));
-    detail_header.append(&close_detail);
-    detail_panel.append(&detail_header);
+    detail_header.pack_start(&close_detail);
     let detail_box = gtk::Box::new(gtk::Orientation::Vertical, 18);
     detail_box.set_margin_top(20);
     detail_box.set_margin_start(22);
@@ -273,13 +274,40 @@ fn build_ui(app: &adw::Application) {
     detail_scroll.set_child(Some(&detail_box));
     detail_scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
     detail_scroll.set_vexpand(true);
-    detail_panel.append(&detail_scroll);
+    let detail_content = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    detail_content.append(&detail_scroll);
+    let detail_toolbar = adw::ToolbarView::new();
+    detail_toolbar.add_top_bar(&detail_header);
+    detail_toolbar.set_content(Some(&detail_content));
+    detail_panel.append(&detail_toolbar);
 
-    // The sidebar exposes real actions and the actual selected project set.
-    let sidebar = gtk::Box::new(gtk::Orientation::Vertical, 14);
+    // Move window controls between panes as the inspector is shown or hidden.
+    detail_panel.connect_notify_local(Some("visible"), {
+        let header = header.clone();
+        move |panel, _| header.set_show_end_title_buttons(!panel.is_visible())
+    });
+
+    // The sidebar has its own complete surface, including a matching header.
+    let sidebar = gtk::Box::new(gtk::Orientation::Vertical, 0);
     sidebar.add_css_class("workspace-sidebar");
     sidebar.set_width_request(184);
     sidebar.set_hexpand(false);
+    let sidebar_content = gtk::Box::new(gtk::Orientation::Vertical, 14);
+    sidebar_content.set_margin_top(14);
+    sidebar_content.set_margin_bottom(16);
+    sidebar_content.set_margin_start(12);
+    sidebar_content.set_margin_end(12);
+    let sidebar_header = adw::HeaderBar::new();
+    sidebar_header.add_css_class("pane-header");
+    sidebar_header.add_css_class("sidebar-pane-header");
+    sidebar_header.set_show_title(false);
+    sidebar_header.set_show_start_title_buttons(true);
+    sidebar_header.set_show_end_title_buttons(false);
+    sidebar_header.pack_end(&connect_button);
+    let sidebar_toolbar = adw::ToolbarView::new();
+    sidebar_toolbar.add_top_bar(&sidebar_header);
+    sidebar_toolbar.set_content(Some(&sidebar_content));
+    sidebar.append(&sidebar_toolbar);
     let sidebar_intro = gtk::Box::new(gtk::Orientation::Vertical, 4);
     let eyebrow = gtk::Label::new(Some("WORKSPACE"));
     eyebrow.add_css_class("sidebar-eyebrow");
@@ -289,7 +317,7 @@ fn build_ui(app: &adw::Application) {
     sidebar_title.add_css_class("title-3");
     sidebar_title.set_xalign(0.0);
     sidebar_intro.append(&sidebar_title);
-    sidebar.append(&sidebar_intro);
+    sidebar_content.append(&sidebar_intro);
 
     let board_nav = gtk::Box::new(gtk::Orientation::Horizontal, 10);
     board_nav.add_css_class("sidebar-current");
@@ -305,16 +333,16 @@ fn build_ui(app: &adw::Application) {
     board_menu.add_css_class("flat");
     board_menu.add_css_class("board-settings-trigger");
     board_nav.append(&board_menu);
-    sidebar.append(&board_nav);
+    sidebar_content.append(&board_nav);
 
     let projects_heading = gtk::Label::new(Some("SELECTED PROJECTS"));
     projects_heading.add_css_class("sidebar-eyebrow");
     projects_heading.set_xalign(0.0);
     projects_heading.set_margin_top(12);
-    sidebar.append(&projects_heading);
+    sidebar_content.append(&projects_heading);
     let sidebar_projects = gtk::Box::new(gtk::Orientation::Vertical, 7);
     sidebar_projects.add_css_class("sidebar-projects");
-    sidebar.append(&sidebar_projects);
+    sidebar_content.append(&sidebar_projects);
 
     let board_popover = gtk::Popover::new();
     let settings_actions = gtk::Box::new(gtk::Orientation::Vertical, 5);
@@ -343,22 +371,28 @@ fn build_ui(app: &adw::Application) {
         let sidebar = sidebar.clone();
         let workspace_split = workspace_split.clone();
         let saved_sidebar_width = saved_sidebar_width.clone();
+        let header = header.clone();
         move |button| {
             if button.is_active() {
                 sidebar.set_visible(true);
                 workspace_split.set_position(saved_sidebar_width.get());
+                header.set_show_start_title_buttons(false);
             } else {
                 let width = workspace_split.position();
                 if width >= 184 {
                     saved_sidebar_width.set(width);
                 }
                 sidebar.set_visible(false);
+                header.set_show_start_title_buttons(true);
             }
         }
     });
 
+    let center_toolbar = adw::ToolbarView::new();
+    center_toolbar.add_top_bar(&header);
+    center_toolbar.set_content(Some(&center));
     let inner_split = gtk::Paned::new(gtk::Orientation::Horizontal);
-    inner_split.set_start_child(Some(&center));
+    inner_split.set_start_child(Some(&center_toolbar));
     inner_split.set_end_child(Some(&detail_panel));
     // Never let a long description or a wide board force sibling panes off-screen.
     inner_split.set_position(790);
@@ -370,10 +404,7 @@ fn build_ui(app: &adw::Application) {
     workspace_split.set_end_child(Some(&inner_split));
     let toast = adw::ToastOverlay::new();
     toast.set_child(Some(&workspace_split));
-    let toolbar = adw::ToolbarView::new();
-    toolbar.add_top_bar(&header);
-    toolbar.set_content(Some(&toast));
-    window.set_content(Some(&toolbar));
+    window.set_content(Some(&toast));
 
     let ui = Ui {
         window, toast, header_title, spinner, status, projects_label, sidebar_projects,
