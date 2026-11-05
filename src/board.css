@@ -292,6 +292,17 @@ button.detail-open {
   border: 1px solid alpha(#4679eb, 0.26);
 }
 .sidebar-current image { color: #4679eb; }
+button.sidebar-projects-action {
+  min-width: 30px;
+  min-height: 30px;
+  padding: 5px;
+  border-radius: 8px;
+  color: alpha(@window_fg_color, 0.72);
+}
+button.sidebar-projects-action:hover {
+  background-color: alpha(#4679eb, 0.15);
+  color: @window_fg_color;
+}
 button.sidebar-project-filter {
   color: @window_fg_color;
   background-color: transparent;
