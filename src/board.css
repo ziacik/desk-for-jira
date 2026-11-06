@@ -564,52 +564,125 @@ button.transition-action:hover {
   background-color: alpha(@accent_bg_color, 0.09);
 }
 
-/* Pinned issues stay visible above the scrollable workflow columns. */
+/* Pinned tickets appear as a compact strip only when at least one is present. */
 .pinned-strip {
-  background-color: alpha(@window_fg_color, 0.027);
-  border: 1px solid alpha(@window_fg_color, 0.08);
-  border-radius: 14px;
-  padding: 11px 12px 9px;
+  padding: 9px 11px 10px;
+  border-radius: 12px;
+  border: 1px solid alpha(@window_fg_color, 0.065);
+  background-color: alpha(@window_fg_color, 0.025);
 }
 .pinned-heading {
-  padding: 0 2px;
-  color: alpha(@window_fg_color, 0.75);
+  min-height: 22px;
+  padding: 0 3px;
+  color: alpha(@window_fg_color, 0.67);
 }
-.pinned-heading image { -gtk-icon-size: 15px; }
+.pinned-heading image {
+  -gtk-icon-size: 14px;
+}
 .pinned-title {
-  color: @window_fg_color;
-  font-size: 0.96em;
-  font-weight: 800;
+  color: alpha(@window_fg_color, 0.83);
+  font-size: 0.88em;
+  font-weight: 750;
 }
 .pinned-count {
-  color: alpha(@window_fg_color, 0.66);
-  font-size: 0.84em;
+  color: alpha(@window_fg_color, 0.70);
+  background-color: alpha(@window_fg_color, 0.07);
+  border-radius: 999px;
+  padding: 1px 7px;
+  font-size: 0.8em;
   font-weight: 650;
 }
-.pinned-scroll { padding-bottom: 4px; }
-.pinned-empty {
-  padding: 8px 3px 10px;
-  color: alpha(@window_fg_color, 0.58);
-  font-size: 0.9em;
+.pinned-scroll {
+  padding: 1px 0 2px;
 }
-button.ticket-pin {
-  min-width: 25px;
-  min-height: 25px;
-  padding: 4px;
-  color: alpha(@window_fg_color, 0.56);
-  background-color: @card_bg_color;
-  border: 1px solid alpha(@window_fg_color, 0.10);
-  border-radius: 8px;
-}
-button.ticket-pin image { -gtk-icon-size: 14px; }
-button.ticket-pin:hover {
+/* Pinned issues are narrow, single-line native-style rows, not cards.
+   Let the text truncate within the row instead of expanding the entire strip. */
+.pinned-ticket {
   color: @window_fg_color;
   background-color: @card_bg_color;
-  border-color: alpha(#4679eb, 0.45);
+  border: 1px solid alpha(@window_fg_color, 0.095);
+  border-radius: 9px;
+  box-shadow: none;
+}
+.pinned-ticket:hover {
+  border-color: alpha(@accent_color, 0.40);
+}
+button.pinned-ticket-open {
+  color: @window_fg_color;
+  background: transparent;
+  border: none;
+  border-radius: 8px 0 0 8px;
+  box-shadow: none;
+  min-height: 38px;
+  padding: 6px 6px 6px 11px;
+}
+button.pinned-ticket-open:hover {
+  color: @window_fg_color;
+  background-color: alpha(@window_fg_color, 0.035);
+}
+button.pinned-ticket-open.selected-issue {
+  color: @window_fg_color;
+  background-color: alpha(@accent_bg_color, 0.14);
+  box-shadow: none;
+}
+.pinned-ticket-key {
+  color: alpha(@window_fg_color, 0.70);
+  font-size: 0.80em;
+  font-weight: 750;
+}
+.pinned-ticket-summary {
+  color: @window_fg_color;
+  font-size: 0.89em;
+  font-weight: 600;
+}
+button.pinned-ticket-unpin {
+  color: alpha(@window_fg_color, 0.64);
+  border: none;
+  box-shadow: none;
+  min-width: 31px;
+  min-height: 34px;
+  margin: 2px 3px 2px 0;
+}
+button.pinned-ticket-unpin:hover {
+  color: @accent_color;
+  background-color: alpha(@accent_bg_color, 0.13);
+}
+
+/* Pin affordance: transparent icon action inside the card, not a second card.
+   It stays discoverable without stealing attention from the issue title. */
+button.ticket-pin {
+  min-width: 27px;
+  min-height: 27px;
+  padding: 0;
+  color: alpha(@window_fg_color, 0.44);
+  background: transparent;
+  border: none;
+  border-radius: 7px;
+  box-shadow: none;
+}
+button.ticket-pin image {
+  -gtk-icon-size: 15px;
+}
+.issue-tile:hover button.ticket-pin {
+  color: alpha(@window_fg_color, 0.84);
+}
+button.ticket-pin:hover {
+  color: @window_fg_color;
+  background-color: alpha(@window_fg_color, 0.075);
+}
+button.ticket-pin:focus-visible {
+  outline: 2px solid @accent_color;
+  outline-offset: -2px;
 }
 button.ticket-pin.pin-active,
+button.ticket-pin.pin-active:hover {
+  color: @accent_color;
+  border: none;
+}
+button.ticket-pin.pin-active:hover {
+  background-color: alpha(@accent_bg_color, 0.16);
+}
 button.detail-header-action.pin-active {
-  color: #4679eb;
-  background-color: alpha(#4679eb, 0.13);
-  border-color: alpha(#4679eb, 0.32);
+  color: @accent_color;
+  background-color: alpha(@accent_bg_color, 0.10);
 }

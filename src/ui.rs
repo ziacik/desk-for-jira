@@ -41,6 +41,7 @@ struct Ui {
     board_box: gtk::Box,
     pinned_section: gtk::Box,
     pinned_box: gtk::Box,
+    pinned_scroll: gtk::ScrolledWindow,
     pinned_count: gtk::Label,
     detail_box: gtk::Box,
     detail_actions: gtk::Box,
@@ -306,6 +307,7 @@ fn build_ui(app: &adw::Application) {
     filters_row.append(&search);
     center.append(&filters_row);
 
+    // Never take up board space when the user has no pinned issues.
     let pinned_section = gtk::Box::new(gtk::Orientation::Vertical, 6);
     pinned_section.add_css_class("pinned-strip");
     pinned_section.set_visible(false);
@@ -318,16 +320,23 @@ fn build_ui(app: &adw::Application) {
     pinned_heading.append(&pinned_title);
     let pinned_count = gtk::Label::new(None);
     pinned_count.add_css_class("pinned-count");
+    pinned_count.set_visible(false);
     pinned_heading.append(&pinned_count);
     pinned_section.append(&pinned_heading);
-    let pinned_box = gtk::Box::new(gtk::Orientation::Horizontal, 10);
+    let pinned_box = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     pinned_box.set_halign(gtk::Align::Start);
+    pinned_box.set_valign(gtk::Align::Center);
     let pinned_scroll = gtk::ScrolledWindow::new();
     pinned_scroll.add_css_class("pinned-scroll");
-    pinned_scroll.set_overlay_scrolling(false);
+    // Avoid a permanent thick scrollbar under a single row of pinned issues.
+    pinned_scroll.set_overlay_scrolling(true);
     pinned_scroll.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Never);
-    pinned_scroll.set_propagate_natural_height(true);
+    // This is a single row of short items, not a second vertically growing board.
+    pinned_scroll.set_propagate_natural_height(false);
+    pinned_scroll.set_min_content_height(52);
+    pinned_scroll.set_vexpand(false);
     pinned_scroll.set_child(Some(&pinned_box));
+    pinned_scroll.set_visible(false);
     pinned_section.append(&pinned_scroll);
     center.append(&pinned_section);
 
@@ -580,7 +589,7 @@ fn build_ui(app: &adw::Application) {
         project_filter: Rc::new(RefCell::new(None)),
         connect_button, disconnect_button, refresh_button,
         manage_projects_button, manage_columns_button, search, center_title,
-        board_box, pinned_section, pinned_box, pinned_count,
+        board_box, pinned_section, pinned_box, pinned_scroll, pinned_count,
         detail_box, detail_actions, detail_panel, detail_heading, open_in_jira, copy_branch, pin_detail, inner_split,
         state: state.clone(),
         detail_request: Rc::new(Cell::new(0)),
@@ -2301,22 +2310,20 @@ fn toggle_pinned_issue(ui: &Ui, issue: &Issue) {
 
 fn render_pinned_section(ui: &Ui, state: &State) {
     clear_box(&ui.pinned_box);
-    ui.pinned_section.set_visible(true);
     let pinned = pinned_issue_refs(&state.settings, &state.issues, &state.pinned_issues);
+    let has_pins = !pinned.is_empty();
+    ui.pinned_section.set_visible(has_pins);
     ui.pinned_count.set_text(&pinned.len().to_string());
-    if pinned.is_empty() {
-        let empty = gtk::Label::new(Some("Use the pin icon on a ticket to keep it here."));
-        empty.add_css_class("pinned-empty");
-        empty.set_xalign(0.0);
-        ui.pinned_box.append(&empty);
+    ui.pinned_count.set_visible(has_pins);
+    ui.pinned_scroll.set_visible(has_pins);
+    if !has_pins {
         return;
     }
     let base_url = state.account.as_ref().map(|account| account.base_url.as_str()).unwrap_or("");
     for issue in pinned {
-        let tile = issue_button(issue, ui, base_url, state.account.as_ref(), state.generation);
-        tile.set_width_request(272);
-        tile.set_hexpand(false);
-        ui.pinned_box.append(&tile);
+        ui.pinned_box.append(&pinned_issue_tile(
+            issue, ui, base_url, state.account.as_ref(), state.generation,
+        ));
     }
 }
 
@@ -2590,7 +2597,40 @@ fn issue_button(issue: &Issue, ui: &Ui, base_url: &str, account: Option<&Credent
         *ui.selected_button.borrow_mut() = Some(button.clone());
     }
 
+    connect_issue_open(&button, issue, ui, base_url, account, generation);
     let pin_issue = issue.clone();
+    let tile = gtk::Overlay::new();
+    tile.add_css_class("issue-tile");
+    tile.set_hexpand(true);
+    tile.set_child(Some(&button));
+    let pin = gtk::Button::from_icon_name("view-pin-symbolic");
+    pin.add_css_class("flat");
+    pin.add_css_class("ticket-pin");
+    pin.set_halign(gtk::Align::End);
+    pin.set_valign(gtk::Align::Start);
+    pin.set_margin_end(7);
+    pin.set_margin_top(7);
+    style_pin_button(
+        &pin,
+        ui.state.borrow().settings.pinned_issues.iter().any(|pinned| pinned == &pin_issue.key),
+    );
+    {
+        let ui = ui.clone();
+        pin.connect_clicked(move |_| toggle_pinned_issue(&ui, &pin_issue));
+    }
+    tile.add_overlay(&pin);
+    tile
+}
+
+/// Shared selection and detail behavior for board cards and the compact pinned row.
+fn connect_issue_open(
+    button: &gtk::Button,
+    issue: &Issue,
+    ui: &Ui,
+    base_url: &str,
+    account: Option<&Credentials>,
+    generation: u64,
+) {
     let issue = issue.clone();
     let detail_box = ui.detail_box.clone();
     let detail_panel = ui.detail_panel.clone();
@@ -2644,26 +2684,67 @@ fn issue_button(issue: &Issue, ui: &Ui, base_url: &str, account: Option<&Credent
             load_issue_images(&events, account, &issue, generation);
         }
     });
-    let tile = gtk::Overlay::new();
-    tile.add_css_class("issue-tile");
-    tile.set_hexpand(true);
-    tile.set_child(Some(&button));
-    let pin = gtk::Button::from_icon_name("view-pin-symbolic");
-    pin.add_css_class("flat");
-    pin.add_css_class("ticket-pin");
-    pin.set_halign(gtk::Align::End);
-    pin.set_valign(gtk::Align::Start);
-    pin.set_margin_end(7);
-    pin.set_margin_top(7);
-    style_pin_button(
-        &pin,
-        ui.state.borrow().settings.pinned_issues.iter().any(|pinned| pinned == &pin_issue.key),
-    );
+}
+
+fn pinned_issue_tile(
+    issue: &Issue,
+    ui: &Ui,
+    base_url: &str,
+    account: Option<&Credentials>,
+    generation: u64,
+) -> gtk::Box {
+    // Separate action controls, not a second full-sized issue card or an Overlay:
+    // the text stays aligned and the entire row has a predictable height.
+    let tile = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    tile.add_css_class("pinned-ticket");
+    tile.set_size_request(272, 44);
+    tile.set_hexpand(false);
+    tile.set_vexpand(false);
+    tile.set_valign(gtk::Align::Center);
+
+    let open = gtk::Button::new();
+    open.add_css_class("flat");
+    open.add_css_class("pinned-ticket-open");
+    open.set_hexpand(true);
+    open.set_tooltip_text(Some(&format!("{} · {}", issue.key, issue.summary)));
+
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 7);
+    row.set_hexpand(true);
+    let key = gtk::Label::new(Some(&issue.key));
+    key.add_css_class("pinned-ticket-key");
+    key.set_xalign(0.0);
+    row.append(&key);
+    let summary = gtk::Label::new(Some(&issue.summary));
+    summary.add_css_class("pinned-ticket-summary");
+    summary.set_xalign(0.0);
+    summary.set_hexpand(true);
+    summary.set_single_line_mode(true);
+    summary.set_ellipsize(gtk::pango::EllipsizeMode::End);
+    summary.set_max_width_chars(24);
+    row.append(&summary);
+    open.set_child(Some(&row));
+
+    if ui.selected_issue.borrow().as_deref() == Some(issue.key.as_str())
+        && ui.selected_button.borrow().is_none()
+    {
+        open.add_css_class("selected-issue");
+        *ui.selected_button.borrow_mut() = Some(open.clone());
+    }
+    connect_issue_open(&open, issue, ui, base_url, account, generation);
+    tile.append(&open);
+
+    let unpin = gtk::Button::from_icon_name("view-pin-symbolic");
+    unpin.add_css_class("flat");
+    unpin.add_css_class("ticket-pin");
+    unpin.add_css_class("pinned-ticket-unpin");
+    unpin.set_valign(gtk::Align::Center);
+    style_pin_button(&unpin, true);
     {
         let ui = ui.clone();
-        pin.connect_clicked(move |_| toggle_pinned_issue(&ui, &pin_issue));
+        let issue = issue.clone();
+        unpin.connect_clicked(move |_| toggle_pinned_issue(&ui, &issue));
     }
-    tile.add_overlay(&pin);
+    tile.append(&unpin);
     tile
 }
 
