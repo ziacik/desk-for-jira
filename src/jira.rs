@@ -7,12 +7,13 @@ use serde_json::{Value, json};
 
 const PAGE_SIZE: usize = 100;
 const MAX_ITEMS: usize = 500;
-const FIELDS: [&str; 11] = [
+const FIELDS: [&str; 12] = [
     "summary",
     "status",
     "assignee",
     "issuetype",
     "priority",
+    "fixVersions",
     "updated",
     "description",
     "attachment",
@@ -69,6 +70,7 @@ pub struct Issue {
     pub status_id: String,
     pub kind: String,
     pub priority: String,
+    pub fix_versions: Vec<String>,
     pub assignee: String,
     pub updated: String,
     pub description: String,
@@ -622,6 +624,10 @@ fn parse_issue(v: &Value, epic_link_field: Option<&str>) -> Option<Issue> {
         status_id: nested("status", "id"),
         kind,
         priority: nested("priority", "name"),
+        fix_versions: f.get("fixVersions").and_then(Value::as_array)
+            .into_iter().flatten()
+            .filter_map(|version| version.get("name").and_then(Value::as_str))
+            .map(str::to_owned).collect(),
         assignee: nested("assignee", "displayName"),
         updated: field("updated").chars().take(10).collect(),
         description: format_description(f.get("description")),
@@ -822,6 +828,27 @@ mod tests {
             key: "ART-1".into(), summary: String::new()
         }));
         assert!(parse_issues(&data)[0].epic.is_none());
+    }
+
+    #[test]
+    fn reads_fix_versions_including_empty_and_missing_values() {
+        let data = json!({"issues":[
+            {"key":"ART-101","fields":{"fixVersions":[
+                {"id":"1","name":"1.2.0"},
+                {"id":"2","name":"1.3.0"}
+            ]}},
+            {"key":"ART-102","fields":{"fixVersions":[{"name":"2.0"}]}},
+            {"key":"ART-103","fields":{"fixVersions":[]}},
+            {"key":"ART-104","fields":{"fixVersions":null}},
+            {"key":"ART-105","fields":{}}
+        ]});
+        assert!(FIELDS.contains(&"fixVersions"));
+        let issues = parse_issues(&data);
+        assert_eq!(issues[0].fix_versions, vec!["1.2.0", "1.3.0"]);
+        assert_eq!(issues[1].fix_versions, vec!["2.0"]);
+        for issue in issues.iter().skip(2) {
+            assert!(issue.fix_versions.is_empty());
+        }
     }
 
     #[test]
