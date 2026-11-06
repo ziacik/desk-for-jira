@@ -564,52 +564,111 @@ button.transition-action:hover {
   background-color: alpha(@accent_bg_color, 0.09);
 }
 
-/* Pinned issues stay visible above the scrollable workflow columns. */
+/* Pins sit in the board's visual hierarchy instead of a separate dashboard panel.
+   The empty state is a single muted line; only populated pins get a surface. */
 .pinned-strip {
-  background-color: alpha(@window_fg_color, 0.027);
-  border: 1px solid alpha(@window_fg_color, 0.08);
-  border-radius: 14px;
-  padding: 11px 12px 9px;
+  padding: 2px 2px 3px;
+}
+.pinned-strip.has-pins {
+  padding: 9px 11px 10px;
+  border-radius: 12px;
+  border: 1px solid alpha(@window_fg_color, 0.065);
+  background-color: alpha(@window_fg_color, 0.025);
 }
 .pinned-heading {
-  padding: 0 2px;
-  color: alpha(@window_fg_color, 0.75);
+  min-height: 22px;
+  padding: 0 3px;
+  color: alpha(@window_fg_color, 0.67);
 }
-.pinned-heading image { -gtk-icon-size: 15px; }
+.pinned-heading image {
+  -gtk-icon-size: 14px;
+}
 .pinned-title {
-  color: @window_fg_color;
-  font-size: 0.96em;
-  font-weight: 800;
+  color: alpha(@window_fg_color, 0.83);
+  font-size: 0.88em;
+  font-weight: 750;
+}
+.pinned-hint {
+  color: alpha(@window_fg_color, 0.50);
+  font-size: 0.84em;
+  margin-left: 7px;
 }
 .pinned-count {
-  color: alpha(@window_fg_color, 0.66);
-  font-size: 0.84em;
+  color: alpha(@window_fg_color, 0.70);
+  background-color: alpha(@window_fg_color, 0.07);
+  border-radius: 999px;
+  padding: 1px 7px;
+  font-size: 0.8em;
   font-weight: 650;
 }
-.pinned-scroll { padding-bottom: 4px; }
-.pinned-empty {
-  padding: 8px 3px 10px;
-  color: alpha(@window_fg_color, 0.58);
-  font-size: 0.9em;
+.pinned-scroll {
+  padding: 1px 0 2px;
 }
-button.ticket-pin {
-  min-width: 25px;
-  min-height: 25px;
-  padding: 4px;
-  color: alpha(@window_fg_color, 0.56);
+.pinned-strip button.issue-card.compact-card {
   background-color: @card_bg_color;
   border: 1px solid alpha(@window_fg_color, 0.10);
-  border-radius: 8px;
+  border-radius: 10px;
+  box-shadow: none;
 }
-button.ticket-pin image { -gtk-icon-size: 14px; }
+.pinned-strip button.issue-card.compact-card:hover {
+  border-color: alpha(@accent_color, 0.55);
+  box-shadow: none;
+}
+.pinned-strip button.issue-card.compact-card.selected-issue {
+  border-color: @accent_color;
+  box-shadow: 0 0 0 1px alpha(@accent_color, 0.26);
+}
+button.compact-card .ticket-type-mark {
+  min-width: 20px;
+  min-height: 20px;
+  border-radius: 6px;
+}
+button.compact-card .ticket-type-mark image {
+  -gtk-icon-size: 12px;
+}
+button.compact-card label.ticket-key {
+  font-size: 0.79em;
+}
+button.compact-card label.ticket-summary {
+  font-size: 0.93em;
+  font-weight: 620;
+}
+
+/* Pin affordance: transparent icon action inside the card, not a second card.
+   It stays discoverable without stealing attention from the issue title. */
+button.ticket-pin {
+  min-width: 27px;
+  min-height: 27px;
+  padding: 0;
+  color: alpha(@window_fg_color, 0.44);
+  background: transparent;
+  border: none;
+  border-radius: 7px;
+  box-shadow: none;
+}
+button.ticket-pin image {
+  -gtk-icon-size: 15px;
+}
+.issue-tile:hover button.ticket-pin {
+  color: alpha(@window_fg_color, 0.84);
+}
 button.ticket-pin:hover {
   color: @window_fg_color;
-  background-color: @card_bg_color;
-  border-color: alpha(#4679eb, 0.45);
+  background-color: alpha(@window_fg_color, 0.075);
+}
+button.ticket-pin:focus-visible {
+  outline: 2px solid @accent_color;
+  outline-offset: -2px;
 }
 button.ticket-pin.pin-active,
+button.ticket-pin.pin-active:hover {
+  color: @accent_color;
+  border: none;
+}
+button.ticket-pin.pin-active:hover {
+  background-color: alpha(@accent_bg_color, 0.16);
+}
 button.detail-header-action.pin-active {
-  color: #4679eb;
-  background-color: alpha(#4679eb, 0.13);
-  border-color: alpha(#4679eb, 0.32);
+  color: @accent_color;
+  background-color: alpha(@accent_bg_color, 0.10);
 }
