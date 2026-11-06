@@ -698,6 +698,7 @@ fn wire_actions(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>) {
                 s.generation
             };
             set_busy(&ui, &state, false);
+            ui.transition_busy.set(false);
             ui.header_title.set_subtitle("Not connected");
             ui.status.set_text("Disconnected");
             ui.projects_label.set_text("Choose projects to begin");
@@ -851,6 +852,7 @@ fn handle_event(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>, eve
         Event::TransitionFinished(id, key, to_id, to_name, result) => {
             if state.borrow().generation != id { return; }
             ui.transition_busy.set(false);
+            ui.detail_actions.set_sensitive(true);
             match result {
                 Ok(()) => {
                     {
@@ -906,6 +908,7 @@ fn handle_event(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>, eve
 }
 
 fn start_refresh(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>, account: Credentials, save: bool) {
+    ui.transition_busy.set(false);
     let id = {
         let mut s = state.borrow_mut();
         s.generation += 1;
