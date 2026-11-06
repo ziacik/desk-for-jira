@@ -283,15 +283,21 @@ fn build_ui(app: &adw::Application) {
     detail_heading.add_css_class("detail-header-key");
     detail_heading.set_xalign(0.5);
     detail_header.set_title_widget(Some(&detail_heading));
-    let open_in_jira = gtk::Button::from_icon_name("go-jump-symbolic");
+    let open_in_jira = gtk::Button::new();
+    open_in_jira.set_child(Some(&issue_detail::header_action_icon(
+        issue_detail::HeaderActionIcon::ExternalLink,
+    )));
     open_in_jira.add_css_class("flat");
+    open_in_jira.add_css_class("detail-header-action");
     open_in_jira.set_tooltip_text(Some("Open this issue in Jira"));
     open_in_jira.set_visible(false);
     detail_header.pack_end(&open_in_jira);
     let copy_branch = gtk::Button::new();
-    copy_branch.set_child(Some(&issue_detail::git_branch_icon()));
+    copy_branch.set_child(Some(&issue_detail::header_action_icon(
+        issue_detail::HeaderActionIcon::Branch,
+    )));
     copy_branch.add_css_class("flat");
-    copy_branch.add_css_class("detail-branch-action");
+    copy_branch.add_css_class("detail-header-action");
     copy_branch.set_tooltip_text(Some("Copy suggested Git branch name"));
     copy_branch.set_visible(false);
     detail_header.pack_end(&copy_branch);
