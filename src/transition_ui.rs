@@ -35,7 +35,7 @@ enum FieldControl {
     Text(gtk::Entry),
     Paragraph(gtk::TextView),
     Structured(gtk::TextView),
-    Boolean(gtk::CheckButton),
+    Boolean(gtk::DropDown),
     Single(gtk::DropDown),
     Multiple(Vec<gtk::CheckButton>),
 }
@@ -85,10 +85,10 @@ pub fn render_actions(
         let submit = submit.clone();
         let on_open = on_open.clone();
         button.connect_clicked(move |_| {
-            if transition.required_fields.is_empty() {
-                submit(transition.clone(), Map::new());
-            } else if let Some(parent) = parent.upgrade() {
-                open_transition_form(&parent, &key, cloud, transition.clone(), submit.clone(), on_open.clone());
+            if let Some(parent) = parent.upgrade() {
+                open_transition_form(
+                    &parent, &key, cloud, transition.clone(), submit.clone(), on_open.clone(),
+                );
             }
         });
         actions.insert(&button, -1);
@@ -109,7 +109,7 @@ fn open_transition_form(
         .transient_for(parent)
         .modal(true)
         .default_width(500)
-        .default_height(420)
+        .default_height(if transition.fields.is_empty() { 240 } else { 420 })
         .build();
     let root = gtk::Box::new(gtk::Orientation::Vertical, 15);
     root.set_margin_top(20);
@@ -122,7 +122,13 @@ fn open_transition_form(
     title.set_xalign(0.0);
     root.append(&title);
 
-    let explanation = gtk::Label::new(Some("Complete the required Jira fields before changing the status."));
+    let explanation = gtk::Label::new(Some(
+        if transition.fields.is_empty() {
+            "Jira did not provide editable fields for this transition. Confirm the status change below."
+        } else {
+            "Set any fields needed for this transition. Required fields are marked with *."
+        },
+    ));
     explanation.add_css_class("dim-label");
     explanation.set_xalign(0.0);
     explanation.set_wrap(true);
@@ -130,9 +136,11 @@ fn open_transition_form(
 
     let form = gtk::Box::new(gtk::Orientation::Vertical, 13);
     let mut controls = Vec::new();
-    for field in &transition.required_fields {
+    for field in &transition.fields {
         let row = gtk::Box::new(gtk::Orientation::Vertical, 5);
-        let name = gtk::Label::new(Some(&format!("{} *", field.name)));
+        let name = gtk::Label::new(Some(&format!(
+            "{}{}", field.name, if field.required { " *" } else { "" },
+        )));
         name.set_xalign(0.0);
         row.append(&name);
         let control = if !field.choices.is_empty() && field.schema_type == "array" {
@@ -152,21 +160,24 @@ fn open_transition_form(
             row.append(&select);
             FieldControl::Single(select)
         } else if field.schema_type == "boolean" {
-            let toggle = gtk::CheckButton::with_label("Yes");
-            row.append(&toggle);
-            FieldControl::Boolean(toggle)
+            let select = gtk::DropDown::from_strings(&["No change", "No", "Yes"]);
+            if field.required {
+                select.set_selected(0);
+            }
+            row.append(&select);
+            FieldControl::Boolean(select)
+        } else if field.is_multiline() {
+            let input = text_area("", false);
+            row.append(&text_area_frame(&input));
+            FieldControl::Paragraph(input)
         } else if field.uses_structured_input() {
             let hint = gtk::Label::new(Some("Advanced Jira field · enter a JSON value"));
             hint.add_css_class("dim-label");
             hint.set_xalign(0.0);
             row.append(&hint);
-            let input = text_area("{}", true);
+            let input = text_area("", true);
             row.append(&text_area_frame(&input));
             FieldControl::Structured(input)
-        } else if field.is_multiline() {
-            let input = text_area("", false);
-            row.append(&text_area_frame(&input));
-            FieldControl::Paragraph(input)
         } else {
             let input = gtk::Entry::new();
             let placeholder = match field.schema_type.as_str() {
@@ -189,11 +200,13 @@ fn open_transition_form(
         controls.push((field.clone(), control));
         form.append(&row);
     }
-    let scroller = gtk::ScrolledWindow::new();
-    scroller.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
-    scroller.set_vexpand(true);
-    scroller.set_child(Some(&form));
-    root.append(&scroller);
+    if !transition.fields.is_empty() {
+        let scroller = gtk::ScrolledWindow::new();
+        scroller.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
+        scroller.set_vexpand(true);
+        scroller.set_child(Some(&form));
+        root.append(&scroller);
+    }
 
     let error = gtk::Label::new(None);
     error.add_css_class("error");
@@ -221,11 +234,12 @@ fn open_transition_form(
     let apply_button = apply.clone();
     let error_apply = error.clone();
     apply.connect_clicked(move |_| {
+        error_apply.set_visible(false);
         let mut values = Map::new();
         for (field, control) in &controls {
-            let result = control_value(field, control, cloud);
-            match result {
-                Ok(value) => { values.insert(field.id.clone(), value); }
+            match control_value(field, control, cloud) {
+                Ok(Some(value)) => { values.insert(field.id.clone(), value); }
+                Ok(None) => {}
                 Err(message) => {
                     error_apply.set_text(&message);
                     error_apply.set_visible(true);
@@ -272,25 +286,41 @@ fn text_area_frame(input: &gtk::TextView) -> gtk::ScrolledWindow {
     frame
 }
 
-fn control_value(field: &TransitionField, control: &FieldControl, cloud: bool) -> Result<Value, String> {
+fn control_value(
+    field: &TransitionField,
+    control: &FieldControl,
+    cloud: bool,
+) -> Result<Option<Value>, String> {
     match control {
-        FieldControl::Text(input) => field.text_value(input.text().as_str(), cloud)
-            .map_err(|error| error.to_string()),
+        FieldControl::Text(input) => {
+            let text = input.text();
+            text_value_or_none(field, &text, cloud)
+        }
         FieldControl::Paragraph(input) | FieldControl::Structured(input) => {
             let buffer = input.buffer();
             let text = buffer.text(&buffer.start_iter(), &buffer.end_iter(), false);
-            field.text_value(&text, cloud).map_err(|error| error.to_string())
+            text_value_or_none(field, &text, cloud)
         }
-        FieldControl::Boolean(input) => Ok(Value::Bool(input.is_active())),
+        FieldControl::Boolean(select) => match select.selected() {
+            0 if field.required => Err(format!("{} is required", field.name)),
+            0 => Ok(None),
+            1 => Ok(Some(Value::Bool(false))),
+            2 => Ok(Some(Value::Bool(true))),
+            _ => Err(format!("Invalid value for {}", field.name)),
+        },
         FieldControl::Single(dropdown) => {
             let selected = dropdown.selected();
             if selected == 0 {
-                return Err(format!("{} is required", field.name));
+                return if field.required {
+                    Err(format!("{} is required", field.name))
+                } else {
+                    Ok(None)
+                };
             }
             let Some(choice) = field.choices.get(selected as usize - 1) else {
                 return Err(format!("Invalid value for {}", field.name));
             };
-            Ok(choice.value.clone())
+            Ok(Some(choice.value.clone()))
         }
         FieldControl::Multiple(checks) => {
             let selected: Vec<Value> = checks.iter().zip(&field.choices)
@@ -298,9 +328,26 @@ fn control_value(field: &TransitionField, control: &FieldControl, cloud: bool) -
                 .map(|(_, choice)| choice.value.clone())
                 .collect();
             if selected.is_empty() {
-                return Err(format!("{} is required", field.name));
+                return if field.required {
+                    Err(format!("{} is required", field.name))
+                } else {
+                    Ok(None)
+                };
             }
-            Ok(Value::Array(selected))
+            Ok(Some(Value::Array(selected)))
         }
     }
+}
+
+fn text_value_or_none(
+    field: &TransitionField,
+    value: &str,
+    cloud: bool,
+) -> Result<Option<Value>, String> {
+    if value.trim().is_empty() && !field.required {
+        return Ok(None);
+    }
+    field.text_value(value, cloud)
+        .map(Some)
+        .map_err(|error| error.to_string())
 }
