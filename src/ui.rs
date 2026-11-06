@@ -477,7 +477,8 @@ fn build_ui(app: &adw::Application) {
                 return;
             }
             saved_sidebar_width.set(width);
-            if layout.borrow().sidebar_width != width {
+            let changed = layout.borrow().sidebar_width != width;
+            if changed {
                 layout.borrow_mut().sidebar_width = width;
                 queue_layout_save(&layout, &layout_save_timer);
             }
@@ -512,7 +513,8 @@ fn build_ui(app: &adw::Application) {
             if !(320..=1000).contains(&width) || width >= paned.width() - 300 {
                 return;
             }
-            if layout.borrow().detail_width != width {
+            let changed = layout.borrow().detail_width != width;
+            if changed {
                 layout.borrow_mut().detail_width = width;
                 queue_layout_save(&layout, &layout_save_timer);
             }
@@ -1012,9 +1014,9 @@ fn update_project_label(ui: &Ui, state: &Rc<RefCell<State>>) {
     ui.center_title.set_text("Unified board");
 
     // The local project filter survives server-side scope and sprint changes.
-    if ui.project_filter.borrow().as_ref()
-        .is_some_and(|project| !projects.contains(project))
-    {
+    let invalid_project_filter = ui.project_filter.borrow().as_ref()
+        .is_some_and(|project| !projects.contains(project));
+    if invalid_project_filter {
         *ui.project_filter.borrow_mut() = None;
         if !ui.restoring_view.get() {
             save_view(ui, &state.borrow());
