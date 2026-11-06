@@ -163,18 +163,19 @@ button.collapsed-expand:hover {
   font-weight: 700;
   color: @accent_color;
 }
-button.detail-branch-action {
-  min-width: 24px;
-  min-height: 24px;
-  padding: 3px;
-  border-radius: 6px;
-  color: alpha(@window_fg_color, 0.60);
+/* Identical geometry and theme foreground for both issue header actions. */
+button.detail-header-action {
+  min-width: 32px;
+  min-height: 32px;
+  padding: 7px;
+  border-radius: 8px;
+  color: alpha(@window_fg_color, 0.84);
   background: transparent;
   box-shadow: none;
 }
-button.detail-branch-action:hover {
+button.detail-header-action:hover {
   color: @window_fg_color;
-  background: alpha(@window_fg_color, 0.065);
+  background: alpha(@window_fg_color, 0.08);
 }
 
 .detail-section {
