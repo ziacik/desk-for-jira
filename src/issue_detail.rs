@@ -20,8 +20,13 @@ pub(crate) fn header_action_icon(kind: HeaderActionIcon) -> gtk::DrawingArea {
     let icon = gtk::DrawingArea::new();
     icon.set_content_width(16);
     icon.set_content_height(16);
+    icon.set_halign(gtk::Align::Center);
+    icon.set_valign(gtk::Align::Center);
     icon.set_draw_func(move |area, cr, width, height| {
-        let size = f64::from(width.min(height));
+        // DrawingArea's content size is a minimum, not a maximum: GtkButton
+        // can allocate much more than 16px. Keep the glyph fixed-size even
+        // if the widget is ever expanded by its parent.
+        let size = f64::from(width.min(height)).min(16.0);
         let offset_x = (f64::from(width) - size) / 2.0;
         let offset_y = (f64::from(height) - size) / 2.0;
         cr.translate(offset_x, offset_y);
