@@ -924,6 +924,8 @@ fn parse_issue_transitions(response: &Value) -> Vec<IssueTransition> {
                     });
                 }
             }
+            fields.sort_by(|a, b| b.required.cmp(&a.required)
+                .then_with(|| a.name.cmp(&b.name)));
             Some(IssueTransition { id, name, to_name, to_id, fields })
         }).collect()
 }
