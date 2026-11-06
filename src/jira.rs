@@ -114,7 +114,7 @@ pub struct TransitionField {
 
 impl TransitionField {
     pub fn is_multiline(&self) -> bool {
-        matches!(self.id.as_str(), "description" | "environment")
+        matches!(self.id.as_str(), "description" | "environment" | "comment")
             || self.custom_type.ends_with(":textarea")
     }
 
@@ -136,6 +136,17 @@ impl TransitionField {
     pub fn text_value(&self, raw: &str, cloud: bool) -> Result<Value> {
         let value = raw.trim();
         ensure!(!value.is_empty(), "{} is required", self.name);
+        if self.id == "comment" {
+            return if cloud {
+                Ok(json!({
+                    "type": "doc",
+                    "version": 1,
+                    "content": [{"type": "paragraph", "content": [{"type": "text", "text": value}]}]
+                }))
+            } else {
+                Ok(json!(value))
+            };
+        }
         match self.schema_type.as_str() {
             "number" => {
                 let number = value.parse::<f64>()
@@ -314,10 +325,8 @@ impl JiraClient {
     pub fn transition_issue(&self, key: &str, transition_id: &str, fields: serde_json::Map<String, Value>) -> Result<()> {
         let version = if self.account.mode == AuthMode::Cloud { "3" } else { "2" };
         let path = format!("/rest/api/{version}/issue/{key}/transitions");
-        let response = self.authorize(self.http.post(self.url(&path)).json(&json!({
-            "transition": {"id": transition_id},
-            "fields": fields,
-        })))
+        let payload = transition_payload(transition_id, fields);
+        let response = self.authorize(self.http.post(self.url(&path)).json(&payload))
             .header(reqwest::header::ACCEPT, "application/json")
             .send().context("Could not connect to Jira")?;
         let status = response.status();
@@ -919,6 +928,16 @@ fn parse_issue_transitions(response: &Value) -> Vec<IssueTransition> {
         }).collect()
 }
 
+fn transition_payload(transition_id: &str, mut fields: Map<String, Value>) -> Value {
+    let comment = fields.remove("comment");
+    let mut payload = json!({"transition": {"id": transition_id}, "fields": fields});
+    // Jira handles comments through update operations, not the issue's fields.
+    if let Some(body) = comment {
+        payload["update"] = json!({"comment": [{"add": {"body": body}}]});
+    }
+    payload
+}
+
 fn jira_error_message(body: &str) -> String {
     let Ok(response) = serde_json::from_str::<Value>(body) else {
         return if body.trim().is_empty() { "Transition failed".to_owned() } else { body.to_owned() };
@@ -1206,6 +1225,28 @@ mod transition_tests {
         };
         assert_eq!(number.text_value("2.5", false).unwrap(), json!(2.5));
         assert!(number.text_value("invalid", false).is_err());
+    }
+
+    #[test]
+    fn transition_comment_is_sent_as_an_update_operation() {
+        let mut fields = Map::new();
+        fields.insert("comment".into(), json!("Done"));
+        fields.insert("resolution".into(), json!({"id":"1"}));
+        let body = transition_payload("31", fields);
+        assert_eq!(body["transition"]["id"], "31");
+        assert_eq!(body["fields"]["resolution"]["id"], "1");
+        assert!(body["fields"].get("comment").is_none());
+        assert_eq!(body["update"]["comment"][0]["add"]["body"], "Done");
+    }
+
+    #[test]
+    fn parses_transition_with_no_fields_for_confirmation_dialog() {
+        let data = json!({"transitions": [{
+            "id":"2", "name":"In Progress", "to":{"name":"In Progress", "id":"10"}
+        }]});
+        let transitions = parse_issue_transitions(&data);
+        assert_eq!(transitions.len(), 1);
+        assert!(transitions[0].fields.is_empty());
     }
 
     #[test]
