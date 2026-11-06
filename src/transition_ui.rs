@@ -166,6 +166,10 @@ fn open_transition_form(
             }
             row.append(&select);
             FieldControl::Boolean(select)
+        } else if field.is_multiline() {
+            let input = text_area("", false);
+            row.append(&text_area_frame(&input));
+            FieldControl::Paragraph(input)
         } else if field.uses_structured_input() {
             let hint = gtk::Label::new(Some("Advanced Jira field · enter a JSON value"));
             hint.add_css_class("dim-label");
@@ -174,10 +178,6 @@ fn open_transition_form(
             let input = text_area("", true);
             row.append(&text_area_frame(&input));
             FieldControl::Structured(input)
-        } else if field.is_multiline() {
-            let input = text_area("", false);
-            row.append(&text_area_frame(&input));
-            FieldControl::Paragraph(input)
         } else {
             let input = gtk::Entry::new();
             let placeholder = match field.schema_type.as_str() {
