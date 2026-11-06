@@ -2537,6 +2537,8 @@ mod scope_tests {
         state.cache_board(mine.clone(), &BoardData {
             statuses: Vec::new(),
             issues: vec![issue("ART-1", "1", "Mine")],
+            pinned_issues: Vec::new(),
+            pinned_error: None,
         });
         assert_eq!(state.cached_board(&mine).unwrap().issues[0].key, "ART-1");
 
