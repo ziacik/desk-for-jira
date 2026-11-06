@@ -13,12 +13,11 @@ use gtk::glib;
 use crate::{
     issue_detail,
     jira::{AuthMode, Credentials, Issue, JiraClient, Project, ProjectStatus},
-    preferences::{self, BoardSettings},
+    preferences::{self, BoardSettings, IssueScope, UiLayout, ViewSettings},
     secrets,
 };
 
 const COLUMN_WIDTH: i32 = 302;
-const DETAIL_WIDTH: i32 = 470;
 const COLLAPSED_COLUMN_WIDTH: i32 = 116;
 
 #[derive(Clone)]
@@ -60,14 +59,7 @@ struct Ui {
     unassigned_filter: gtk::ToggleButton,
     all_filter: gtk::ToggleButton,
     sprint_filter: gtk::CheckButton,
-}
-
-#[derive(Clone, Copy, Default, PartialEq, Eq, Hash)]
-enum IssueScope {
-    #[default]
-    Mine,
-    Unassigned,
-    All,
+    restoring_view: Rc<Cell<bool>>,
 }
 
 impl IssueScope {
@@ -184,13 +176,19 @@ fn unassigned_scope_icon() -> gtk::Label {
 }
 
 fn build_ui(app: &adw::Application) {
+    let initial_layout = preferences::load_layout().unwrap_or_else(|error| {
+        eprintln!("Could not load UI layout: {error}");
+        UiLayout::default()
+    });
+    let layout = Rc::new(RefCell::new(initial_layout.clone()));
+    let layout_save_timer = Rc::new(RefCell::new(None::<glib::SourceId>));
     let state = Rc::new(RefCell::new(State::default()));
     let (sender, receiver) = mpsc::channel();
     let window = adw::ApplicationWindow::builder()
         .application(app)
         .title("Desk for Jira")
-        .default_width(1460)
-        .default_height(860)
+        .default_width(initial_layout.window_width)
+        .default_height(initial_layout.window_height)
         .width_request(960)
         .height_request(580)
         .build();
@@ -209,7 +207,7 @@ fn build_ui(app: &adw::Application) {
         .tooltip_text("Show or hide workspace sidebar")
         .build();
     sidebar_toggle.add_css_class("flat");
-    sidebar_toggle.set_active(true);
+    sidebar_toggle.set_active(initial_layout.sidebar_visible);
     let connect_button = gtk::Button::builder()
         .icon_name("avatar-default-symbolic")
         .tooltip_text("Connect or switch Jira account")
@@ -470,19 +468,23 @@ fn build_ui(app: &adw::Application) {
     // A splitter gives the sidebar a draggable edge; the titlebar toggles it.
     let workspace_split = gtk::Paned::new(gtk::Orientation::Horizontal);
     workspace_split.add_css_class("workspace-root");
-    workspace_split.set_position(224);
+    workspace_split.set_position(initial_layout.sidebar_width);
     workspace_split.set_resize_start_child(false);
     workspace_split.set_resize_end_child(true);
     workspace_split.set_shrink_start_child(true);
     workspace_split.set_shrink_end_child(true);
     workspace_split.set_hexpand(true);
     workspace_split.set_start_child(Some(&sidebar));
-    let saved_sidebar_width = Rc::new(Cell::new(224));
+    let saved_sidebar_width = Rc::new(Cell::new(initial_layout.sidebar_width));
+    sidebar.set_visible(initial_layout.sidebar_visible);
+    header.set_show_start_title_buttons(!initial_layout.sidebar_visible);
     sidebar_toggle.connect_toggled({
         let sidebar = sidebar.clone();
         let workspace_split = workspace_split.clone();
         let saved_sidebar_width = saved_sidebar_width.clone();
         let header = header.clone();
+        let layout = layout.clone();
+        let layout_save_timer = layout_save_timer.clone();
         move |button| {
             if button.is_active() {
                 sidebar.set_visible(true);
@@ -492,9 +494,33 @@ fn build_ui(app: &adw::Application) {
                 let width = workspace_split.position();
                 if width >= 184 {
                     saved_sidebar_width.set(width);
+                    layout.borrow_mut().sidebar_width = width;
                 }
                 sidebar.set_visible(false);
                 header.set_show_start_title_buttons(true);
+            }
+            layout.borrow_mut().sidebar_visible = button.is_active();
+            queue_layout_save(&layout, &layout_save_timer);
+        }
+    });
+    workspace_split.connect_position_notify({
+        let sidebar = sidebar.downgrade();
+        let saved_sidebar_width = saved_sidebar_width.clone();
+        let layout = layout.clone();
+        let layout_save_timer = layout_save_timer.clone();
+        move |paned| {
+            if sidebar.upgrade().is_none_or(|sidebar| !sidebar.is_visible()) {
+                return;
+            }
+            let width = paned.position();
+            if !(184..=800).contains(&width) || paned.width() <= 0 {
+                return;
+            }
+            saved_sidebar_width.set(width);
+            let changed = layout.borrow().sidebar_width != width;
+            if changed {
+                layout.borrow_mut().sidebar_width = width;
+                queue_layout_save(&layout, &layout_save_timer);
             }
         }
     });
@@ -513,6 +539,27 @@ fn build_ui(app: &adw::Application) {
     inner_split.set_shrink_end_child(true);
     inner_split.set_hexpand(true);
     workspace_split.set_end_child(Some(&inner_split));
+    inner_split.connect_position_notify({
+        let detail_panel = detail_panel.downgrade();
+        let layout = layout.clone();
+        let layout_save_timer = layout_save_timer.clone();
+        move |paned| {
+            if detail_panel.upgrade().is_none_or(|panel| !panel.is_visible())
+                || paned.width() < 650
+            {
+                return;
+            }
+            let width = paned.width() - paned.position();
+            if !(320..=1000).contains(&width) || width >= paned.width() - 300 {
+                return;
+            }
+            let changed = layout.borrow().detail_width != width;
+            if changed {
+                layout.borrow_mut().detail_width = width;
+                queue_layout_save(&layout, &layout_save_timer);
+            }
+        }
+    });
     let toast = adw::ToastOverlay::new();
     toast.set_child(Some(&workspace_split));
     window.set_content(Some(&toast));
@@ -525,8 +572,9 @@ fn build_ui(app: &adw::Application) {
         board_box, pinned_section, pinned_box, pinned_count,
         detail_box, detail_panel, detail_heading, open_in_jira, copy_branch, pin_detail, inner_split,
         state: state.clone(),
-        saved_detail_width: Rc::new(Cell::new(DETAIL_WIDTH)),
+        saved_detail_width: Rc::new(Cell::new(initial_layout.detail_width)),
         mine_filter, unassigned_filter, all_filter, sprint_filter,
+        restoring_view: Rc::new(Cell::new(false)),
         image_slots: Rc::new(RefCell::new(issue_detail::ImageSlots::new())),
         events: sender.clone(),
         selected_issue: Rc::new(RefCell::new(None)),
@@ -623,6 +671,40 @@ fn build_ui(app: &adw::Application) {
         });
         ui.window.add_controller(keys);
     }
+    ui.window.connect_close_request({
+        let layout = layout.clone();
+        let layout_save_timer = layout_save_timer.clone();
+        let sidebar = sidebar.downgrade();
+        let workspace_split = workspace_split.downgrade();
+        let detail_panel = ui.detail_panel.downgrade();
+        let saved_detail_width = ui.saved_detail_width.clone();
+        move |window| {
+            let mut settings = layout.borrow_mut();
+            if window.width() >= 960 && window.height() >= 580 {
+                settings.window_width = window.width();
+                settings.window_height = window.height();
+            }
+            if let (Some(sidebar), Some(paned)) = (sidebar.upgrade(), workspace_split.upgrade())
+                && sidebar.is_visible() && paned.position() >= 184
+            {
+                settings.sidebar_width = paned.position();
+            }
+            if let Some(detail_panel) = detail_panel.upgrade()
+                && detail_panel.is_visible() && detail_panel.width() >= 320
+            {
+                settings.detail_width = detail_panel.width();
+            } else {
+                settings.detail_width = saved_detail_width.get();
+            }
+            if let Some(source) = layout_save_timer.borrow_mut().take() {
+                source.remove();
+            }
+            if let Err(error) = preferences::save_layout(&settings) {
+                eprintln!("Could not save UI layout: {error}");
+            }
+            glib::Propagation::Proceed
+        }
+    });
     let css = gtk::CssProvider::new();
     css.load_from_string(include_str!("board.css"));
     if let Some(display) = gtk::gdk::Display::default() {
@@ -660,7 +742,7 @@ fn wire_actions(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>) {
         let state = state.clone();
         let sender = sender.clone();
         button.connect_toggled(move |button| {
-            if !button.is_active() { return; }
+            if !button.is_active() || ui.restoring_view.get() { return; }
             let changed = {
                 let mut s = state.borrow_mut();
                 if s.issue_scope == scope { false } else {
@@ -668,7 +750,10 @@ fn wire_actions(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>) {
                     true
                 }
             };
-            if changed { start_board_load(&ui, &state, &sender); }
+            if changed {
+                save_view(&ui, &state.borrow());
+                start_board_load(&ui, &state, &sender);
+            }
         });
     }
     {
@@ -677,6 +762,7 @@ fn wire_actions(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>) {
         let sender = sender.clone();
         let button = ui.sprint_filter.clone();
         button.connect_toggled(move |button| {
+            if ui.restoring_view.get() { return; }
             let active = button.is_active();
             let changed = {
                 let mut s = state.borrow_mut();
@@ -685,7 +771,10 @@ fn wire_actions(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>) {
                     true
                 }
             };
-            if changed { start_board_load(&ui, &state, &sender); }
+            if changed {
+                save_view(&ui, &state.borrow());
+                start_board_load(&ui, &state, &sender);
+            }
         });
     }
     {
@@ -726,7 +815,11 @@ fn wire_actions(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>) {
         let ui = ui.clone();
         let state = state.clone();
         let button = ui.search.clone();
-        button.connect_search_changed(move |_| render_board(&ui, &state.borrow()));
+        button.connect_search_changed(move |_| {
+            if ui.restoring_view.get() { return; }
+            save_view(&ui, &state.borrow());
+            render_board(&ui, &state.borrow());
+        });
     }
     {
         let ui = ui.clone();
@@ -748,17 +841,21 @@ fn wire_actions(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>) {
                 s.active_sprint_only = false;
                 s.generation
             };
+            ui.restoring_view.set(true);
             set_busy(&ui, &state, false);
             ui.header_title.set_subtitle("Not connected");
             ui.status.set_text("Disconnected");
             ui.projects_label.set_text("Choose projects to begin");
             clear_box(&ui.sidebar_projects);
             *ui.project_filter.borrow_mut() = None;
+            ui.collapsed_columns.borrow_mut().clear();
+            ui.search.set_text("");
             ui.manage_projects_button.set_sensitive(false);
             ui.manage_columns_button.set_sensitive(false);
             ui.center_title.set_text("Unified board");
             ui.mine_filter.set_active(true);
             ui.sprint_filter.set_active(false);
+            ui.restoring_view.set(false);
             ui.pinned_section.set_visible(false);
             show_empty(&ui.board_box, "Not connected", "Connect to Jira to view issues.");
             close_issue_details(&ui);
@@ -791,7 +888,12 @@ fn handle_event(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>, eve
                         show_error(ui, &format!("Could not read board settings: {err}"));
                         BoardSettings::default()
                     });
+                    let view = preferences::load_view(&account.base_url).unwrap_or_else(|err| {
+                        show_error(ui, &format!("Could not read saved view: {err}"));
+                        ViewSettings::default()
+                    });
                     let project_error = loaded.projects.as_ref().err().cloned();
+                    ui.restoring_view.set(true);
                     {
                         let mut s = state.borrow_mut();
                         s.account = Some(account);
@@ -801,16 +903,24 @@ fn handle_event(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>, eve
                         s.issues.clear();
                         s.pinned_issues.clear();
                         s.clear_board_cache();
-                        s.issue_scope = IssueScope::Mine;
-                        s.active_sprint_only = false;
+                        s.issue_scope = view.scope;
+                        s.active_sprint_only = view.active_sprint_only;
                     }
-                    ui.mine_filter.set_active(true);
-                    ui.sprint_filter.set_active(false);
+                    *ui.project_filter.borrow_mut() = view.project_filter;
+                    *ui.collapsed_columns.borrow_mut() = view.collapsed_columns;
+                    ui.search.set_text(&view.search);
+                    match view.scope {
+                        IssueScope::Mine => ui.mine_filter.set_active(true),
+                        IssueScope::Unassigned => ui.unassigned_filter.set_active(true),
+                        IssueScope::All => ui.all_filter.set_active(true),
+                    }
+                    ui.sprint_filter.set_active(view.active_sprint_only);
                     ui.pinned_section.set_visible(false);
                     ui.manage_projects_button.set_sensitive(true);
                     ui.manage_columns_button.set_sensitive(false);
                     ui.header_title.set_subtitle(&loaded.user);
                     update_project_label(ui, state);
+                    ui.restoring_view.set(false);
                     close_issue_details(ui);
                     if let Some(error) = project_error {
                         show_error(ui, &format!("Could not list projects: {error}"));
@@ -982,10 +1092,13 @@ fn update_project_label(ui: &Ui, state: &Rc<RefCell<State>>) {
     ui.center_title.set_text("Unified board");
 
     // The local project filter survives server-side scope and sprint changes.
-    if ui.project_filter.borrow().as_ref()
-        .is_some_and(|project| !projects.contains(project))
-    {
+    let invalid_project_filter = ui.project_filter.borrow().as_ref()
+        .is_some_and(|project| !projects.contains(project));
+    if invalid_project_filter {
         *ui.project_filter.borrow_mut() = None;
+        if !ui.restoring_view.get() {
+            save_view(ui, &state.borrow());
+        }
     }
     if projects.is_empty() {
         ui.projects_label.set_text("Choose projects to get started");
@@ -1018,6 +1131,7 @@ fn update_project_label(ui: &Ui, state: &Rc<RefCell<State>>) {
             all_check.set_visible(button.is_active());
             if button.is_active() {
                 *ui.project_filter.borrow_mut() = None;
+                save_view(&ui, &state.borrow());
                 render_board(&ui, &state.borrow());
             }
         });
@@ -1046,6 +1160,7 @@ fn update_project_label(ui: &Ui, state: &Rc<RefCell<State>>) {
                 check.set_visible(button.is_active());
                 if button.is_active() {
                     *ui.project_filter.borrow_mut() = Some(project.clone());
+                    save_view(&ui, &state.borrow());
                     render_board(&ui, &state.borrow());
                 }
             });
@@ -1820,6 +1935,53 @@ fn refresh_column_editor(
     rebuild_editor(rows, ui, state, editor, controls);
 }
 
+fn current_view(ui: &Ui, state: &State) -> ViewSettings {
+    ViewSettings {
+        scope: state.issue_scope,
+        active_sprint_only: state.active_sprint_only,
+        project_filter: ui.project_filter.borrow().clone(),
+        search: ui.search.text().to_string(),
+        collapsed_columns: ui.collapsed_columns.borrow().clone(),
+    }
+}
+
+fn save_view(ui: &Ui, state: &State) {
+    if ui.restoring_view.get() { return; }
+    if let Some(account) = &state.account
+        && let Err(error) = preferences::save_view(&account.base_url, &current_view(ui, state))
+    {
+        show_error(ui, &format!("Could not save view: {error}"));
+    }
+}
+
+fn save_collapsed_view(site: &str, view: &ViewSettings, collapsed: &HashSet<String>) {
+    if site.is_empty() { return; }
+    let mut view = view.clone();
+    view.collapsed_columns = collapsed.clone();
+    if let Err(error) = preferences::save_view(site, &view) {
+        eprintln!("Could not save collapsed columns: {error}");
+    }
+}
+
+fn queue_layout_save(
+    layout: &Rc<RefCell<UiLayout>>,
+    timer: &Rc<RefCell<Option<glib::SourceId>>>,
+) {
+    if let Some(source) = timer.borrow_mut().take() {
+        source.remove();
+    }
+    let layout = layout.clone();
+    let timer_ref = timer.clone();
+    let source = glib::timeout_add_local(Duration::from_millis(350), move || {
+        timer_ref.borrow_mut().take();
+        if let Err(error) = preferences::save_layout(&layout.borrow()) {
+            eprintln!("Could not save UI layout: {error}");
+        }
+        glib::ControlFlow::Break
+    });
+    *timer.borrow_mut() = Some(source);
+}
+
 fn save_settings(ui: &Ui, state: &Rc<RefCell<State>>) {
     let (url, settings) = {
         let s = state.borrow();
@@ -2053,6 +2215,7 @@ fn render_board(ui: &Ui, state: &State) {
     }
 
     let url = state.account.as_ref().map(|a| a.base_url.as_str()).unwrap_or("");
+    let view = current_view(ui, state);
     for (name, issues) in groups {
         let issue_count = issues.len();
         let initially_collapsed = ui.collapsed_columns.borrow().contains(&name);
@@ -2129,6 +2292,8 @@ fn render_board(ui: &Ui, state: &State) {
         {
             let collapsed_columns = ui.collapsed_columns.clone();
             let name = name.clone();
+            let site = url.to_owned();
+            let view = view.clone();
             let column = column.downgrade();
             let expanded = expanded.downgrade();
             let collapsed = collapsed.downgrade();
@@ -2136,6 +2301,7 @@ fn render_board(ui: &Ui, state: &State) {
                 let (Some(column), Some(expanded), Some(collapsed)) =
                     (column.upgrade(), expanded.upgrade(), collapsed.upgrade()) else { return };
                 collapsed_columns.borrow_mut().insert(name.clone());
+                save_collapsed_view(&site, &view, &collapsed_columns.borrow());
                 expanded.set_visible(false);
                 collapsed.set_visible(true);
                 column.set_width_request(COLLAPSED_COLUMN_WIDTH);
@@ -2144,6 +2310,8 @@ fn render_board(ui: &Ui, state: &State) {
         }
         {
             let collapsed_columns = ui.collapsed_columns.clone();
+            let site = url.to_owned();
+            let view = view.clone();
             let column = column.downgrade();
             let expanded = expanded.downgrade();
             let collapsed = collapsed.downgrade();
@@ -2151,6 +2319,7 @@ fn render_board(ui: &Ui, state: &State) {
                 let (Some(column), Some(expanded), Some(collapsed)) =
                     (column.upgrade(), expanded.upgrade(), collapsed.upgrade()) else { return };
                 collapsed_columns.borrow_mut().remove(&name);
+                save_collapsed_view(&site, &view, &collapsed_columns.borrow());
                 collapsed.set_visible(false);
                 expanded.set_visible(true);
                 column.set_width_request(COLUMN_WIDTH);
