@@ -2268,6 +2268,7 @@ fn render_pinned_section(ui: &Ui, state: &State) {
     let has_pins = !pinned.is_empty();
     ui.pinned_section.set_visible(has_pins);
     ui.pinned_count.set_text(&pinned.len().to_string());
+    ui.pinned_count.set_visible(has_pins);
     ui.pinned_scroll.set_visible(has_pins);
     if !has_pins {
         return;
