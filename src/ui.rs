@@ -336,7 +336,7 @@ fn build_ui(app: &adw::Application) {
     sidebar.set_width_request(184);
     sidebar.set_hexpand(false);
     let sidebar_content = gtk::Box::new(gtk::Orientation::Vertical, 14);
-    sidebar_content.set_margin_top(14);
+    sidebar_content.set_margin_top(10);
     sidebar_content.set_margin_bottom(16);
     sidebar_content.set_margin_start(12);
     sidebar_content.set_margin_end(12);
@@ -368,12 +368,12 @@ fn build_ui(app: &adw::Application) {
     board_nav.append(&board_menu);
     sidebar_content.append(&board_nav);
 
-    let projects_heading = gtk::Label::new(Some("SELECTED PROJECTS"));
+    let projects_heading = gtk::Label::new(Some("FILTER BY PROJECT"));
     projects_heading.add_css_class("sidebar-eyebrow");
     projects_heading.set_xalign(0.0);
-    projects_heading.set_margin_top(12);
+    projects_heading.set_margin_top(4);
     sidebar_content.append(&projects_heading);
-    let sidebar_projects = gtk::Box::new(gtk::Orientation::Vertical, 7);
+    let sidebar_projects = gtk::Box::new(gtk::Orientation::Vertical, 2);
     sidebar_projects.add_css_class("sidebar-projects");
     sidebar_content.append(&sidebar_projects);
 
@@ -842,14 +842,25 @@ fn update_project_label(ui: &Ui, state: &Rc<RefCell<State>>) {
     }
 
     let selected = ui.project_filter.borrow().clone();
-    let all_button = gtk::ToggleButton::with_label("All projects");
+    let all_button = gtk::ToggleButton::new();
     all_button.add_css_class("sidebar-project-filter");
-    all_button.add_css_class("all-projects");
+    all_button.set_tooltip_text(Some("Show issues from all selected projects"));
+    let all_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let all_label = gtk::Label::new(Some("All projects"));
+    all_label.set_hexpand(true);
+    all_label.set_xalign(0.0);
+    all_row.append(&all_label);
+    let all_check = gtk::Image::from_icon_name("object-select-symbolic");
+    all_check.add_css_class("project-filter-check");
+    all_check.set_visible(selected.is_none());
+    all_row.append(&all_check);
+    all_button.set_child(Some(&all_row));
     all_button.set_active(selected.is_none());
     {
         let ui = ui.clone();
         let state = state.clone();
         all_button.connect_toggled(move |button| {
+            all_check.set_visible(button.is_active());
             if button.is_active() {
                 *ui.project_filter.borrow_mut() = None;
                 render_board(&ui, &state.borrow());
@@ -862,15 +873,22 @@ fn update_project_label(ui: &Ui, state: &Rc<RefCell<State>>) {
         let button = gtk::ToggleButton::new();
         button.set_group(Some(&all_button));
         button.add_css_class("sidebar-project-filter");
+        let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
         let label = gtk::Label::new(Some(&project));
         label.set_xalign(0.0);
         label.set_hexpand(true);
-        button.set_child(Some(&label));
+        row.append(&label);
+        let check = gtk::Image::from_icon_name("object-select-symbolic");
+        check.add_css_class("project-filter-check");
+        check.set_visible(selected.as_deref() == Some(&project));
+        row.append(&check);
+        button.set_child(Some(&row));
         button.set_active(selected.as_deref() == Some(&project));
         {
             let ui = ui.clone();
             let state = state.clone();
             button.connect_toggled(move |button| {
+                check.set_visible(button.is_active());
                 if button.is_active() {
                     *ui.project_filter.borrow_mut() = Some(project.clone());
                     render_board(&ui, &state.borrow());
