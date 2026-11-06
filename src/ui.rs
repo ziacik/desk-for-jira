@@ -39,6 +39,9 @@ struct Ui {
     search: gtk::SearchEntry,
     center_title: gtk::Label,
     board_box: gtk::Box,
+    pinned_section: gtk::Box,
+    pinned_box: gtk::Box,
+    pinned_count: gtk::Label,
     detail_box: gtk::Box,
     detail_actions: gtk::Box,
     detail_request: Rc<Cell<u64>>,
@@ -47,6 +50,8 @@ struct Ui {
     detail_heading: gtk::Label,
     open_in_jira: gtk::Button,
     copy_branch: gtk::Button,
+    pin_detail: gtk::Button,
+    state: Rc<RefCell<State>>,
     saved_detail_width: Rc<Cell<i32>>,
     inner_split: gtk::Paned,
     image_slots: Rc<RefCell<issue_detail::ImageSlots>>,
@@ -85,6 +90,7 @@ struct State {
     settings: BoardSettings,
     statuses: Vec<ProjectStatus>,
     issues: Vec<Issue>,
+    pinned_issues: Vec<Issue>,
     issue_scope: IssueScope,
     active_sprint_only: bool,
     issue_cache: HashMap<BoardKey, Vec<Issue>>,
@@ -102,6 +108,8 @@ struct Loaded {
 struct BoardData {
     statuses: Vec<ProjectStatus>,
     issues: Vec<Issue>,
+    pinned_issues: Vec<Issue>,
+    pinned_error: Option<String>,
 }
 
 impl State {
@@ -117,6 +125,8 @@ impl State {
         Some(BoardData {
             statuses: self.status_cache.get(&key.projects)?.clone(),
             issues: self.issue_cache.get(key)?.clone(),
+            pinned_issues: self.pinned_issues.clone(),
+            pinned_error: None,
         })
     }
 
@@ -295,6 +305,31 @@ fn build_ui(app: &adw::Application) {
     filters_row.append(&search);
     center.append(&filters_row);
 
+    let pinned_section = gtk::Box::new(gtk::Orientation::Vertical, 6);
+    pinned_section.add_css_class("pinned-strip");
+    pinned_section.set_visible(false);
+    let pinned_heading = gtk::Box::new(gtk::Orientation::Horizontal, 7);
+    pinned_heading.add_css_class("pinned-heading");
+    pinned_heading.append(&gtk::Image::from_icon_name("view-pin-symbolic"));
+    let pinned_title = gtk::Label::new(Some("Pinned"));
+    pinned_title.add_css_class("pinned-title");
+    pinned_title.set_xalign(0.0);
+    pinned_heading.append(&pinned_title);
+    let pinned_count = gtk::Label::new(None);
+    pinned_count.add_css_class("pinned-count");
+    pinned_heading.append(&pinned_count);
+    pinned_section.append(&pinned_heading);
+    let pinned_box = gtk::Box::new(gtk::Orientation::Horizontal, 10);
+    pinned_box.set_halign(gtk::Align::Start);
+    let pinned_scroll = gtk::ScrolledWindow::new();
+    pinned_scroll.add_css_class("pinned-scroll");
+    pinned_scroll.set_overlay_scrolling(false);
+    pinned_scroll.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Never);
+    pinned_scroll.set_propagate_natural_height(true);
+    pinned_scroll.set_child(Some(&pinned_box));
+    pinned_section.append(&pinned_scroll);
+    center.append(&pinned_section);
+
     let board_box = gtk::Box::new(gtk::Orientation::Horizontal, 14);
     // Columns retain a useful width even on ultra-wide monitors.
     // The horizontal scroller handles additional columns instead of stretching cards.
@@ -342,6 +377,12 @@ fn build_ui(app: &adw::Application) {
     copy_branch.set_tooltip_text(Some("Copy suggested Git branch name"));
     copy_branch.set_visible(false);
     detail_header.pack_end(&copy_branch);
+    let pin_detail = gtk::Button::from_icon_name("view-pin-symbolic");
+    pin_detail.add_css_class("flat");
+    pin_detail.add_css_class("detail-header-action");
+    pin_detail.set_tooltip_text(Some("Pin issue"));
+    pin_detail.set_visible(false);
+    detail_header.pack_end(&pin_detail);
     let close_detail = gtk::Button::from_icon_name("go-next-symbolic");
     close_detail.add_css_class("flat");
     close_detail.set_tooltip_text(Some("Close issue details (Esc)"));
@@ -538,7 +579,9 @@ fn build_ui(app: &adw::Application) {
         project_filter: Rc::new(RefCell::new(None)),
         connect_button, disconnect_button, refresh_button,
         manage_projects_button, manage_columns_button, search, center_title,
-        board_box, detail_box, detail_actions, detail_panel, detail_heading, open_in_jira, copy_branch, inner_split,
+        board_box, pinned_section, pinned_box, pinned_count,
+        detail_box, detail_actions, detail_panel, detail_heading, open_in_jira, copy_branch, pin_detail, inner_split,
+        state: state.clone(),
         detail_request: Rc::new(Cell::new(0)),
         transition_busy: Rc::new(Cell::new(false)),
         saved_detail_width: Rc::new(Cell::new(initial_layout.detail_width)),
@@ -575,13 +618,32 @@ fn build_ui(app: &adw::Application) {
         ui.copy_branch.connect_clicked(move |_| {
             let key = selected_issue.borrow().clone();
             let state = state.borrow();
-            let issue = key.as_deref().and_then(|key| state.issues.iter().find(|issue| issue.key == key));
+            let issue = key.as_deref().and_then(|key| {
+                state.issues.iter().chain(state.pinned_issues.iter())
+                    .find(|issue| issue.key == key)
+            });
             if let Some(issue) = issue
                 && let Some(display) = gtk::gdk::Display::default()
             {
                 let name = issue_detail::suggested_branch_name(&issue.key, &issue.summary);
                 display.clipboard().set_text(&name);
                 toast.add_toast(adw::Toast::new("Branch name copied"));
+            }
+        });
+    }
+    {
+        let ui = ui.clone();
+        ui.pin_detail.clone().connect_clicked(move |_| {
+            let key = ui.selected_issue.borrow().clone();
+            let issue = {
+                let state = ui.state.borrow();
+                key.as_deref().and_then(|key| {
+                    state.issues.iter().chain(state.pinned_issues.iter())
+                        .find(|issue| issue.key == key).cloned()
+                })
+            };
+            if let Some(issue) = issue {
+                toggle_pinned_issue(&ui, &issue);
             }
         });
     }
@@ -784,6 +846,7 @@ fn wire_actions(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>) {
                 s.clear_board_cache();
                 s.projects.clear();
                 s.issues.clear();
+                s.pinned_issues.clear();
                 s.statuses.clear();
                 s.settings = BoardSettings::default();
                 s.issue_scope = IssueScope::Mine;
@@ -806,6 +869,7 @@ fn wire_actions(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>) {
             ui.mine_filter.set_active(true);
             ui.sprint_filter.set_active(false);
             ui.restoring_view.set(false);
+            ui.pinned_section.set_visible(false);
             show_empty(&ui.board_box, "Not connected", "Connect to Jira to view issues.");
             close_issue_details(&ui);
             let sender = sender.clone();
@@ -850,6 +914,7 @@ fn handle_event(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>, eve
                         s.settings = settings;
                         s.statuses.clear();
                         s.issues.clear();
+                        s.pinned_issues.clear();
                         s.clear_board_cache();
                         s.issue_scope = view.scope;
                         s.active_sprint_only = view.active_sprint_only;
@@ -863,6 +928,7 @@ fn handle_event(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>, eve
                         IssueScope::All => ui.all_filter.set_active(true),
                     }
                     ui.sprint_filter.set_active(view.active_sprint_only);
+                    ui.pinned_section.set_visible(false);
                     ui.manage_projects_button.set_sensitive(true);
                     ui.manage_columns_button.set_sensitive(false);
                     ui.header_title.set_subtitle(&loaded.user);
@@ -1041,10 +1107,14 @@ fn start_refresh(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>, ac
 }
 
 fn display_board(ui: &Ui, state: &Rc<RefCell<State>>, data: BoardData) {
+    let BoardData { statuses, issues, pinned_issues, pinned_error } = data;
     let changed_settings = {
         let mut s = state.borrow_mut();
-        s.issues = data.issues;
-        s.statuses = data.statuses;
+        s.issues = issues;
+        s.statuses = statuses;
+        if pinned_error.is_none() {
+            s.pinned_issues = pinned_issues;
+        }
         let previous = s.settings.clone();
         let statuses = s.statuses.clone();
         s.settings.reconcile(&statuses);
@@ -1060,10 +1130,13 @@ fn display_board(ui: &Ui, state: &Rc<RefCell<State>>, data: BoardData) {
     }
     ui.manage_columns_button.set_sensitive(!state.borrow().statuses.is_empty());
     render_board(ui, &state.borrow());
+    if let Some(error) = pinned_error {
+        show_error(ui, &format!("Could not load pinned issues: {error}"));
+    }
 }
 
 fn start_board_load(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>) {
-    let (id, key, account, cached, pending, cached_statuses) = {
+    let (id, key, account, cached, pending, cached_statuses, pinned_keys) = {
         let mut s = state.borrow_mut();
         let key = s.board_key();
         let cached = s.cached_board(&key);
@@ -1072,7 +1145,8 @@ fn start_board_load(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>)
             s.loading_boards.insert(key.clone());
         }
         let statuses = s.status_cache.get(&key.projects).cloned();
-        (s.generation, key, s.account.clone(), cached, pending, statuses)
+        (s.generation, key, s.account.clone(), cached, pending, statuses,
+            s.settings.pinned_issues.clone())
     };
     update_project_label(ui, state);
     if key.projects.is_empty() {
@@ -1080,6 +1154,7 @@ fn start_board_load(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>)
         set_busy(ui, state, false);
         ui.status.set_text("Select one or more projects");
         ui.manage_columns_button.set_sensitive(false);
+        ui.pinned_section.set_visible(false);
         show_empty(&ui.board_box, "Choose projects", "Select ART, AFB or any other projects to build your board.");
         return;
     }
@@ -1109,7 +1184,11 @@ fn start_board_load(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>)
                 None => client.project_statuses(&key.projects)?,
             };
             let issues = client.project_issues(&key.projects, key.scope.jql(), key.active_sprint_only)?;
-            Ok(BoardData { statuses, issues })
+            let (pinned_issues, pinned_error) = match client.issues_by_keys(&pinned_keys) {
+                Ok(issues) => (issues, None),
+                Err(error) => (Vec::new(), Some(error.to_string())),
+            };
+            Ok(BoardData { statuses, issues, pinned_issues, pinned_error })
         })().map_err(|err| err.to_string());
         let _ = sender.send(Event::BoardLoaded(id, key, result));
     });
@@ -2138,13 +2217,83 @@ fn filter_project_groups(groups: &mut Vec<(String, Vec<&Issue>)>, project: Optio
     }
 }
 
+fn pinned_issue_refs<'a>(
+    settings: &BoardSettings,
+    issues: &'a [Issue],
+    loaded_pins: &'a [Issue],
+) -> Vec<&'a Issue> {
+    settings.pinned_issues.iter().filter_map(|key| {
+        loaded_pins.iter().chain(issues.iter())
+            .find(|issue| issue.key == *key && !issue.is_epic)
+    }).collect()
+}
+
+fn style_pin_button(button: &gtk::Button, pinned: bool) {
+    if pinned {
+        button.add_css_class("pin-active");
+        button.set_tooltip_text(Some("Unpin issue"));
+    } else {
+        button.remove_css_class("pin-active");
+        button.set_tooltip_text(Some("Pin issue"));
+    }
+}
+
+fn toggle_pinned_issue(ui: &Ui, issue: &Issue) {
+    let (base_url, settings) = {
+        let mut state = ui.state.borrow_mut();
+        let pinned = state.settings.toggle_pinned(&issue.key);
+        if pinned && !state.pinned_issues.iter().any(|item| item.key == issue.key) {
+            state.pinned_issues.push(issue.clone());
+        }
+        (
+            state.account.as_ref().map(|account| account.base_url.clone()),
+            state.settings.clone(),
+        )
+    };
+    if let Some(base_url) = base_url
+        && let Err(error) = preferences::save(&base_url, &settings)
+    {
+        show_error(ui, &format!("Could not save pinned issues: {error}"));
+    }
+    render_board(ui, &ui.state.borrow());
+}
+
+fn render_pinned_section(ui: &Ui, state: &State) {
+    clear_box(&ui.pinned_box);
+    ui.pinned_section.set_visible(true);
+    let pinned = pinned_issue_refs(&state.settings, &state.issues, &state.pinned_issues);
+    ui.pinned_count.set_text(&pinned.len().to_string());
+    if pinned.is_empty() {
+        let empty = gtk::Label::new(Some("Use the pin icon on a ticket to keep it here."));
+        empty.add_css_class("pinned-empty");
+        empty.set_xalign(0.0);
+        ui.pinned_box.append(&empty);
+        return;
+    }
+    let base_url = state.account.as_ref().map(|account| account.base_url.as_str()).unwrap_or("");
+    for issue in pinned {
+        let tile = issue_button(issue, ui, base_url, state.account.as_ref(), state.generation);
+        tile.set_width_request(272);
+        tile.set_hexpand(false);
+        ui.pinned_box.append(&tile);
+    }
+}
+
 fn render_board(ui: &Ui, state: &State) {
     clear_box(&ui.board_box);
     *ui.selected_button.borrow_mut() = None;
     if state.settings.projects.is_empty() {
+        ui.pinned_section.set_visible(false);
         close_issue_details(ui);
         show_empty(&ui.board_box, "Choose projects", "Use Projects… to set up your board.");
         return;
+    }
+    render_pinned_section(ui, state);
+    if let Some(key) = ui.selected_issue.borrow().as_deref() {
+        style_pin_button(
+            &ui.pin_detail,
+            state.settings.pinned_issues.iter().any(|pinned| pinned == key),
+        );
     }
     let search = ui.search.text();
     let mut groups = visible_board_groups(&state.settings, &state.issues, search.as_str());
@@ -2160,16 +2309,17 @@ fn render_board(ui: &Ui, state: &State) {
     } else if !state.settings.projects.is_empty() {
         ui.projects_label.set_text(&format!("Across {}", state.settings.projects.join(" · ")));
     }
-    if groups.is_empty() {
-        close_issue_details(ui);
-        show_empty(&ui.board_box, "No matching issues", "No issues match the current filter or search.");
-        return;
-    }
     let selected_key = ui.selected_issue.borrow().clone();
     if let Some(key) = selected_key
         && !groups.iter().any(|(_, issues)| issues.iter().any(|issue| issue.key == key))
+        && !pinned_issue_refs(&state.settings, &state.issues, &state.pinned_issues)
+            .iter().any(|issue| issue.key == key)
     {
         close_issue_details(ui);
+    }
+    if groups.is_empty() {
+        show_empty(&ui.board_box, "No matching issues", "No issues match the current filter or search.");
+        return;
     }
 
     let url = state.account.as_ref().map(|a| a.base_url.as_str()).unwrap_or("");
@@ -2295,7 +2445,7 @@ fn epic_color_index(key: &str) -> u32 {
     }) % 8
 }
 
-fn issue_button(issue: &Issue, ui: &Ui, base_url: &str, account: Option<&Credentials>, generation: u64) -> gtk::Button {
+fn issue_button(issue: &Issue, ui: &Ui, base_url: &str, account: Option<&Credentials>, generation: u64) -> gtk::Overlay {
     let button = gtk::Button::new();
     button.add_css_class("issue-card");
     button.set_hexpand(true);
@@ -2315,6 +2465,8 @@ fn issue_button(issue: &Issue, ui: &Ui, base_url: &str, account: Option<&Credent
     content.set_margin_end(12);
 
     let meta = gtk::Box::new(gtk::Orientation::Horizontal, 7);
+    // Reserve room for the pin action overlay, even with a long issue type.
+    meta.set_margin_end(28);
     let kind = issue.kind.to_ascii_lowercase();
     let (kind_icon, kind_class) = if kind.contains("bug") {
         ("dialog-warning-symbolic", "kind-bug")
@@ -2390,11 +2542,14 @@ fn issue_button(issue: &Issue, ui: &Ui, base_url: &str, account: Option<&Credent
     }
     button.set_child(Some(&content));
 
-    if ui.selected_issue.borrow().as_deref() == Some(issue.key.as_str()) {
+    if ui.selected_issue.borrow().as_deref() == Some(issue.key.as_str())
+        && ui.selected_button.borrow().is_none()
+    {
         button.add_css_class("selected-issue");
         *ui.selected_button.borrow_mut() = Some(button.clone());
     }
 
+    let pin_issue = issue.clone();
     let issue = issue.clone();
     let detail_box = ui.detail_box.clone();
     let detail_panel = ui.detail_panel.clone();
@@ -2402,6 +2557,8 @@ fn issue_button(issue: &Issue, ui: &Ui, base_url: &str, account: Option<&Credent
     let detail_heading = ui.detail_heading.clone();
     let open_in_jira = ui.open_in_jira.clone();
     let copy_branch = ui.copy_branch.clone();
+    let pin_detail = ui.pin_detail.clone();
+    let state = ui.state.clone();
     let saved_detail_width = ui.saved_detail_width.clone();
     let selected_button = Rc::downgrade(&ui.selected_button);
     let selected_issue = ui.selected_issue.clone();
@@ -2422,6 +2579,11 @@ fn issue_button(issue: &Issue, ui: &Ui, base_url: &str, account: Option<&Credent
         detail_heading.set_text(&issue.key);
         open_in_jira.set_visible(!base_url.is_empty());
         copy_branch.set_visible(true);
+        pin_detail.set_visible(true);
+        style_pin_button(
+            &pin_detail,
+            state.borrow().settings.pinned_issues.iter().any(|pinned| pinned == &issue.key),
+        );
         *image_slots.borrow_mut() = issue_detail::render(&detail_box, &issue, &base_url);
         if !detail_panel.is_visible() {
             detail_panel.set_visible(true);
@@ -2436,7 +2598,27 @@ fn issue_button(issue: &Issue, ui: &Ui, base_url: &str, account: Option<&Credent
             load_issue_images(&events, account, &issue, generation);
         }
     });
-    button
+    let tile = gtk::Overlay::new();
+    tile.add_css_class("issue-tile");
+    tile.set_hexpand(true);
+    tile.set_child(Some(&button));
+    let pin = gtk::Button::from_icon_name("view-pin-symbolic");
+    pin.add_css_class("flat");
+    pin.add_css_class("ticket-pin");
+    pin.set_halign(gtk::Align::End);
+    pin.set_valign(gtk::Align::Start);
+    pin.set_margin_end(7);
+    pin.set_margin_top(7);
+    style_pin_button(
+        &pin,
+        ui.state.borrow().settings.pinned_issues.iter().any(|pinned| pinned == &pin_issue.key),
+    );
+    {
+        let ui = ui.clone();
+        pin.connect_clicked(move |_| toggle_pinned_issue(&ui, &pin_issue));
+    }
+    tile.add_overlay(&pin);
+    tile
 }
 
 fn request_transitions(
@@ -2667,6 +2849,8 @@ mod scope_tests {
         state.cache_board(mine.clone(), &BoardData {
             statuses: Vec::new(),
             issues: vec![issue("ART-1", "1", "Mine")],
+            pinned_issues: Vec::new(),
+            pinned_error: None,
         });
         assert_eq!(state.cached_board(&mine).unwrap().issues[0].key, "ART-1");
 
@@ -2689,6 +2873,31 @@ mod scope_tests {
         assert!(state.issue_cache.is_empty());
         assert!(state.status_cache.is_empty());
         assert!(state.loading_boards.is_empty());
+    }
+
+    #[test]
+    fn pinned_issues_ignore_board_search_scope_and_project_selection() {
+        let mut settings = board_settings();
+        settings.pinned_issues = vec!["AFB-2".into(), "ART-1".into()];
+        let board_issues = vec![issue("ART-1", "1", "Mine")];
+        let mut off_board = issue("AFB-2", "2", "Assigned to someone else");
+        off_board.project_key = "AFB".into();
+        let loaded_pins = vec![off_board];
+        assert_eq!(
+            pinned_issue_refs(&settings, &board_issues, &loaded_pins)
+                .iter().map(|issue| issue.key.as_str()).collect::<Vec<_>>(),
+            vec!["AFB-2", "ART-1"]
+        );
+        assert!(visible_board_groups(&settings, &board_issues, "no match").is_empty());
+    }
+
+    #[test]
+    fn pinned_epic_does_not_become_a_ticket_card() {
+        let mut settings = board_settings();
+        settings.pinned_issues = vec!["ART-1".into()];
+        let mut epic = issue("ART-1", "1", "Parent");
+        epic.is_epic = true;
+        assert!(pinned_issue_refs(&settings, &[], &[epic]).is_empty());
     }
 
     #[test]

@@ -553,6 +553,16 @@ impl JiraClient {
         }
     }
 
+    /// Fetch pinned issues independently of the board's assignee and sprint filters.
+    pub fn issues_by_keys(&self, keys: &[String]) -> Result<Vec<Issue>> {
+        if keys.is_empty() { return Ok(Vec::new()); }
+        let jql = pinned_issues_jql(keys)?;
+        let epic_link_field = self.legacy_epic_link_field();
+        let mut issues = self.search_issues_with_epic_link(&jql, epic_link_field.as_deref())?;
+        self.resolve_epic_summaries(&mut issues);
+        Ok(issues)
+    }
+
     pub fn project_issues(&self, keys: &[String], scope: Option<&str>, active_sprint_only: bool) -> Result<Vec<Issue>> {
         if keys.is_empty() { return Ok(Vec::new()); }
         let jql = project_issues_jql(keys, scope, active_sprint_only)?;
@@ -562,6 +572,19 @@ impl JiraClient {
         Ok(issues)
     }
 
+}
+
+fn pinned_issues_jql(keys: &[String]) -> Result<String> {
+    for key in keys {
+        let (project, number) = key.rsplit_once('-')
+            .context("Invalid pinned Jira issue key")?;
+        validate_project_key(project)?;
+        ensure!(
+            !number.is_empty() && number.bytes().all(|byte| byte.is_ascii_digit()),
+            "Invalid pinned Jira issue key"
+        );
+    }
+    Ok(format!("key IN ({}) ORDER BY updated DESC", keys.join(", ")))
 }
 
 fn project_issues_jql(keys: &[String], scope: Option<&str>, active_sprint_only: bool) -> Result<String> {
@@ -872,6 +895,16 @@ fn jira_error_message(body: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn pinned_query_ignores_board_filters_and_rejects_invalid_keys() {
+        assert_eq!(
+            pinned_issues_jql(&["ART-42".into(), "AFB-2".into()]).unwrap(),
+            "key IN (ART-42, AFB-2) ORDER BY updated DESC"
+        );
+        assert!(pinned_issues_jql(&["ART-42) OR assignee IS EMPTY".into()]).is_err());
+        assert!(pinned_issues_jql(&["ART-nope".into()]).is_err());
+    }
+
     use super::*;
 
     #[test]
