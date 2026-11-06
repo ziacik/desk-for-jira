@@ -43,7 +43,6 @@ struct Ui {
     pinned_box: gtk::Box,
     pinned_scroll: gtk::ScrolledWindow,
     pinned_count: gtk::Label,
-    pinned_hint: gtk::Label,
     detail_box: gtk::Box,
     detail_actions: gtk::Box,
     detail_request: Rc<Cell<u64>>,
@@ -307,7 +306,7 @@ fn build_ui(app: &adw::Application) {
     filters_row.append(&search);
     center.append(&filters_row);
 
-    // A quiet, single-line empty state; expand only when there are actual pins.
+    // Never take up board space when the user has no pinned issues.
     let pinned_section = gtk::Box::new(gtk::Orientation::Vertical, 6);
     pinned_section.add_css_class("pinned-strip");
     pinned_section.set_visible(false);
@@ -322,12 +321,6 @@ fn build_ui(app: &adw::Application) {
     pinned_count.add_css_class("pinned-count");
     pinned_count.set_visible(false);
     pinned_heading.append(&pinned_count);
-    let pinned_hint = gtk::Label::new(Some("Pin a ticket to keep it handy"));
-    pinned_hint.add_css_class("pinned-hint");
-    pinned_hint.set_xalign(0.0);
-    pinned_hint.set_ellipsize(gtk::pango::EllipsizeMode::End);
-    pinned_hint.set_hexpand(true);
-    pinned_heading.append(&pinned_hint);
     pinned_section.append(&pinned_heading);
     let pinned_box = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     pinned_box.set_halign(gtk::Align::Start);
@@ -590,7 +583,7 @@ fn build_ui(app: &adw::Application) {
         project_filter: Rc::new(RefCell::new(None)),
         connect_button, disconnect_button, refresh_button,
         manage_projects_button, manage_columns_button, search, center_title,
-        board_box, pinned_section, pinned_box, pinned_scroll, pinned_count, pinned_hint,
+        board_box, pinned_section, pinned_box, pinned_scroll, pinned_count,
         detail_box, detail_actions, detail_panel, detail_heading, open_in_jira, copy_branch, pin_detail, inner_split,
         state: state.clone(),
         detail_request: Rc::new(Cell::new(0)),
@@ -2271,16 +2264,10 @@ fn toggle_pinned_issue(ui: &Ui, issue: &Issue) {
 
 fn render_pinned_section(ui: &Ui, state: &State) {
     clear_box(&ui.pinned_box);
-    ui.pinned_section.set_visible(true);
     let pinned = pinned_issue_refs(&state.settings, &state.issues, &state.pinned_issues);
     let has_pins = !pinned.is_empty();
-    ui.pinned_section.set_css_classes(&["pinned-strip"]);
-    if has_pins {
-        ui.pinned_section.add_css_class("has-pins");
-    }
+    ui.pinned_section.set_visible(has_pins);
     ui.pinned_count.set_text(&pinned.len().to_string());
-    ui.pinned_count.set_visible(has_pins);
-    ui.pinned_hint.set_visible(!has_pins);
     ui.pinned_scroll.set_visible(has_pins);
     if !has_pins {
         return;
