@@ -47,6 +47,7 @@ struct Ui {
     detail_actions: gtk::Box,
     detail_request: Rc<Cell<u64>>,
     transition_busy: Rc<Cell<bool>>,
+    transition_form: Rc<RefCell<Option<transition_ui::TransitionForm>>>,
     detail_panel: gtk::Box,
     detail_heading: gtk::Label,
     open_in_jira: gtk::Button,
@@ -593,6 +594,7 @@ fn build_ui(app: &adw::Application) {
         state: state.clone(),
         detail_request: Rc::new(Cell::new(0)),
         transition_busy: Rc::new(Cell::new(false)),
+        transition_form: Rc::new(RefCell::new(None)),
         saved_detail_width: Rc::new(Cell::new(initial_layout.detail_width)),
         mine_filter, unassigned_filter, all_filter, sprint_filter,
         restoring_view: Rc::new(Cell::new(false)),
@@ -989,7 +991,6 @@ fn handle_event(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>, eve
             match result {
                 Ok(transitions) => {
                     let Some(account) = state.borrow().account.clone() else { return };
-                    let base_url = account.base_url.clone();
                     let cloud = account.mode == AuthMode::Cloud;
                     let selected_issue = ui.selected_issue.clone();
                     let transition_busy = ui.transition_busy.clone();
@@ -1001,9 +1002,9 @@ fn handle_event(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>, eve
                         if transition_busy.get()
                             || selected_issue.borrow().as_deref() != Some(selected_key.as_str())
                         {
-                            return;
+                            return false;
                         }
-                        let Some(account) = state_for_submit.borrow().account.clone() else { return };
+                        let Some(account) = state_for_submit.borrow().account.clone() else { return false };
                         let id = state_for_submit.borrow().generation;
                         transition_busy.set(true);
                         if let Some(actions) = detail_actions.upgrade() {
@@ -1019,10 +1020,31 @@ fn handle_event(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>, eve
                                 id, key, transition.to_id, transition.to_name, result
                             ));
                         });
+                        true
+                    });
+                    let form_slot = ui.transition_form.clone();
+                    let on_open: transition_ui::FormOpened = Rc::new(move |form| {
+                        let previous = form_slot.borrow_mut().take();
+                        if let Some(previous) = previous {
+                            previous.close();
+                        }
+                        let weak_slot = Rc::downgrade(&form_slot);
+                        form.window.connect_close_request(move |window| {
+                            if let Some(slot) = weak_slot.upgrade() {
+                                let is_current = slot.borrow().as_ref()
+                                    .is_some_and(|current| current.window == *window);
+                                if is_current {
+                                    slot.borrow_mut().take();
+                                }
+                            }
+                            glib::Propagation::Proceed
+                        });
+                        *form_slot.borrow_mut() = Some(form);
                     });
                     ui.detail_actions.set_sensitive(!ui.transition_busy.get());
                     transition_ui::render_actions(
-                        &ui.detail_actions, &ui.window, &key, &base_url, cloud, transitions, submit,
+                        &ui.detail_actions, &ui.window, &key, cloud,
+                        transitions, submit, on_open,
                     );
                 }
                 Err(error) => {
@@ -1040,6 +1062,10 @@ fn handle_event(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>, eve
             ui.detail_actions.set_sensitive(true);
             match result {
                 Ok(()) => {
+                    let completed_form = ui.transition_form.borrow_mut().take();
+                    if let Some(form) = completed_form {
+                        form.close();
+                    }
                     {
                         let mut s = state.borrow_mut();
                         if let Some(issue) = s.issues.iter_mut().find(|issue| issue.key == key) {
@@ -1066,9 +1092,20 @@ fn handle_event(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>, eve
                     ui.toast.add_toast(adw::Toast::new(&format!("Moved to {to_name}")));
                 }
                 Err(error) => {
-                    show_error(ui, &error);
-                    if ui.selected_issue.borrow().as_deref() == Some(key.as_str()) {
-                        request_transitions(&ui.detail_actions, &ui.detail_request, &ui.events, state.borrow().account.clone(), id, &key);
+                    let has_form = ui.transition_form.borrow().as_ref()
+                        .is_some_and(|form| form.key == key);
+                    if has_form {
+                        if let Some(form) = ui.transition_form.borrow().as_ref() {
+                            form.show_error(&error);
+                        }
+                    } else {
+                        show_error(ui, &error);
+                        if ui.selected_issue.borrow().as_deref() == Some(key.as_str()) {
+                            request_transitions(
+                                &ui.detail_actions, &ui.detail_request, &ui.events,
+                                state.borrow().account.clone(), id, &key,
+                            );
+                        }
                     }
                 }
             }
@@ -2192,6 +2229,10 @@ fn visible_board_groups<'a>(
 
 
 fn close_issue_details(ui: &Ui) {
+    let previous_form = ui.transition_form.borrow_mut().take();
+    if let Some(form) = previous_form {
+        form.close();
+    }
     close_issue_pane(
         &ui.detail_panel,
         &ui.saved_detail_width,
@@ -2607,8 +2648,13 @@ fn connect_issue_open(
     let image_slots = ui.image_slots.clone();
     let actions = ui.detail_actions.clone();
     let detail_request = ui.detail_request.clone();
+    let transition_form = ui.transition_form.clone();
     let events = ui.events.clone();
     button.connect_clicked(move |button| {
+        let previous_form = transition_form.borrow_mut().take();
+        if let Some(form) = previous_form {
+            form.close();
+        }
         if let Some(selected_button) = selected_button.upgrade()
             && let Some(previous) = selected_button.borrow_mut().replace(button.clone())
         {
