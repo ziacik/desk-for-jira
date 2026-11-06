@@ -564,12 +564,8 @@ button.transition-action:hover {
   background-color: alpha(@accent_bg_color, 0.09);
 }
 
-/* Pins sit in the board's visual hierarchy instead of a separate dashboard panel.
-   The empty state is a single muted line; only populated pins get a surface. */
+/* Pinned tickets appear as a compact strip only when at least one is present. */
 .pinned-strip {
-  padding: 2px 2px 3px;
-}
-.pinned-strip.has-pins {
   padding: 9px 11px 10px;
   border-radius: 12px;
   border: 1px solid alpha(@window_fg_color, 0.065);
@@ -587,11 +583,6 @@ button.transition-action:hover {
   color: alpha(@window_fg_color, 0.83);
   font-size: 0.88em;
   font-weight: 750;
-}
-.pinned-hint {
-  color: alpha(@window_fg_color, 0.50);
-  font-size: 0.84em;
-  margin-left: 7px;
 }
 .pinned-count {
   color: alpha(@window_fg_color, 0.70);
