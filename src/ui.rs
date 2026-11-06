@@ -2267,6 +2267,7 @@ fn issue_button(issue: &Issue, ui: &Ui, base_url: &str, account: Option<&Credent
         *ui.selected_button.borrow_mut() = Some(button.clone());
     }
 
+    let pin_issue = issue.clone();
     let issue = issue.clone();
     let detail_box = ui.detail_box.clone();
     let detail_panel = ui.detail_panel.clone();
@@ -2339,11 +2340,11 @@ fn issue_button(issue: &Issue, ui: &Ui, base_url: &str, account: Option<&Credent
     pin.set_margin_top(7);
     style_pin_button(
         &pin,
-        ui.state.borrow().settings.pinned_issues.iter().any(|pinned| pinned == &issue.key),
+        ui.state.borrow().settings.pinned_issues.iter().any(|pinned| pinned == &pin_issue.key),
     );
     {
         let ui = ui.clone();
-        pin.connect_clicked(move |_| toggle_pinned_issue(&ui, &issue));
+        pin.connect_clicked(move |_| toggle_pinned_issue(&ui, &pin_issue));
     }
     tile.add_overlay(&pin);
     tile
