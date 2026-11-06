@@ -1016,7 +1016,8 @@ fn handle_event(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>, eve
                     });
                     let form_slot = ui.transition_form.clone();
                     let on_open: transition_ui::FormOpened = Rc::new(move |form| {
-                        if let Some(previous) = form_slot.borrow_mut().take() {
+                        let previous = form_slot.borrow_mut().take();
+                        if let Some(previous) = previous {
                             previous.close();
                         }
                         let weak_slot = Rc::downgrade(&form_slot);
@@ -1053,7 +1054,8 @@ fn handle_event(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>, eve
             ui.detail_actions.set_sensitive(true);
             match result {
                 Ok(()) => {
-                    if let Some(form) = ui.transition_form.borrow_mut().take() {
+                    let completed_form = ui.transition_form.borrow_mut().take();
+                    if let Some(form) = completed_form {
                         form.close();
                     }
                     {
@@ -2219,7 +2221,8 @@ fn visible_board_groups<'a>(
 
 
 fn close_issue_details(ui: &Ui) {
-    if let Some(form) = ui.transition_form.borrow_mut().take() {
+    let previous_form = ui.transition_form.borrow_mut().take();
+    if let Some(form) = previous_form {
         form.close();
     }
     close_issue_pane(
@@ -2609,7 +2612,8 @@ fn issue_button(issue: &Issue, ui: &Ui, base_url: &str, account: Option<&Credent
     let transition_form = ui.transition_form.clone();
     let events = ui.events.clone();
     button.connect_clicked(move |button| {
-        if let Some(form) = transition_form.borrow_mut().take() {
+        let previous_form = transition_form.borrow_mut().take();
+        if let Some(form) = previous_form {
             form.close();
         }
         if let Some(selected_button) = selected_button.upgrade()
