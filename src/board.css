@@ -288,14 +288,14 @@ button.detail-header-action:hover {
   color: alpha(@window_fg_color, 0.52);
 }
 .sidebar-current {
-  padding: 11px 12px;
-  border-radius: 11px;
+  padding: 6px 4px;
+  border-radius: 9px;
   color: @window_fg_color;
-  font-weight: 750;
-  background-color: alpha(#4679eb, 0.13);
-  border: 1px solid alpha(#4679eb, 0.26);
+  font-weight: 700;
+  background-color: transparent;
+  border: none;
 }
-.sidebar-current image { color: #4679eb; }
+box.sidebar-current > image { color: #4679eb; }
 menubutton.board-settings-trigger > button {
   min-width: 30px;
   min-height: 30px;
@@ -310,15 +310,15 @@ menubutton.board-settings-trigger > button:checked {
   background-color: alpha(#4679eb, 0.15);
 }
 button.sidebar-project-filter {
-  color: @window_fg_color;
+  color: alpha(@window_fg_color, 0.87);
   background-color: transparent;
   background-image: none;
   box-shadow: none;
-  border: 1px solid transparent;
-  border-radius: 9px;
-  padding: 9px 11px;
-  font-weight: 650;
-  min-height: 20px;
+  border: none;
+  border-radius: 8px;
+  padding: 7px 10px;
+  font-weight: 550;
+  min-height: 24px;
 }
 button.sidebar-project-filter:hover {
   color: @window_fg_color;
@@ -326,11 +326,12 @@ button.sidebar-project-filter:hover {
 }
 button.sidebar-project-filter:checked {
   color: @window_fg_color;
-  background-color: alpha(#4679eb, 0.15);
-  border-color: alpha(#4679eb, 0.26);
+  background-color: alpha(#4679eb, 0.105);
+  font-weight: 650;
 }
-button.sidebar-project-filter.all-projects {
-  font-weight: 750;
+.project-filter-check {
+  -gtk-icon-size: 13px;
+  color: #4679eb;
 }
 .board-settings-menu {
   min-width: 190px;
