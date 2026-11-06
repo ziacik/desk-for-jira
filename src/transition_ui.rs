@@ -50,7 +50,6 @@ pub fn render_actions(
     container: &gtk::Box,
     parent: &adw::ApplicationWindow,
     issue_key: &str,
-    base_url: &str,
     cloud: bool,
     transitions: Vec<IssueTransition>,
     submit: TransitionSubmit,
@@ -83,14 +82,13 @@ pub fn render_actions(
         button.set_tooltip_text(Some(&format!("Move to {}", transition.to_name)));
         let parent = parent.downgrade();
         let key = issue_key.to_owned();
-        let base_url = base_url.to_owned();
         let submit = submit.clone();
         let on_open = on_open.clone();
         button.connect_clicked(move |_| {
             if transition.required_fields.is_empty() {
                 submit(transition.clone(), Map::new());
             } else if let Some(parent) = parent.upgrade() {
-                open_transition_form(&parent, &key, &base_url, cloud, transition.clone(), submit.clone(), on_open.clone());
+                open_transition_form(&parent, &key, cloud, transition.clone(), submit.clone(), on_open.clone());
             }
         });
         actions.insert(&button, -1);
@@ -101,7 +99,6 @@ pub fn render_actions(
 fn open_transition_form(
     parent: &adw::ApplicationWindow,
     issue_key: &str,
-    base_url: &str,
     cloud: bool,
     transition: IssueTransition,
     submit: TransitionSubmit,
