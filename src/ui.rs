@@ -2220,6 +2220,7 @@ mod scope_tests {
             status_id: status_id.into(),
             kind: String::new(),
             priority: String::new(),
+            fix_versions: Vec::new(),
             assignee: String::new(),
             updated: String::new(),
             description: String::new(),
