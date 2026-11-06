@@ -558,7 +558,10 @@ fn build_ui(app: &adw::Application) {
         ui.copy_branch.connect_clicked(move |_| {
             let key = selected_issue.borrow().clone();
             let state = state.borrow();
-            let issue = key.as_deref().and_then(|key| state.issues.iter().find(|issue| issue.key == key));
+            let issue = key.as_deref().and_then(|key| {
+                state.issues.iter().chain(state.pinned_issues.iter())
+                    .find(|issue| issue.key == key)
+            });
             if let Some(issue) = issue
                 && let Some(display) = gtk::gdk::Display::default()
             {
@@ -2262,7 +2265,9 @@ fn issue_button(issue: &Issue, ui: &Ui, base_url: &str, account: Option<&Credent
     }
     button.set_child(Some(&content));
 
-    if ui.selected_issue.borrow().as_deref() == Some(issue.key.as_str()) {
+    if ui.selected_issue.borrow().as_deref() == Some(issue.key.as_str())
+        && ui.selected_button.borrow().is_none()
+    {
         button.add_css_class("selected-issue");
         *ui.selected_button.borrow_mut() = Some(button.clone());
     }
