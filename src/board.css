@@ -68,19 +68,21 @@ button.issue-card label.ticket-priority {
   border-radius: 6px;
   padding: 2px 6px;
 }
-/* Consistent Epic accent, without changing the card's foreground colors. */
-.epic-stripe {
-  min-width: 4px;
-  border-radius: 4px;
+/* Epic identification is a colored part of the *card border*.
+   It follows border-radius automatically, including selected cards. */
+button.issue-card.has-epic,
+button.issue-card.has-epic.selected-issue {
+  border-left-width: 4px;
+  border-left-style: solid;
 }
-.epic-color-0 { background-color: #8b65c7; }
-.epic-color-1 { background-color: #278e9c; }
-.epic-color-2 { background-color: #cf7a3b; }
-.epic-color-3 { background-color: #618b39; }
-.epic-color-4 { background-color: #b05e94; }
-.epic-color-5 { background-color: #3b7cbb; }
-.epic-color-6 { background-color: #bc5966; }
-.epic-color-7 { background-color: #8d7862; }
+button.issue-card.has-epic.epic-color-0 { border-left-color: #8b65c7; }
+button.issue-card.has-epic.epic-color-1 { border-left-color: #278e9c; }
+button.issue-card.has-epic.epic-color-2 { border-left-color: #cf7a3b; }
+button.issue-card.has-epic.epic-color-3 { border-left-color: #618b39; }
+button.issue-card.has-epic.epic-color-4 { border-left-color: #b05e94; }
+button.issue-card.has-epic.epic-color-5 { border-left-color: #3b7cbb; }
+button.issue-card.has-epic.epic-color-6 { border-left-color: #bc5966; }
+button.issue-card.has-epic.epic-color-7 { border-left-color: #8d7862; }
 .ticket-epic {
   margin-top: 2px;
 }
@@ -133,11 +135,9 @@ button.collapsed-expand:hover {
   letter-spacing: 0.02em;
 }
 .detail-kind {
-  color: alpha(@window_fg_color, 0.75);
-  background-color: alpha(@window_fg_color, 0.065);
-  border-radius: 7px;
-  padding: 3px 8px;
-  font-size: 0.86em;
+  color: alpha(@window_fg_color, 0.65);
+  font-size: 0.9em;
+  font-weight: 500;
 }
 .detail-title {
   color: @window_fg_color;
@@ -163,21 +163,18 @@ button.collapsed-expand:hover {
   font-weight: 700;
   color: @accent_color;
 }
-.detail-branch {
-  padding: 11px 12px;
-  border: 1px solid alpha(@window_fg_color, 0.08);
-  border-radius: 10px;
-  background-color: alpha(@window_fg_color, 0.025);
-}
-.detail-branch-value {
+/* Same compact hit area as the other headerbar icon actions. */
+button.detail-header-action {
+  min-width: 24px;
+  min-height: 24px;
+  padding: 3px;
+  border-radius: 8px;
   color: @window_fg_color;
-  font-family: monospace;
-  font-size: 0.92em;
+  background-color: transparent;
+  box-shadow: none;
 }
-button.detail-branch-copy {
-  min-width: 34px;
-  min-height: 34px;
-  color: @window_fg_color;
+button.detail-header-action:hover {
+  background-color: alpha(@window_fg_color, 0.08);
 }
 
 .detail-section {
@@ -262,7 +259,265 @@ button.detail-branch-copy {
   color: alpha(@window_fg_color, 0.65);
   font-style: italic;
 }
-button.detail-open {
+
+
+/* Desk for Jira: visual system built on theme-aware Adwaita surfaces. */
+.workspace-root {
+  background-color: @window_bg_color;
+}
+.workspace-sidebar {
   color: @window_fg_color;
-  margin-top: 8px;
+  background-color: @sidebar_bg_color;
+}
+.pane-header {
+  min-height: 46px;
+  border-bottom: 1px solid alpha(@window_fg_color, 0.075);
+  box-shadow: none;
+}
+.sidebar-pane-header {
+  background-color: @sidebar_bg_color;
+}
+.board-pane-header,
+.detail-pane-header {
+  background-color: @window_bg_color;
+}
+.sidebar-eyebrow {
+  font-weight: 750;
+  font-size: 0.75em;
+  letter-spacing: 0.065em;
+  color: alpha(@window_fg_color, 0.52);
+}
+.sidebar-current {
+  padding: 6px 4px;
+  border-radius: 9px;
+  color: @window_fg_color;
+  font-weight: 700;
+  background-color: transparent;
+  border: none;
+}
+box.sidebar-current > image { color: #4679eb; }
+menubutton.board-settings-trigger > button {
+  min-width: 30px;
+  min-height: 30px;
+  padding: 5px;
+  border-radius: 8px;
+  color: alpha(@window_fg_color, 0.72);
+  background-color: transparent;
+}
+menubutton.board-settings-trigger > button:hover,
+menubutton.board-settings-trigger > button:checked {
+  color: @window_fg_color;
+  background-color: alpha(#4679eb, 0.15);
+}
+button.sidebar-project-filter {
+  color: alpha(@window_fg_color, 0.87);
+  background-color: transparent;
+  background-image: none;
+  box-shadow: none;
+  border: none;
+  border-radius: 8px;
+  padding: 7px 10px;
+  font-weight: 550;
+  min-height: 24px;
+}
+button.sidebar-project-filter:hover {
+  color: @window_fg_color;
+  background-color: alpha(@window_fg_color, 0.055);
+}
+button.sidebar-project-filter:checked {
+  color: @window_fg_color;
+  background-color: alpha(#4679eb, 0.105);
+  font-weight: 650;
+}
+.project-filter-check {
+  -gtk-icon-size: 13px;
+  color: #4679eb;
+}
+.board-settings-menu {
+  min-width: 190px;
+  padding: 10px;
+}
+button.sidebar-action {
+  border-radius: 8px;
+  padding: 7px 10px;
+  font-weight: 600;
+}
+.board-heading {
+  padding: 2px 0px 8px;
+}
+.board-mark {
+  min-width: 44px;
+  min-height: 44px;
+  border-radius: 12px;
+  background-image: linear-gradient(140deg, #30b0ee, #4b5cda 67%, #30339d);
+  box-shadow: 0 2px 6px alpha(@window_fg_color, 0.10);
+}
+.board-mark image {
+  -gtk-icon-size: 21px;
+  color: white;
+}
+.board-title {
+  font-weight: 800;
+}
+.board-subtitle {
+  color: alpha(@window_fg_color, 0.62);
+  font-size: 0.91em;
+}
+.board-toolbar {
+  padding: 3px 0px 9px;
+}
+.scope-filters button {
+  padding: 6px 11px;
+  font-weight: 650;
+}
+.scope-filters button:checked {
+  color: #3568d6;
+  background-color: alpha(#4679eb, 0.14);
+}
+.board-scroll {
+  padding-bottom: 6px;
+  border-radius: 12px;
+}
+.board-column {
+  background-color: alpha(@window_fg_color, 0.025);
+  border: 1px solid alpha(@window_fg_color, 0.065);
+  border-radius: 15px;
+  padding: 9px;
+}
+.board-column-header {
+  padding: 8px 10px;
+  margin-bottom: 3px;
+  border-radius: 10px;
+  background-color: alpha(#4679eb, 0.13);
+}
+.board-column-title {
+  font-size: 1.02em;
+  font-weight: 800;
+  color: @window_fg_color;
+}
+.board-column-count {
+  color: @window_fg_color;
+  background-color: alpha(@window_bg_color, 0.56);
+  border: 1px solid alpha(@window_fg_color, 0.06);
+  font-weight: 750;
+}
+/* Full-column tone stays much softer than the matching header.
+   These colors are shared by the column body and header, for both themes. */
+.board-column.column-tone-0 { background-color: alpha(#3299e6, 0.075); }
+.board-column.column-tone-1 { background-color: alpha(#8b72df, 0.075); }
+.board-column.column-tone-2 { background-color: alpha(#d5a048, 0.080); }
+.board-column.column-tone-3 { background-color: alpha(#41ad86, 0.070); }
+.board-column.column-tone-4 { background-color: alpha(#bc76a7, 0.075); }
+.board-column.column-tone-0 .board-column-header { background-color: alpha(#3299e6, 0.16); }
+.board-column.column-tone-1 .board-column-header { background-color: alpha(#8b72df, 0.16); }
+.board-column.column-tone-2 .board-column-header { background-color: alpha(#d5a048, 0.17); }
+.board-column.column-tone-3 .board-column-header { background-color: alpha(#41ad86, 0.15); }
+.board-column.column-tone-4 .board-column-header { background-color: alpha(#bc76a7, 0.16); }
+button.issue-card {
+  color: @window_fg_color;
+  background-color: @card_bg_color;
+  border: 1px solid alpha(@window_fg_color, 0.09);
+  border-radius: 12px;
+  box-shadow: 0 2px 5px alpha(@window_fg_color, 0.06);
+}
+button.issue-card:hover {
+  color: @window_fg_color;
+  background-color: @card_bg_color;
+  border-color: alpha(#4679eb, 0.46);
+  box-shadow: 0 4px 10px alpha(@window_fg_color, 0.09);
+}
+button.issue-card.selected-issue {
+  color: @window_fg_color;
+  background-color: @card_bg_color;
+  border: 2px solid #4679eb;
+  box-shadow: 0 0 0 2px alpha(#4679eb, 0.15);
+}
+.ticket-type-mark {
+  min-width: 23px;
+  min-height: 23px;
+  border-radius: 7px;
+  color: #1876c6;
+  background-color: alpha(#3299e6, 0.15);
+}
+.ticket-type-mark image { -gtk-icon-size: 14px; }
+.ticket-type-mark.kind-bug {
+  color: #bd5843;
+  background-color: alpha(#eb7655, 0.16);
+}
+.ticket-type-mark.kind-story {
+  color: #7551bb;
+  background-color: alpha(#9a78e8, 0.16);
+}
+.ticket-key {
+  font-size: 0.83em;
+  color: alpha(@window_fg_color, 0.65);
+  font-weight: 750;
+}
+button.issue-card label.ticket-kind {
+  color: alpha(@window_fg_color, 0.72);
+  border-radius: 999px;
+  background-color: alpha(@window_fg_color, 0.055);
+  padding: 3px 7px;
+  font-size: 0.77em;
+}
+button.issue-card label.ticket-summary {
+  font-weight: 720;
+  font-size: 1.02em;
+  color: @window_fg_color;
+}
+button.issue-card label.ticket-epic-label {
+  color: alpha(@window_fg_color, 0.78);
+  font-size: 0.82em;
+}
+.detail-panel {
+  background-color: @window_bg_color;
+  border-left: 1px solid alpha(@window_fg_color, 0.11);
+}
+.detail-metadata {
+  border-radius: 13px;
+  padding: 15px;
+  background-color: alpha(@window_fg_color, 0.038);
+}
+.detail-section-title {
+  font-size: 1.04em;
+}
+.detail-key, .detail-status, .issue-list-marker { color: #4c72dc; }
+label link, label link:visited { color: #416dde; }
+label link:hover { color: #618bff; }
+
+
+/* Visual language shared by the header and the board controls. */
+.detail-header-key {
+  color: alpha(@window_fg_color, 0.82);
+  font-size: 1em;
+  font-weight: 600;
+}
+.scope-button-content {
+  color: inherit;
+}
+.scope-button-content image {
+  -gtk-icon-size: 14px;
+  color: alpha(@window_fg_color, 0.72);
+}
+.scope-filters button:checked .scope-button-content image {
+  color: #3568d6;
+}
+.ticket-type-mark {
+  min-width: 24px;
+  min-height: 24px;
+}
+.ticket-type-mark image {
+  -gtk-icon-size: 14px;
+}
+
+
+/* A single question mark for issues without an assignee. */
+.unassigned-question {
+  min-width: 16px;
+  font-size: 1.2em;
+  font-weight: 800;
+  color: alpha(@window_fg_color, 0.76);
+}
+button:checked .unassigned-question {
+  color: #3568d6;
 }

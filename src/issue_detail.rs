@@ -8,11 +8,79 @@ use crate::jira::{Attachment, Issue};
 
 pub type ImageSlots = HashMap<String, Vec<gtk::Box>>;
 
+/// Both header actions use exactly the same symbolic drawing system:
+/// size, stroke, color and alignment follow the current GTK theme.
+#[derive(Clone, Copy)]
+pub(crate) enum HeaderActionIcon {
+    Branch,
+    ExternalLink,
+}
+
+pub(crate) fn header_action_icon(kind: HeaderActionIcon) -> gtk::DrawingArea {
+    let icon = gtk::DrawingArea::new();
+    icon.set_content_width(16);
+    icon.set_content_height(16);
+    icon.set_halign(gtk::Align::Center);
+    icon.set_valign(gtk::Align::Center);
+    icon.set_draw_func(move |area, cr, width, height| {
+        // DrawingArea's content size is a minimum, not a maximum: GtkButton
+        // can allocate much more than 16px. Keep the glyph fixed-size even
+        // if the widget is ever expanded by its parent.
+        let size = f64::from(width.min(height)).min(16.0);
+        let offset_x = (f64::from(width) - size) / 2.0;
+        let offset_y = (f64::from(height) - size) / 2.0;
+        cr.translate(offset_x, offset_y);
+        cr.scale(size / 20.0, size / 20.0);
+        let color = area.color();
+        cr.set_source_rgba(
+            f64::from(color.red()),
+            f64::from(color.green()),
+            f64::from(color.blue()),
+            f64::from(color.alpha()),
+        );
+        cr.set_line_width(1.8);
+        cr.set_line_cap(gtk::cairo::LineCap::Round);
+        cr.set_line_join(gtk::cairo::LineJoin::Round);
+
+        match kind {
+            HeaderActionIcon::Branch => {
+                cr.move_to(5.0, 5.0);
+                cr.line_to(5.0, 15.0);
+                cr.move_to(5.0, 11.0);
+                cr.curve_to(10.0, 11.0, 15.0, 11.0, 15.0, 5.0);
+                cr.stroke().expect("Branch icon stroke");
+                for (x, y) in [(5.0, 4.0), (5.0, 16.0), (15.0, 4.0)] {
+                    cr.arc(x, y, 1.8, 0.0, std::f64::consts::TAU);
+                    cr.fill().expect("Branch icon node");
+                }
+            }
+            HeaderActionIcon::ExternalLink => {
+                // Conventional external-link glyph: a square with an arrow
+                // pointing out through its open upper-right corner.
+                cr.move_to(8.0, 5.0);
+                cr.line_to(5.5, 5.0);
+                cr.curve_to(4.7, 5.0, 4.0, 5.7, 4.0, 6.5);
+                cr.line_to(4.0, 14.5);
+                cr.curve_to(4.0, 15.3, 4.7, 16.0, 5.5, 16.0);
+                cr.line_to(13.5, 16.0);
+                cr.curve_to(14.3, 16.0, 15.0, 15.3, 15.0, 14.5);
+                cr.line_to(15.0, 12.0);
+                cr.move_to(10.0, 4.0);
+                cr.line_to(16.0, 4.0);
+                cr.line_to(16.0, 10.0);
+                cr.move_to(16.0, 4.0);
+                cr.line_to(8.0, 12.0);
+                cr.stroke().expect("External link icon stroke");
+            }
+        }
+    });
+    icon
+}
+
 pub fn render(
     container: &gtk::Box,
     issue: &Issue,
     base_url: &str,
-    toast: &adw::ToastOverlay,
 ) -> ImageSlots {
     while let Some(child) = container.first_child() {
         container.remove(&child);
@@ -24,16 +92,13 @@ pub fn render(
     let header = gtk::Box::new(gtk::Orientation::Vertical, 10);
     header.add_css_class("detail-hero");
     let eyebrow = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-    let key = gtk::Label::new(Some(&issue.key));
-    key.add_css_class("detail-key");
-    key.set_xalign(0.0);
-    key.set_hexpand(true);
-    eyebrow.append(&key);
-    if !issue.kind.is_empty() {
-        let kind = gtk::Label::new(Some(&issue.kind));
-        kind.add_css_class("detail-kind");
-        eyebrow.append(&kind);
-    }
+    let kind_label = if issue.kind.is_empty() { "Ticket" } else { &issue.kind };
+    let kind = gtk::Label::new(Some(kind_label));
+    kind.add_css_class("detail-kind");
+    kind.set_halign(gtk::Align::Start);
+    kind.set_xalign(0.5);
+    eyebrow.append(&kind);
+
     header.append(&eyebrow);
 
     let summary = gtk::Label::new(Some(&issue.summary));
@@ -90,41 +155,6 @@ pub fn render(
     }
     container.append(&metadata);
 
-    let branch_name = suggested_branch_name(&issue.key, &issue.summary);
-    let branch_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-    branch_row.add_css_class("detail-branch");
-
-    let branch_info = gtk::Box::new(gtk::Orientation::Vertical, 5);
-    branch_info.set_hexpand(true);
-    let branch_caption = gtk::Label::new(Some("Branch name"));
-    branch_caption.add_css_class("detail-field-label");
-    branch_caption.set_xalign(0.0);
-    branch_info.append(&branch_caption);
-
-    let branch_value = gtk::Label::new(Some(&branch_name));
-    branch_value.add_css_class("detail-branch-value");
-    branch_value.set_xalign(0.0);
-    branch_value.set_wrap(true);
-    branch_value.set_wrap_mode(gtk::pango::WrapMode::WordChar);
-    branch_value.set_selectable(true);
-    branch_info.append(&branch_value);
-    branch_row.append(&branch_info);
-
-    let copy = gtk::Button::from_icon_name("edit-copy-symbolic");
-    copy.add_css_class("flat");
-    copy.add_css_class("detail-branch-copy");
-    copy.set_tooltip_text(Some("Copy branch name"));
-    copy.set_valign(gtk::Align::Center);
-    let toast = toast.clone();
-    copy.connect_clicked(move |_| {
-        if let Some(display) = gtk::gdk::Display::default() {
-            display.clipboard().set_text(&branch_name);
-            toast.add_toast(adw::Toast::new("Branch name copied"));
-        }
-    });
-    branch_row.append(&copy);
-    container.append(&branch_row);
-
     let section = gtk::Box::new(gtk::Orientation::Vertical, 12);
     section.add_css_class("detail-section");
     let heading = gtk::Label::new(Some("Description"));
@@ -173,23 +203,10 @@ pub fn render(
         container.append(&attachments);
     }
 
-    if !base_url.is_empty() {
-        let open = gtk::Button::with_label("Open in Jira ↗");
-        open.add_css_class("detail-open");
-        open.set_halign(gtk::Align::Start);
-        let url = format!("{base_url}/browse/{}", issue.key);
-        open.connect_clicked(move |_| {
-            let _ = gtk::gio::AppInfo::launch_default_for_uri(
-                &url, None::<&gtk::gio::AppLaunchContext>
-            );
-        });
-        container.append(&open);
-    }
-
     slots
 }
 
-fn suggested_branch_name(key: &str, summary: &str) -> String {
+pub(crate) fn suggested_branch_name(key: &str, summary: &str) -> String {
     // Jira's default: ISSUE-123-summary-in-lowercase. Keep branch names
     // readable and safe for Git refs, including issues titled in Slovak.
     const MAX_LENGTH: usize = 100;
