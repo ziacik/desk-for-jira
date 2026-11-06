@@ -595,34 +595,57 @@ button.transition-action:hover {
 .pinned-scroll {
   padding: 1px 0 2px;
 }
-.pinned-strip button.issue-card.compact-card {
+/* Pinned issues are narrow, single-line native-style rows, not cards.
+   Let the text truncate within the row instead of expanding the entire strip. */
+.pinned-ticket {
+  color: @window_fg_color;
   background-color: @card_bg_color;
-  border: 1px solid alpha(@window_fg_color, 0.10);
-  border-radius: 10px;
+  border: 1px solid alpha(@window_fg_color, 0.095);
+  border-radius: 9px;
   box-shadow: none;
 }
-.pinned-strip button.issue-card.compact-card:hover {
-  border-color: alpha(@accent_color, 0.55);
+.pinned-ticket:hover {
+  border-color: alpha(@accent_color, 0.40);
+}
+button.pinned-ticket-open {
+  color: @window_fg_color;
+  background: transparent;
+  border: none;
+  border-radius: 8px 0 0 8px;
+  box-shadow: none;
+  min-height: 38px;
+  padding: 6px 6px 6px 11px;
+}
+button.pinned-ticket-open:hover {
+  color: @window_fg_color;
+  background-color: alpha(@window_fg_color, 0.035);
+}
+button.pinned-ticket-open.selected-issue {
+  color: @window_fg_color;
+  background-color: alpha(@accent_bg_color, 0.14);
   box-shadow: none;
 }
-.pinned-strip button.issue-card.compact-card.selected-issue {
-  border-color: @accent_color;
-  box-shadow: 0 0 0 1px alpha(@accent_color, 0.26);
+.pinned-ticket-key {
+  color: alpha(@window_fg_color, 0.70);
+  font-size: 0.80em;
+  font-weight: 750;
 }
-button.compact-card .ticket-type-mark {
-  min-width: 20px;
-  min-height: 20px;
-  border-radius: 6px;
+.pinned-ticket-summary {
+  color: @window_fg_color;
+  font-size: 0.89em;
+  font-weight: 600;
 }
-button.compact-card .ticket-type-mark image {
-  -gtk-icon-size: 12px;
+button.pinned-ticket-unpin {
+  color: alpha(@window_fg_color, 0.64);
+  border: none;
+  box-shadow: none;
+  min-width: 31px;
+  min-height: 34px;
+  margin: 2px 3px 2px 0;
 }
-button.compact-card label.ticket-key {
-  font-size: 0.79em;
-}
-button.compact-card label.ticket-summary {
-  font-size: 0.93em;
-  font-weight: 620;
+button.pinned-ticket-unpin:hover {
+  color: @accent_color;
+  background-color: alpha(@accent_bg_color, 0.13);
 }
 
 /* Pin affordance: transparent icon action inside the card, not a second card.
