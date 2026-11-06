@@ -823,18 +823,21 @@ fn start_refresh(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>, ac
 }
 
 fn display_board(ui: &Ui, state: &Rc<RefCell<State>>, data: BoardData) {
-    let (base_url, settings) = {
+    let changed_settings = {
         let mut s = state.borrow_mut();
         s.issues = data.issues;
         s.statuses = data.statuses;
+        let previous = s.settings.clone();
         let statuses = s.statuses.clone();
         s.settings.reconcile(&statuses);
-        (
+        (s.settings != previous).then(|| (
             s.account.as_ref().map(|a| a.base_url.clone()).unwrap_or_default(),
             s.settings.clone(),
-        )
+        ))
     };
-    if let Err(error) = preferences::save(&base_url, &settings) {
+    if let Some((base_url, settings)) = changed_settings
+        && let Err(error) = preferences::save(&base_url, &settings)
+    {
         show_error(ui, &format!("Could not save board settings: {error}"));
     }
     ui.manage_columns_button.set_sensitive(!state.borrow().statuses.is_empty());
