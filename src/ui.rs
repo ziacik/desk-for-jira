@@ -43,6 +43,7 @@ struct Ui {
     detail_panel: gtk::Box,
     detail_heading: gtk::Label,
     open_in_jira: gtk::Button,
+    copy_branch: gtk::Button,
     saved_detail_width: Rc<Cell<i32>>,
     inner_split: gtk::Paned,
     image_slots: Rc<RefCell<issue_detail::ImageSlots>>,
@@ -287,6 +288,13 @@ fn build_ui(app: &adw::Application) {
     open_in_jira.set_tooltip_text(Some("Open this issue in Jira"));
     open_in_jira.set_visible(false);
     detail_header.pack_end(&open_in_jira);
+    let copy_branch = gtk::Button::new();
+    copy_branch.set_child(Some(&issue_detail::git_branch_icon()));
+    copy_branch.add_css_class("flat");
+    copy_branch.add_css_class("detail-branch-action");
+    copy_branch.set_tooltip_text(Some("Copy suggested Git branch name"));
+    copy_branch.set_visible(false);
+    detail_header.pack_end(&copy_branch);
     let close_detail = gtk::Button::from_icon_name("go-next-symbolic");
     close_detail.add_css_class("flat");
     close_detail.set_tooltip_text(Some("Close issue details (Esc)"));
@@ -430,7 +438,7 @@ fn build_ui(app: &adw::Application) {
         project_filter: Rc::new(RefCell::new(None)),
         connect_button, disconnect_button, refresh_button,
         manage_projects_button, manage_columns_button, search, center_title,
-        board_box, detail_box, detail_panel, detail_heading, open_in_jira, inner_split,
+        board_box, detail_box, detail_panel, detail_heading, open_in_jira, copy_branch, inner_split,
         saved_detail_width: Rc::new(Cell::new(DETAIL_WIDTH)),
         mine_filter, unassigned_filter, all_filter, sprint_filter,
         image_slots: Rc::new(RefCell::new(issue_detail::ImageSlots::new())),
@@ -454,6 +462,23 @@ fn build_ui(app: &adw::Application) {
                 let _ = gtk::gio::AppInfo::launch_default_for_uri(
                     &url, None::<&gtk::gio::AppLaunchContext>
                 );
+            }
+        });
+    }
+    {
+        let selected_issue = ui.selected_issue.clone();
+        let state = state.clone();
+        let toast = ui.toast.clone();
+        ui.copy_branch.connect_clicked(move |_| {
+            let key = selected_issue.borrow().clone();
+            let state = state.borrow();
+            let issue = key.as_deref().and_then(|key| state.issues.iter().find(|issue| issue.key == key));
+            if let Some(issue) = issue
+                && let Some(display) = gtk::gdk::Display::default()
+            {
+                let name = issue_detail::suggested_branch_name(&issue.key, &issue.summary);
+                display.clipboard().set_text(&name);
+                toast.add_toast(adw::Toast::new("Branch name copied"));
             }
         });
     }
@@ -1999,6 +2024,7 @@ fn issue_button(issue: &Issue, ui: &Ui, base_url: &str, account: Option<&Credent
     let inner_split = ui.inner_split.clone();
     let detail_heading = ui.detail_heading.clone();
     let open_in_jira = ui.open_in_jira.clone();
+    let copy_branch = ui.copy_branch.clone();
     let saved_detail_width = ui.saved_detail_width.clone();
     let selected_button = Rc::downgrade(&ui.selected_button);
     let selected_issue = ui.selected_issue.clone();
@@ -2006,7 +2032,6 @@ fn issue_button(issue: &Issue, ui: &Ui, base_url: &str, account: Option<&Credent
     let account = account.cloned();
     let image_slots = ui.image_slots.clone();
     let events = ui.events.clone();
-    let toast = ui.toast.clone();
     button.connect_clicked(move |button| {
         if let Some(selected_button) = selected_button.upgrade()
             && let Some(previous) = selected_button.borrow_mut().replace(button.clone())
@@ -2017,7 +2042,8 @@ fn issue_button(issue: &Issue, ui: &Ui, base_url: &str, account: Option<&Credent
         *selected_issue.borrow_mut() = Some(issue.key.clone());
         detail_heading.set_text(&issue.key);
         open_in_jira.set_visible(!base_url.is_empty());
-        *image_slots.borrow_mut() = issue_detail::render(&detail_box, &issue, &base_url, &toast);
+        copy_branch.set_visible(true);
+        *image_slots.borrow_mut() = issue_detail::render(&detail_box, &issue, &base_url);
         if !detail_panel.is_visible() {
             detail_panel.set_visible(true);
             let available = inner_split.width();
