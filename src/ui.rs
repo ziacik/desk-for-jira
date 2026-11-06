@@ -805,20 +805,24 @@ fn handle_event(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>, eve
                     let Some(account) = state.borrow().account.clone() else { return };
                     let base_url = account.base_url.clone();
                     let cloud = account.mode == AuthMode::Cloud;
-                    let ui_for_submit = ui.clone();
+                    let selected_issue = ui.selected_issue.clone();
+                    let transition_busy = ui.transition_busy.clone();
+                    let detail_actions = ui.detail_actions.downgrade();
                     let state_for_submit = state.clone();
                     let sender_for_submit = sender.clone();
                     let selected_key = key.clone();
                     let submit: transition_ui::TransitionSubmit = Rc::new(move |transition, fields| {
-                        if ui_for_submit.transition_busy.get()
-                            || ui_for_submit.selected_issue.borrow().as_deref() != Some(selected_key.as_str())
+                        if transition_busy.get()
+                            || selected_issue.borrow().as_deref() != Some(selected_key.as_str())
                         {
                             return;
                         }
                         let Some(account) = state_for_submit.borrow().account.clone() else { return };
                         let id = state_for_submit.borrow().generation;
-                        ui_for_submit.transition_busy.set(true);
-                        ui_for_submit.detail_actions.set_sensitive(false);
+                        transition_busy.set(true);
+                        if let Some(actions) = detail_actions.upgrade() {
+                            actions.set_sensitive(false);
+                        }
                         let key = selected_key.clone();
                         let sender = sender_for_submit.clone();
                         thread::spawn(move || {
@@ -867,17 +871,17 @@ fn handle_event(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>, eve
                             *ui.image_slots.borrow_mut() =
                                 issue_detail::render(&ui.detail_box, &issue, base_url);
                             if let Some(account) = account.clone() {
-                                load_issue_images(ui, account, &issue, id);
+                                load_issue_images(&ui.events, account, &issue, id);
                             }
                         }
-                        request_transitions(ui, account, id, &key);
+                        request_transitions(&ui.detail_actions, &ui.detail_request, &ui.events, account, id, &key);
                     }
                     ui.toast.add_toast(adw::Toast::new(&format!("Moved to {to_name}")));
                 }
                 Err(error) => {
                     show_error(ui, &error);
                     if ui.selected_issue.borrow().as_deref() == Some(key.as_str()) {
-                        request_transitions(ui, state.borrow().account.clone(), id, &key);
+                        request_transitions(&ui.detail_actions, &ui.detail_request, &ui.events, state.borrow().account.clone(), id, &key);
                     }
                 }
             }
@@ -2232,7 +2236,9 @@ fn issue_button(issue: &Issue, ui: &Ui, base_url: &str, account: Option<&Credent
     let base_url = base_url.to_owned();
     let account = account.cloned();
     let image_slots = ui.image_slots.clone();
-    let detail_ui = ui.clone();
+    let actions = ui.detail_actions.clone();
+    let detail_request = ui.detail_request.clone();
+    let events = ui.events.clone();
     button.connect_clicked(move |button| {
         if let Some(selected_button) = selected_button.upgrade()
             && let Some(previous) = selected_button.borrow_mut().replace(button.clone())
@@ -2253,27 +2259,34 @@ fn issue_button(issue: &Issue, ui: &Ui, base_url: &str, account: Option<&Credent
                 inner_split.set_position(available - width);
             }
         }
-        request_transitions(&detail_ui, account.clone(), generation, &issue.key);
+        request_transitions(&actions, &detail_request, &events, account.clone(), generation, &issue.key);
         if let Some(account) = account.clone() {
-            load_issue_images(&detail_ui, account, &issue, generation);
+            load_issue_images(&events, account, &issue, generation);
         }
     });
     button
 }
 
-fn request_transitions(ui: &Ui, account: Option<Credentials>, generation: u64, key: &str) {
-    let request = ui.detail_request.get().wrapping_add(1);
-    ui.detail_request.set(request);
-    ui.detail_actions.set_visible(true);
-    ui.detail_actions.set_sensitive(!ui.transition_busy.get());
-    clear_box(&ui.detail_actions);
+fn request_transitions(
+    actions: &gtk::Box,
+    request_counter: &Cell<u64>,
+    events: &Sender<Event>,
+    account: Option<Credentials>,
+    generation: u64,
+    key: &str,
+) {
+    let request = request_counter.get().wrapping_add(1);
+    request_counter.set(request);
+    actions.set_visible(true);
+    actions.set_sensitive(true);
+    clear_box(actions);
     let loading = gtk::Label::new(Some("Loading workflow actions…"));
     loading.add_css_class("dim-label");
     loading.set_xalign(0.0);
-    ui.detail_actions.append(&loading);
+    actions.append(&loading);
     let Some(account) = account else { return };
     let key = key.to_owned();
-    let events = ui.events.clone();
+    let events = events.clone();
     thread::spawn(move || {
         let result = JiraClient::new(account)
             .and_then(|client| client.issue_transitions(&key))
@@ -2282,12 +2295,12 @@ fn request_transitions(ui: &Ui, account: Option<Credentials>, generation: u64, k
     });
 }
 
-fn load_issue_images(ui: &Ui, account: Credentials, issue: &Issue, generation: u64) {
+fn load_issue_images(events: &Sender<Event>, account: Credentials, issue: &Issue, generation: u64) {
     let attachments: Vec<_> = issue.attachments.iter()
         .filter(|attachment| attachment.is_image() && !attachment.content_url.is_empty())
         .cloned().collect();
     if attachments.is_empty() { return; }
-    let events = ui.events.clone();
+    let events = events.clone();
     let key = issue.key.clone();
     thread::spawn(move || {
         let Ok(client) = JiraClient::new(account) else { return };
