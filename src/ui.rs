@@ -1,6 +1,6 @@
 use std::{
     cell::{Cell, RefCell},
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     rc::Rc,
     sync::mpsc::{self, Sender},
     thread,
@@ -57,7 +57,7 @@ struct Ui {
     sprint_filter: gtk::CheckButton,
 }
 
-#[derive(Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Default, PartialEq, Eq, Hash)]
 enum IssueScope {
     #[default]
     Mine,
@@ -75,6 +75,13 @@ impl IssueScope {
     }
 }
 
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct BoardKey {
+    projects: Vec<String>,
+    scope: IssueScope,
+    active_sprint_only: bool,
+}
+
 #[derive(Default)]
 struct State {
     account: Option<Credentials>,
@@ -84,8 +91,10 @@ struct State {
     issues: Vec<Issue>,
     issue_scope: IssueScope,
     active_sprint_only: bool,
+    issue_cache: HashMap<BoardKey, Vec<Issue>>,
+    status_cache: HashMap<Vec<String>, Vec<ProjectStatus>>,
+    loading_boards: HashSet<BoardKey>,
     generation: u64,
-    board_request: u64,
     busy: bool,
 }
 
@@ -99,10 +108,38 @@ struct BoardData {
     issues: Vec<Issue>,
 }
 
+impl State {
+    fn board_key(&self) -> BoardKey {
+        BoardKey {
+            projects: self.settings.projects.clone(),
+            scope: self.issue_scope,
+            active_sprint_only: self.active_sprint_only,
+        }
+    }
+
+    fn cached_board(&self, key: &BoardKey) -> Option<BoardData> {
+        Some(BoardData {
+            statuses: self.status_cache.get(&key.projects)?.clone(),
+            issues: self.issue_cache.get(key)?.clone(),
+        })
+    }
+
+    fn cache_board(&mut self, key: BoardKey, data: &BoardData) {
+        self.status_cache.insert(key.projects.clone(), data.statuses.clone());
+        self.issue_cache.insert(key, data.issues.clone());
+    }
+
+    fn clear_board_cache(&mut self) {
+        self.issue_cache.clear();
+        self.status_cache.clear();
+        self.loading_boards.clear();
+    }
+}
+
 enum Event {
     Stored(Result<Option<Credentials>, String>),
     Loaded(u64, Credentials, Result<Loaded, String>),
-    BoardLoaded(u64, u64, Result<BoardData, String>),
+    BoardLoaded(u64, BoardKey, Result<BoardData, String>),
     ImageLoaded(u64, String, String, Result<Vec<u8>, String>),
     Disconnected(u64, Result<(), String>),
 }
@@ -638,8 +675,8 @@ fn wire_actions(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>) {
             let id = {
                 let mut s = state.borrow_mut();
                 s.generation += 1;
-                s.board_request += 1;
                 s.account = None;
+                s.clear_board_cache();
                 s.projects.clear();
                 s.issues.clear();
                 s.statuses.clear();
@@ -698,6 +735,7 @@ fn handle_event(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>, eve
                         s.settings = settings;
                         s.statuses.clear();
                         s.issues.clear();
+                        s.clear_board_cache();
                         s.issue_scope = IssueScope::Mine;
                         s.active_sprint_only = false;
                     }
@@ -719,31 +757,25 @@ fn handle_event(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>, eve
                 }
             }
         }
-        Event::BoardLoaded(id, request, result) => {
-            if state.borrow().generation != id || state.borrow().board_request != request { return; }
-            set_busy(ui, state, false);
+        Event::BoardLoaded(id, key, result) => {
+            // Cache all completed requests, even when the user switched filters
+            // while Jira was responding. Only render the currently selected one.
+            if state.borrow().generation != id { return; }
+            state.borrow_mut().loading_boards.remove(&key);
             match result {
                 Ok(data) => {
-                    let (base_url, settings, issue_count) = {
+                    let active = {
                         let mut s = state.borrow_mut();
-                        s.issues = data.issues;
-                        s.statuses = data.statuses;
-                        let statuses = s.statuses.clone();
-                        s.settings.reconcile(&statuses);
-                        (
-                            s.account.as_ref().map(|a| a.base_url.clone()).unwrap_or_default(),
-                            s.settings.clone(),
-                            s.issues.len(),
-                        )
+                        s.cache_board(key.clone(), &data);
+                        s.board_key() == key
                     };
-                    if let Err(error) = preferences::save(&base_url, &settings) {
-                        show_error(ui, &format!("Could not save board settings: {error}"));
-                    }
-                    ui.manage_columns_button.set_sensitive(!state.borrow().statuses.is_empty());
-                    ui.status.set_text(&format!("{issue_count} issues"));
-                    render_board(ui, &state.borrow());
+                    if !active { return; }
+                    set_busy(ui, state, false);
+                    display_board(ui, state, data);
                 }
                 Err(error) => {
+                    if state.borrow().board_key() != key { return; }
+                    set_busy(ui, state, false);
                     show_empty(&ui.board_box, "Could not load project board", &error);
                     show_error(ui, &error);
                 }
@@ -772,7 +804,7 @@ fn start_refresh(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>, ac
     let id = {
         let mut s = state.borrow_mut();
         s.generation += 1;
-        s.board_request += 1;
+        s.clear_board_cache();
         s.generation
     };
     set_busy(ui, state, true);
@@ -790,15 +822,43 @@ fn start_refresh(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>, ac
     });
 }
 
-fn start_board_load(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>) {
-    let (id, request, account, projects, scope, active_sprint_only) = {
+fn display_board(ui: &Ui, state: &Rc<RefCell<State>>, data: BoardData) {
+    let changed_settings = {
         let mut s = state.borrow_mut();
-        s.board_request += 1;
-        (s.generation, s.board_request, s.account.clone(), s.settings.projects.clone(), s.issue_scope, s.active_sprint_only)
+        s.issues = data.issues;
+        s.statuses = data.statuses;
+        let previous = s.settings.clone();
+        let statuses = s.statuses.clone();
+        s.settings.reconcile(&statuses);
+        (s.settings != previous).then(|| (
+            s.account.as_ref().map(|a| a.base_url.clone()).unwrap_or_default(),
+            s.settings.clone(),
+        ))
+    };
+    if let Some((base_url, settings)) = changed_settings
+        && let Err(error) = preferences::save(&base_url, &settings)
+    {
+        show_error(ui, &format!("Could not save board settings: {error}"));
+    }
+    ui.manage_columns_button.set_sensitive(!state.borrow().statuses.is_empty());
+    render_board(ui, &state.borrow());
+}
+
+fn start_board_load(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>) {
+    let (id, key, account, cached, pending, cached_statuses) = {
+        let mut s = state.borrow_mut();
+        let key = s.board_key();
+        let cached = s.cached_board(&key);
+        let pending = s.loading_boards.contains(&key);
+        if cached.is_none() && !pending && !key.projects.is_empty() && s.account.is_some() {
+            s.loading_boards.insert(key.clone());
+        }
+        let statuses = s.status_cache.get(&key.projects).cloned();
+        (s.generation, key, s.account.clone(), cached, pending, statuses)
     };
     update_project_label(ui, state);
-    close_issue_details(ui);
-    if projects.is_empty() {
+    if key.projects.is_empty() {
+        close_issue_details(ui);
         set_busy(ui, state, false);
         ui.status.set_text("Select one or more projects");
         ui.manage_columns_button.set_sensitive(false);
@@ -806,18 +866,34 @@ fn start_board_load(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>)
         return;
     }
     let Some(account) = account else { return; };
-    ui.status.set_text("Loading project issues and workflow statuses…");
-    show_empty(&ui.board_box, "Loading board…", "Fetching real Jira workflow statuses");
+    if let Some(data) = cached {
+        // Switching back to a visited filter is instantaneous and does not
+        // invalidate the selection when its issue is still visible.
+        set_busy(ui, state, false);
+        display_board(ui, state, data);
+        return;
+    }
+    close_issue_details(ui);
+    ui.status.set_text("Loading project issues…");
+    show_empty(&ui.board_box, "Loading board…", "Fetching issues from Jira");
     set_busy(ui, state, true);
+    if pending {
+        // A request for this exact filter is already running; its response
+        // will populate the cache and render if this filter is still active.
+        return;
+    }
     let sender = sender.clone();
     thread::spawn(move || {
         let result = (|| -> anyhow::Result<BoardData> {
             let client = JiraClient::new(account)?;
-            let statuses = client.project_statuses(&projects)?;
-            let issues = client.project_issues(&projects, scope.jql(), active_sprint_only)?;
+            let statuses = match cached_statuses {
+                Some(statuses) => statuses,
+                None => client.project_statuses(&key.projects)?,
+            };
+            let issues = client.project_issues(&key.projects, key.scope.jql(), key.active_sprint_only)?;
             Ok(BoardData { statuses, issues })
         })().map_err(|err| err.to_string());
-        let _ = sender.send(Event::BoardLoaded(id, request, result));
+        let _ = sender.send(Event::BoardLoaded(id, key, result));
     });
 }
 
@@ -2144,6 +2220,7 @@ mod scope_tests {
             status_id: status_id.into(),
             kind: String::new(),
             priority: String::new(),
+            fix_versions: Vec::new(),
             assignee: String::new(),
             updated: String::new(),
             description: String::new(),
@@ -2268,6 +2345,38 @@ mod scope_tests {
     fn epic_accent_is_deterministic() {
         assert_eq!(epic_color_index("ART-123"), epic_color_index("ART-123"));
         assert!(epic_color_index("ART-123") < 8);
+    }
+
+    #[test]
+    fn caches_are_isolated_by_scope_sprint_and_projects() {
+        let mut state = State::default();
+        state.settings.projects = vec!["ART".into()];
+        let mine = state.board_key();
+        state.cache_board(mine.clone(), &BoardData {
+            statuses: Vec::new(),
+            issues: vec![issue("ART-1", "1", "Mine")],
+        });
+        assert_eq!(state.cached_board(&mine).unwrap().issues[0].key, "ART-1");
+
+        state.issue_scope = IssueScope::Unassigned;
+        let unassigned = state.board_key();
+        assert!(state.cached_board(&unassigned).is_none());
+        // The workflow statuses remain reusable across issue scopes.
+        assert!(state.status_cache.contains_key(&unassigned.projects));
+
+        state.active_sprint_only = true;
+        assert!(state.cached_board(&state.board_key()).is_none());
+        state.issue_scope = IssueScope::Mine;
+        assert!(state.cached_board(&state.board_key()).is_none());
+
+        state.active_sprint_only = false;
+        assert_eq!(state.cached_board(&state.board_key()).unwrap().issues.len(), 1);
+        state.settings.projects = vec!["AFB".into()];
+        assert!(state.cached_board(&state.board_key()).is_none());
+        state.clear_board_cache();
+        assert!(state.issue_cache.is_empty());
+        assert!(state.status_cache.is_empty());
+        assert!(state.loading_boards.is_empty());
     }
 
     #[test]
