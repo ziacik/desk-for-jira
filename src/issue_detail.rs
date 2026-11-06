@@ -130,11 +130,13 @@ pub fn render(
     metadata.add_css_class("detail-metadata");
     metadata.set_row_spacing(12);
     metadata.set_column_spacing(16);
+    let fix_versions = issue.fix_versions.join(", ");
     for (index, (title, value)) in [
         ("Status", issue.status.as_str()),
         ("Priority", issue.priority.as_str()),
         ("Assignee", issue.assignee.as_str()),
         ("Updated", issue.updated.as_str()),
+        ("Fix Version/s", fix_versions.as_str()),
     ].into_iter().enumerate() {
         let cell = gtk::Box::new(gtk::Orientation::Vertical, 5);
         cell.set_hexpand(true);
