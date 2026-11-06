@@ -879,8 +879,8 @@ fn parse_issue_transitions(response: &Value) -> Vec<IssueTransition> {
             let to_name = to.get("name").and_then(Value::as_str).unwrap_or(&name).to_owned();
             let to_id = to.get("id").and_then(Value::as_str).unwrap_or("").to_owned();
             let mut fields = Vec::new();
-            if let Some(fields) = transition.get("fields").and_then(Value::as_object) {
-                for (id, metadata) in fields {
+            if let Some(metadata_fields) = transition.get("fields").and_then(Value::as_object) {
+                for (id, metadata) in metadata_fields {
                     // Include every field on the transition screen. Workflow validators
                     // can require a field without marking it 'required' in this API.
                     let required = metadata.get("required").and_then(Value::as_bool) == Some(true)
@@ -930,7 +930,7 @@ fn parse_issue_transitions(response: &Value) -> Vec<IssueTransition> {
         }).collect()
 }
 
-fn transition_payload(transition_id: &str, mut fields: Map<String, Value>) -> Value {
+fn transition_payload(transition_id: &str, mut fields: serde_json::Map<String, Value>) -> Value {
     let comment = fields.remove("comment");
     let mut payload = json!({"transition": {"id": transition_id}, "fields": fields});
     // Jira handles comments through update operations, not the issue's fields.
@@ -1231,7 +1231,7 @@ mod transition_tests {
 
     #[test]
     fn transition_comment_is_sent_as_an_update_operation() {
-        let mut fields = Map::new();
+        let mut fields = serde_json::Map::new();
         fields.insert("comment".into(), json!("Done"));
         fields.insert("resolution".into(), json!({"id":"1"}));
         let body = transition_payload("31", fields);
