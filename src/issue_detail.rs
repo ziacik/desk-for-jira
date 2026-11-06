@@ -8,39 +8,7 @@ use crate::jira::{Attachment, Issue};
 
 pub type ImageSlots = HashMap<String, Vec<gtk::Box>>;
 
-pub fn render(
-    container: &gtk::Box,
-    issue: &Issue,
-    base_url: &str,
-    toast: &adw::ToastOverlay,
-) -> ImageSlots {
-    while let Some(child) = container.first_child() {
-        container.remove(&child);
-    }
-
-    let mut slots = ImageSlots::new();
-    let mut used_images = HashSet::new();
-
-    let header = gtk::Box::new(gtk::Orientation::Vertical, 10);
-    header.add_css_class("detail-hero");
-    let eyebrow = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-    let kind_label = if issue.kind.is_empty() { "Ticket" } else { &issue.kind };
-    let kind = gtk::Label::new(Some(kind_label));
-    kind.add_css_class("detail-kind");
-    kind.set_halign(gtk::Align::Start);
-    kind.set_xalign(0.5);
-    eyebrow.append(&kind);
-
-    // Only the spacer expands. A badge must never stretch across the inspector.
-    let spacer = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-    spacer.set_hexpand(true);
-    eyebrow.append(&spacer);
-
-    // Branch names are useful occasionally, so a small direct copy action is enough.
-    let branch_name = suggested_branch_name(&issue.key, &issue.summary);
-    let copy_branch = gtk::Button::new();
-    // Draw the actual Git branching graph, rather than an ambiguous copy glyph.
-    // Bundled in code so the icon works even when the system icon theme lacks one.
+pub(crate) fn git_branch_icon() -> gtk::DrawingArea {
     let branch_icon = gtk::DrawingArea::new();
     branch_icon.set_content_width(14);
     branch_icon.set_content_height(14);
@@ -70,18 +38,31 @@ pub fn render(
             cr.fill().expect("Git branch icon node");
         }
     });
-    copy_branch.set_child(Some(&branch_icon));
-    copy_branch.add_css_class("flat");
-    copy_branch.add_css_class("detail-branch-action");
-    copy_branch.set_tooltip_text(Some("Copy suggested Git branch name"));
-    let toast = toast.clone();
-    copy_branch.connect_clicked(move |_| {
-        if let Some(display) = gtk::gdk::Display::default() {
-            display.clipboard().set_text(&branch_name);
-            toast.add_toast(adw::Toast::new("Branch name copied"));
-        }
-    });
-    eyebrow.append(&copy_branch);
+    branch_icon
+}
+
+pub fn render(
+    container: &gtk::Box,
+    issue: &Issue,
+    base_url: &str,
+) -> ImageSlots {
+    while let Some(child) = container.first_child() {
+        container.remove(&child);
+    }
+
+    let mut slots = ImageSlots::new();
+    let mut used_images = HashSet::new();
+
+    let header = gtk::Box::new(gtk::Orientation::Vertical, 10);
+    header.add_css_class("detail-hero");
+    let eyebrow = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let kind_label = if issue.kind.is_empty() { "Ticket" } else { &issue.kind };
+    let kind = gtk::Label::new(Some(kind_label));
+    kind.add_css_class("detail-kind");
+    kind.set_halign(gtk::Align::Start);
+    kind.set_xalign(0.5);
+    eyebrow.append(&kind);
+
     header.append(&eyebrow);
 
     let summary = gtk::Label::new(Some(&issue.summary));
@@ -189,7 +170,7 @@ pub fn render(
     slots
 }
 
-fn suggested_branch_name(key: &str, summary: &str) -> String {
+pub(crate) fn suggested_branch_name(key: &str, summary: &str) -> String {
     // Jira's default: ISSUE-123-summary-in-lowercase. Keep branch names
     // readable and safe for Git refs, including issues titled in Slovak.
     const MAX_LENGTH: usize = 100;
