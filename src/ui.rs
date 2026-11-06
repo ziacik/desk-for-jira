@@ -2557,6 +2557,31 @@ mod scope_tests {
     }
 
     #[test]
+    fn pinned_issues_ignore_board_search_scope_and_project_selection() {
+        let mut settings = board_settings();
+        settings.pinned_issues = vec!["AFB-2".into(), "ART-1".into()];
+        let board_issues = vec![issue("ART-1", "1", "Mine")];
+        let mut off_board = issue("AFB-2", "2", "Assigned to someone else");
+        off_board.project_key = "AFB".into();
+        let loaded_pins = vec![off_board];
+        assert_eq!(
+            pinned_issue_refs(&settings, &board_issues, &loaded_pins)
+                .iter().map(|issue| issue.key.as_str()).collect::<Vec<_>>(),
+            vec!["AFB-2", "ART-1"]
+        );
+        assert!(visible_board_groups(&settings, &board_issues, "no match").is_empty());
+    }
+
+    #[test]
+    fn pinned_epic_does_not_become_a_ticket_card() {
+        let mut settings = board_settings();
+        settings.pinned_issues = vec!["ART-1".into()];
+        let mut epic = issue("ART-1", "1", "Parent");
+        epic.is_epic = true;
+        assert!(pinned_issue_refs(&settings, &[], &[epic]).is_empty());
+    }
+
+    #[test]
     fn board_scope_uses_server_side_jql() {
         assert_eq!(IssueScope::Mine.jql(), Some("assignee = currentUser()"));
         assert_eq!(IssueScope::Unassigned.jql(), Some("assignee IS EMPTY"));
