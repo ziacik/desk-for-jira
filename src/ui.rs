@@ -327,7 +327,8 @@ fn build_ui(app: &adw::Application) {
     pinned_box.set_valign(gtk::Align::Center);
     let pinned_scroll = gtk::ScrolledWindow::new();
     pinned_scroll.add_css_class("pinned-scroll");
-    pinned_scroll.set_overlay_scrolling(false);
+    // Avoid a permanent thick scrollbar under a single row of pinned issues.
+    pinned_scroll.set_overlay_scrolling(true);
     pinned_scroll.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Never);
     // This is a single row of short items, not a second vertically growing board.
     pinned_scroll.set_propagate_natural_height(false);
