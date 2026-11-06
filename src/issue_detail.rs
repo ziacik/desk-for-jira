@@ -6,7 +6,7 @@ use serde_json::Value;
 
 use crate::jira::{Attachment, Issue};
 
-pub type ImageSlots = HashMap<String, Vec<gtk::Box>>;
+pub type ImageSlots = HashMap<String, Vec<(gtk::Box, String)>>;
 
 /// Both header actions use exactly the same symbolic drawing system:
 /// size, stroke, color and alignment follow the current GTK theme.
@@ -276,7 +276,7 @@ pub fn set_image(slots: &ImageSlots, id: &str, bytes: Option<&[u8]>) {
     let texture = bytes.and_then(|data| {
         gtk::gdk::Texture::from_bytes(&glib::Bytes::from(data)).ok()
     });
-    for container in containers {
+    for (container, filename) in containers {
         while let Some(child) = container.first_child() {
             container.remove(&child);
         }
@@ -286,11 +286,76 @@ pub fn set_image(slots: &ImageSlots, id: &str, bytes: Option<&[u8]>) {
             picture.set_can_shrink(true);
             picture.set_hexpand(true);
             picture.set_height_request(220);
-            container.append(&picture);
+
+            // Keep the preview keyboard-accessible and reuse the already loaded
+            // texture for the full-resolution viewer (no second network request).
+            let button = gtk::Button::new();
+            button.add_css_class("issue-image-preview");
+            button.set_hexpand(true);
+            button.set_cursor_from_name(Some("zoom-in"));
+            button.set_tooltip_text(Some("View full-size image"));
+            button.set_child(Some(&picture));
+            let texture = texture.clone();
+            let filename = filename.clone();
+            button.connect_clicked(move |button| {
+                show_full_size_image(button, &texture, &filename);
+            });
+            container.append(&button);
         } else {
             add_text(container, "Preview unavailable — open in Jira to view.", "detail-empty");
         }
     }
+}
+
+fn show_full_size_image(button: &gtk::Button, texture: &gtk::gdk::Texture, filename: &str) {
+    let Some(parent) = button.root().and_then(|root| root.downcast::<gtk::Window>().ok())
+    else {
+        return;
+    };
+
+    let viewer = gtk::Window::builder()
+        .title(filename)
+        .transient_for(&parent)
+        .modal(true)
+        .default_width(960)
+        .default_height(700)
+        .build();
+
+    let header = gtk::HeaderBar::new();
+    header.set_show_title_buttons(true);
+    let dimensions = gtk::Label::new(Some(&format!("{} × {} px · 100%", texture.width(), texture.height())));
+    dimensions.add_css_class("dim-label");
+    header.pack_start(&dimensions);
+    viewer.set_titlebar(Some(&header));
+
+    // Never shrink the original in this viewer; scrolling exposes every pixel.
+    // ScrolledWindow caps the viewport instead of letting giant images expand
+    // the dialog beyond the screen.
+    let scroller = gtk::ScrolledWindow::new();
+    scroller.set_hexpand(true);
+    scroller.set_vexpand(true);
+    scroller.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Automatic);
+    let picture = gtk::Picture::for_paintable(texture);
+    picture.set_can_shrink(false);
+    picture.set_halign(gtk::Align::Center);
+    picture.set_valign(gtk::Align::Center);
+    scroller.set_child(Some(&picture));
+    viewer.set_child(Some(&scroller));
+
+    let escape = gtk::EventControllerKey::new();
+    let viewer_weak = viewer.downgrade();
+    escape.connect_key_pressed(move |_, key, _, _| {
+        if key == gtk::gdk::Key::Escape {
+            if let Some(viewer) = viewer_weak.upgrade() {
+                viewer.close();
+            }
+            glib::Propagation::Stop
+        } else {
+            glib::Propagation::Proceed
+        }
+    });
+    viewer.add_controller(escape);
+    viewer.present();
 }
 
 fn add_text(container: &gtk::Box, text: &str, class: &str) {
@@ -501,7 +566,7 @@ fn append_image(parent: &gtk::Box, attachment: &Attachment, slots: &mut ImageSlo
         add_text(&slot, "Preview unavailable — open in Jira to view.", "detail-empty");
     } else {
         add_text(&slot, "Loading image…", "detail-empty");
-        slots.entry(attachment.id.clone()).or_default().push(slot.clone());
+        slots.entry(attachment.id.clone()).or_default().push((slot.clone(), attachment.filename.clone()));
     }
     block.append(&slot);
     let caption = gtk::Label::new(Some(&attachment.filename));
