@@ -107,14 +107,29 @@ pub struct TransitionField {
     pub name: String,
     pub schema_type: String,
     pub item_type: String,
+    pub custom_type: String,
     pub choices: Vec<TransitionChoice>,
 }
 
 impl TransitionField {
-    pub fn is_supported(&self) -> bool {
-        !self.choices.is_empty()
-            || matches!(self.schema_type.as_str(), "string" | "number" | "date")
-            || (self.schema_type == "array" && self.item_type == "string")
+    pub fn is_multiline(&self) -> bool {
+        matches!(self.id.as_str(), "description" | "environment")
+            || self.custom_type.ends_with(":textarea")
+    }
+
+    pub fn uses_structured_input(&self) -> bool {
+        self.choices.is_empty()
+            && !matches!(
+                self.schema_type.as_str(),
+                "string" | "number" | "date" | "datetime" | "boolean" | "user"
+                    | "option" | "resolution" | "priority" | "version"
+                    | "component" | "issuetype" | "project"
+            )
+            && !(self.schema_type == "array"
+                && matches!(
+                    self.item_type.as_str(),
+                    "string" | "option" | "version" | "component"
+                ))
     }
 
     pub fn text_value(&self, raw: &str, cloud: bool) -> Result<Value> {
@@ -136,21 +151,41 @@ impl TransitionField {
                 );
                 Ok(json!(value))
             }
-            "string" if cloud && matches!(self.id.as_str(), "description" | "environment") => {
-                Ok(json!({
-                    "type": "doc",
-                    "version": 1,
-                    "content": [{"type": "paragraph", "content": [{"type": "text", "text": value}]}]
-                }))
-            }
+            "datetime" => Ok(json!(value)),
+            "boolean" => match value.to_ascii_lowercase().as_str() {
+                "true" => Ok(json!(true)),
+                "false" => Ok(json!(false)),
+                _ => bail!("{} must be true or false", self.name),
+            },
+            "string" if cloud && self.is_multiline() => Ok(json!({
+                "type": "doc",
+                "version": 1,
+                "content": [{"type": "paragraph", "content": [{"type": "text", "text": value}]}]
+            })),
             "string" => Ok(json!(value)),
+            "user" if cloud => Ok(json!({"accountId": value})),
+            "user" => Ok(json!({"name": value})),
+            "option" | "resolution" | "priority" | "version" | "component"
+            | "issuetype" | "project" => Ok(json!({"id": value})),
             "array" if self.item_type == "string" => {
                 let items: Vec<_> = value.split(',').map(str::trim)
                     .filter(|part| !part.is_empty()).collect();
                 ensure!(!items.is_empty(), "{} is required", self.name);
                 Ok(json!(items))
             }
-            _ => bail!("{} requires a Jira field editor", self.name),
+            "array" if matches!(self.item_type.as_str(), "option" | "version" | "component") => {
+                let items: Vec<_> = value.split(',').map(str::trim)
+                    .filter(|part| !part.is_empty())
+                    .map(|id| json!({"id": id})).collect();
+                ensure!(!items.is_empty(), "{} is required", self.name);
+                Ok(json!(items))
+            }
+            _ => {
+                let parsed: Value = serde_json::from_str(value)
+                    .with_context(|| format!("{} requires a valid Jira JSON value", self.name))?;
+                ensure!(!parsed.is_null(), "{} is required", self.name);
+                Ok(parsed)
+            }
         }
     }
 }
@@ -843,6 +878,8 @@ fn parse_issue_transitions(response: &Value) -> Vec<IssueTransition> {
                         .and_then(Value::as_str).unwrap_or("").to_owned();
                     let item_type = schema.and_then(|s| s.get("items"))
                         .and_then(Value::as_str).unwrap_or("").to_owned();
+                    let custom_type = schema.and_then(|s| s.get("custom"))
+                        .and_then(Value::as_str).unwrap_or("").to_owned();
                     let choices = metadata.get("allowedValues").and_then(Value::as_array)
                         .into_iter().flatten()
                         .filter_map(|value| {
@@ -869,6 +906,7 @@ fn parse_issue_transitions(response: &Value) -> Vec<IssueTransition> {
                             .unwrap_or(id).to_owned(),
                         schema_type,
                         item_type,
+                        custom_type,
                         choices,
                     });
                 }
@@ -1144,7 +1182,8 @@ mod transition_tests {
     fn validates_and_serializes_transition_inputs() {
         let text = TransitionField {
             id: "description".into(), name: "Description".into(),
-            schema_type: "string".into(), item_type: String::new(), choices: vec![],
+            schema_type: "string".into(), item_type: String::new(),
+            custom_type: String::new(), choices: vec![],
         };
         assert_eq!(text.text_value("Hello", false).unwrap(), json!("Hello"));
         assert_eq!(text.text_value("Hello", true).unwrap()["type"], "doc");
@@ -1165,5 +1204,60 @@ mod transition_tests {
         let error = jira_error_message(r#"{"errors":{"resolution":"Required","customfield_3":"Invalid"}}"#);
         assert!(error.contains("resolution: Required"));
         assert!(error.contains("customfield_3: Invalid"));
+    }
+}
+
+
+#[cfg(test)]
+mod advanced_transition_tests {
+    use super::*;
+
+    fn field(schema_type: &str, item_type: &str) -> TransitionField {
+        TransitionField {
+            id: "customfield_123".into(), name: "Example".into(),
+            schema_type: schema_type.into(), item_type: item_type.into(),
+            custom_type: String::new(), choices: vec![],
+        }
+    }
+
+    #[test]
+    fn supports_jira_object_and_multiselect_fields() {
+        assert_eq!(
+            field("resolution", "").text_value("10000", true).unwrap(),
+            json!({"id":"10000"})
+        );
+        assert_eq!(
+            field("user", "").text_value("user-123", true).unwrap(),
+            json!({"accountId":"user-123"})
+        );
+        assert_eq!(
+            field("user", "").text_value("john", false).unwrap(),
+            json!({"name":"john"})
+        );
+        assert_eq!(
+            field("array", "option").text_value("10, 20", true).unwrap(),
+            json!([{"id":"10"}, {"id":"20"}])
+        );
+    }
+
+    #[test]
+    fn complex_custom_field_accepts_valid_json() {
+        let field = field("any", "");
+        assert!(field.uses_structured_input());
+        assert_eq!(
+            field.text_value(r#"{"id":"123","child":{"id":"456"}}"#, true).unwrap(),
+            json!({"id":"123","child":{"id":"456"}})
+        );
+        assert!(field.text_value("{bad", true).is_err());
+        assert!(field.text_value("null", true).is_err());
+    }
+
+    #[test]
+    fn custom_textarea_uses_cloud_adf() {
+        let mut textarea = field("string", "");
+        textarea.custom_type = "com.atlassian.jira.plugin.system.customfieldtypes:textarea".into();
+        assert!(textarea.is_multiline());
+        assert_eq!(textarea.text_value("A note", true).unwrap()["type"], "doc");
+        assert_eq!(textarea.text_value("A note", false).unwrap(), json!("A note"));
     }
 }
