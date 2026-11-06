@@ -41,7 +41,9 @@ struct Ui {
     board_box: gtk::Box,
     pinned_section: gtk::Box,
     pinned_box: gtk::Box,
+    pinned_scroll: gtk::ScrolledWindow,
     pinned_count: gtk::Label,
+    pinned_hint: gtk::Label,
     detail_box: gtk::Box,
     detail_actions: gtk::Box,
     detail_request: Rc<Cell<u64>>,
@@ -305,6 +307,7 @@ fn build_ui(app: &adw::Application) {
     filters_row.append(&search);
     center.append(&filters_row);
 
+    // A quiet, single-line empty state; expand only when there are actual pins.
     let pinned_section = gtk::Box::new(gtk::Orientation::Vertical, 6);
     pinned_section.add_css_class("pinned-strip");
     pinned_section.set_visible(false);
@@ -317,9 +320,16 @@ fn build_ui(app: &adw::Application) {
     pinned_heading.append(&pinned_title);
     let pinned_count = gtk::Label::new(None);
     pinned_count.add_css_class("pinned-count");
+    pinned_count.set_visible(false);
     pinned_heading.append(&pinned_count);
+    let pinned_hint = gtk::Label::new(Some("Pin a ticket to keep it handy"));
+    pinned_hint.add_css_class("pinned-hint");
+    pinned_hint.set_xalign(0.0);
+    pinned_hint.set_ellipsize(gtk::pango::EllipsizeMode::End);
+    pinned_hint.set_hexpand(true);
+    pinned_heading.append(&pinned_hint);
     pinned_section.append(&pinned_heading);
-    let pinned_box = gtk::Box::new(gtk::Orientation::Horizontal, 10);
+    let pinned_box = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     pinned_box.set_halign(gtk::Align::Start);
     let pinned_scroll = gtk::ScrolledWindow::new();
     pinned_scroll.add_css_class("pinned-scroll");
@@ -327,6 +337,7 @@ fn build_ui(app: &adw::Application) {
     pinned_scroll.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Never);
     pinned_scroll.set_propagate_natural_height(true);
     pinned_scroll.set_child(Some(&pinned_box));
+    pinned_scroll.set_visible(false);
     pinned_section.append(&pinned_scroll);
     center.append(&pinned_section);
 
@@ -579,7 +590,7 @@ fn build_ui(app: &adw::Application) {
         project_filter: Rc::new(RefCell::new(None)),
         connect_button, disconnect_button, refresh_button,
         manage_projects_button, manage_columns_button, search, center_title,
-        board_box, pinned_section, pinned_box, pinned_count,
+        board_box, pinned_section, pinned_box, pinned_scroll, pinned_count, pinned_hint,
         detail_box, detail_actions, detail_panel, detail_heading, open_in_jira, copy_branch, pin_detail, inner_split,
         state: state.clone(),
         detail_request: Rc::new(Cell::new(0)),
@@ -2262,18 +2273,22 @@ fn render_pinned_section(ui: &Ui, state: &State) {
     clear_box(&ui.pinned_box);
     ui.pinned_section.set_visible(true);
     let pinned = pinned_issue_refs(&state.settings, &state.issues, &state.pinned_issues);
+    let has_pins = !pinned.is_empty();
+    ui.pinned_section.set_css_classes(&["pinned-strip"]);
+    if has_pins {
+        ui.pinned_section.add_css_class("has-pins");
+    }
     ui.pinned_count.set_text(&pinned.len().to_string());
-    if pinned.is_empty() {
-        let empty = gtk::Label::new(Some("Use the pin icon on a ticket to keep it here."));
-        empty.add_css_class("pinned-empty");
-        empty.set_xalign(0.0);
-        ui.pinned_box.append(&empty);
+    ui.pinned_count.set_visible(has_pins);
+    ui.pinned_hint.set_visible(!has_pins);
+    ui.pinned_scroll.set_visible(has_pins);
+    if !has_pins {
         return;
     }
     let base_url = state.account.as_ref().map(|account| account.base_url.as_str()).unwrap_or("");
     for issue in pinned {
-        let tile = issue_button(issue, ui, base_url, state.account.as_ref(), state.generation);
-        tile.set_width_request(272);
+        let tile = issue_button(issue, ui, base_url, state.account.as_ref(), state.generation, true);
+        tile.set_width_request(254);
         tile.set_hexpand(false);
         ui.pinned_box.append(&tile);
     }
@@ -2360,7 +2375,7 @@ fn render_board(ui: &Ui, state: &State) {
 
         let item_box = gtk::Box::new(gtk::Orientation::Vertical, 7);
         for issue in issues {
-            item_box.append(&issue_button(issue, ui, url, state.account.as_ref(), state.generation));
+            item_box.append(&issue_button(issue, ui, url, state.account.as_ref(), state.generation, false));
         }
         let scroll = gtk::ScrolledWindow::new();
         // Reserve space for the scrollbar instead of painting it across cards.
@@ -2445,9 +2460,12 @@ fn epic_color_index(key: &str) -> u32 {
     }) % 8
 }
 
-fn issue_button(issue: &Issue, ui: &Ui, base_url: &str, account: Option<&Credentials>, generation: u64) -> gtk::Overlay {
+fn issue_button(issue: &Issue, ui: &Ui, base_url: &str, account: Option<&Credentials>, generation: u64, compact: bool) -> gtk::Overlay {
     let button = gtk::Button::new();
     button.add_css_class("issue-card");
+    if compact {
+        button.add_css_class("compact-card");
+    }
     button.set_hexpand(true);
     button.set_vexpand(false);
     button.set_tooltip_text(Some(&format!("{} · {}", issue.key, issue.summary)));
@@ -2457,12 +2475,13 @@ fn issue_button(issue: &Issue, ui: &Ui, base_url: &str, account: Option<&Credent
         button.add_css_class("has-epic");
         button.add_css_class(&format!("epic-color-{}", epic_color_index(&epic.key)));
     }
-    let content = gtk::Box::new(gtk::Orientation::Vertical, 7);
+    let content = gtk::Box::new(gtk::Orientation::Vertical, if compact { 4 } else { 7 });
     content.set_hexpand(true);
-    content.set_margin_top(12);
-    content.set_margin_bottom(12);
-    content.set_margin_start(12);
-    content.set_margin_end(12);
+    let margin = if compact { 9 } else { 12 };
+    content.set_margin_top(margin);
+    content.set_margin_bottom(margin);
+    content.set_margin_start(margin);
+    content.set_margin_end(margin);
 
     let meta = gtk::Box::new(gtk::Orientation::Horizontal, 7);
     // Reserve room for the pin action overlay, even with a long issue type.
@@ -2481,7 +2500,8 @@ fn issue_button(issue: &Issue, ui: &Ui, base_url: &str, account: Option<&Credent
     type_mark.add_css_class("ticket-type-mark");
     type_mark.add_css_class(kind_class);
     type_mark.set_valign(gtk::Align::Center);
-    type_mark.set_size_request(24, 24);
+    let mark_size = if compact { 20 } else { 24 };
+    type_mark.set_size_request(mark_size, mark_size);
     let kind_image = gtk::Image::from_icon_name(kind_icon);
     kind_image.set_valign(gtk::Align::Center);
     kind_image.set_halign(gtk::Align::Center);
@@ -2492,13 +2512,13 @@ fn issue_button(issue: &Issue, ui: &Ui, base_url: &str, account: Option<&Credent
     key.set_hexpand(true);
     key.set_xalign(0.0);
     meta.append(&key);
-    if !issue.kind.is_empty() {
+    if !compact && !issue.kind.is_empty() {
         let kind = gtk::Label::new(Some(&issue.kind));
         kind.add_css_class("ticket-kind");
         meta.append(&kind);
     }
     let priority = issue.priority.to_ascii_lowercase();
-    if matches!(priority.as_str(), "highest" | "high" | "critical" | "blocker") {
+    if !compact && matches!(priority.as_str(), "highest" | "high" | "critical" | "blocker") {
         let badge = gtk::Label::new(Some(&issue.priority));
         badge.add_css_class("ticket-priority");
         meta.append(&badge);
@@ -2508,13 +2528,13 @@ fn issue_button(issue: &Issue, ui: &Ui, base_url: &str, account: Option<&Credent
     summary.set_xalign(0.0);
     summary.set_wrap(true);
     summary.set_wrap_mode(gtk::pango::WrapMode::WordChar);
-    summary.set_max_width_chars(38);
-    summary.set_lines(4);
+    summary.set_max_width_chars(if compact { 30 } else { 38 });
+    summary.set_lines(if compact { 2 } else { 4 });
     summary.set_ellipsize(gtk::pango::EllipsizeMode::End);
     summary.add_css_class("ticket-summary");
     content.append(&summary);
 
-    if let Some(epic) = &issue.epic {
+    if !compact && let Some(epic) = &issue.epic {
         let epic_row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
         epic_row.add_css_class("ticket-epic");
         let icon = gtk::Image::from_icon_name("view-grid-symbolic");
@@ -2600,6 +2620,9 @@ fn issue_button(issue: &Issue, ui: &Ui, base_url: &str, account: Option<&Credent
     });
     let tile = gtk::Overlay::new();
     tile.add_css_class("issue-tile");
+    if compact {
+        tile.add_css_class("compact-tile");
+    }
     tile.set_hexpand(true);
     tile.set_child(Some(&button));
     let pin = gtk::Button::from_icon_name("view-pin-symbolic");
