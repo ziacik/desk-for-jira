@@ -239,7 +239,8 @@ fn control_value(field: &TransitionField, control: &FieldControl, cloud: bool) -
         }
         FieldControl::Multiple(checks) => {
             let selected: Vec<Value> = checks.iter().zip(&field.choices)
-                .filter_map(|(check, choice)| check.is_active().then(|| choice.value.clone()))
+                .filter(|(check, _)| check.is_active())
+                .map(|(_, choice)| choice.value.clone())
                 .collect();
             if selected.is_empty() {
                 return Err(format!("{} is required", field.name));
