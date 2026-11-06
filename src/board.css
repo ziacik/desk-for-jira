@@ -521,3 +521,53 @@ label link:hover { color: #618bff; }
 button:checked .unassigned-question {
   color: #3568d6;
 }
+
+/* Pinned issues stay visible above the scrollable workflow columns. */
+.pinned-strip {
+  background-color: alpha(@window_fg_color, 0.027);
+  border: 1px solid alpha(@window_fg_color, 0.08);
+  border-radius: 14px;
+  padding: 11px 12px 9px;
+}
+.pinned-heading {
+  padding: 0 2px;
+  color: alpha(@window_fg_color, 0.75);
+}
+.pinned-heading image { -gtk-icon-size: 15px; }
+.pinned-title {
+  color: @window_fg_color;
+  font-size: 0.96em;
+  font-weight: 800;
+}
+.pinned-count {
+  color: alpha(@window_fg_color, 0.66);
+  font-size: 0.84em;
+  font-weight: 650;
+}
+.pinned-scroll { padding-bottom: 4px; }
+.pinned-empty {
+  padding: 8px 3px 10px;
+  color: alpha(@window_fg_color, 0.58);
+  font-size: 0.9em;
+}
+button.ticket-pin {
+  min-width: 25px;
+  min-height: 25px;
+  padding: 4px;
+  color: alpha(@window_fg_color, 0.56);
+  background-color: @card_bg_color;
+  border: 1px solid alpha(@window_fg_color, 0.10);
+  border-radius: 8px;
+}
+button.ticket-pin image { -gtk-icon-size: 14px; }
+button.ticket-pin:hover {
+  color: @window_fg_color;
+  background-color: @card_bg_color;
+  border-color: alpha(#4679eb, 0.45);
+}
+button.ticket-pin.pin-active,
+button.detail-header-action.pin-active {
+  color: #4679eb;
+  background-color: alpha(#4679eb, 0.13);
+  border-color: alpha(#4679eb, 0.32);
+}
