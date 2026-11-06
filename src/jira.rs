@@ -260,13 +260,12 @@ impl JiraClient {
             let path = format!("/rest/api/{version}/issue/{key}");
             if let Ok(issue) = self.read_json(self.http.get(self.url(&path))
                 .query(&[("fields", list)]))
+                && let Some(values) = issue.get("fields").and_then(Value::as_object)
             {
-                if let Some(values) = issue.get("fields").and_then(Value::as_object) {
-                    for transition in &mut transitions {
-                        transition.required_fields.retain(|field| {
-                            !values.get(&field.id).is_some_and(field_has_value)
-                        });
-                    }
+                for transition in &mut transitions {
+                    transition.required_fields.retain(|field| {
+                        !values.get(&field.id).is_some_and(field_has_value)
+                    });
                 }
             }
         }
