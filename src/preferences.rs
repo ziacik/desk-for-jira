@@ -576,6 +576,28 @@ mod tests {
     }
 
     #[test]
+    fn pinning_keeps_order_and_survives_serialization() {
+        let mut board = BoardSettings::default();
+        assert!(board.toggle_pinned("ART-42"));
+        assert!(board.toggle_pinned("AFB-2"));
+        assert_eq!(board.pinned_issues, vec!["ART-42", "AFB-2"]);
+        assert!(!board.toggle_pinned("ART-42"));
+        assert_eq!(board.pinned_issues, vec!["AFB-2"]);
+        let restored: BoardSettings = serde_json::from_slice(
+            &serde_json::to_vec(&board).unwrap()
+        ).unwrap();
+        assert_eq!(restored.pinned_issues, vec!["AFB-2"]);
+    }
+
+    #[test]
+    fn legacy_board_settings_have_no_pins() {
+        let board: BoardSettings = serde_json::from_value(serde_json::json!({
+            "projects": ["ART"], "columns": []
+        })).unwrap();
+        assert!(board.pinned_issues.is_empty());
+    }
+
+    #[test]
     fn rename_and_reset_preserve_projects_but_restore_default_grouping() {
         let art = status("ART", "1", "Open");
         let afb = status("AFB", "2", "Open");
