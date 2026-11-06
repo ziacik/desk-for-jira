@@ -8,11 +8,19 @@ use crate::jira::{Attachment, Issue};
 
 pub type ImageSlots = HashMap<String, Vec<gtk::Box>>;
 
-pub(crate) fn git_branch_icon() -> gtk::DrawingArea {
-    let branch_icon = gtk::DrawingArea::new();
-    branch_icon.set_content_width(14);
-    branch_icon.set_content_height(14);
-    branch_icon.set_draw_func(|area, cr, width, height| {
+/// Both header actions use exactly the same symbolic drawing system:
+/// size, stroke, color and alignment follow the current GTK theme.
+#[derive(Clone, Copy)]
+pub(crate) enum HeaderActionIcon {
+    Branch,
+    ExternalLink,
+}
+
+pub(crate) fn header_action_icon(kind: HeaderActionIcon) -> gtk::DrawingArea {
+    let icon = gtk::DrawingArea::new();
+    icon.set_content_width(16);
+    icon.set_content_height(16);
+    icon.set_draw_func(move |area, cr, width, height| {
         let size = f64::from(width.min(height));
         let offset_x = (f64::from(width) - size) / 2.0;
         let offset_y = (f64::from(height) - size) / 2.0;
@@ -25,20 +33,43 @@ pub(crate) fn git_branch_icon() -> gtk::DrawingArea {
             f64::from(color.blue()),
             f64::from(color.alpha()),
         );
-        cr.set_line_width(1.7);
+        cr.set_line_width(1.8);
         cr.set_line_cap(gtk::cairo::LineCap::Round);
         cr.set_line_join(gtk::cairo::LineJoin::Round);
-        cr.move_to(5.0, 5.0);
-        cr.line_to(5.0, 15.0);
-        cr.move_to(5.0, 11.0);
-        cr.curve_to(10.0, 11.0, 15.0, 11.0, 15.0, 5.0);
-        cr.stroke().expect("Git branch icon stroke");
-        for (x, y) in [(5.0, 4.0), (5.0, 16.0), (15.0, 4.0)] {
-            cr.arc(x, y, 2.0, 0.0, std::f64::consts::TAU);
-            cr.fill().expect("Git branch icon node");
+
+        match kind {
+            HeaderActionIcon::Branch => {
+                cr.move_to(5.0, 5.0);
+                cr.line_to(5.0, 15.0);
+                cr.move_to(5.0, 11.0);
+                cr.curve_to(10.0, 11.0, 15.0, 11.0, 15.0, 5.0);
+                cr.stroke().expect("Branch icon stroke");
+                for (x, y) in [(5.0, 4.0), (5.0, 16.0), (15.0, 4.0)] {
+                    cr.arc(x, y, 1.8, 0.0, std::f64::consts::TAU);
+                    cr.fill().expect("Branch icon node");
+                }
+            }
+            HeaderActionIcon::ExternalLink => {
+                // Conventional external-link glyph: a square with an arrow
+                // pointing out through its open upper-right corner.
+                cr.move_to(8.0, 5.0);
+                cr.line_to(5.5, 5.0);
+                cr.curve_to(4.7, 5.0, 4.0, 5.7, 4.0, 6.5);
+                cr.line_to(4.0, 14.5);
+                cr.curve_to(4.0, 15.3, 4.7, 16.0, 5.5, 16.0);
+                cr.line_to(13.5, 16.0);
+                cr.curve_to(14.3, 16.0, 15.0, 15.3, 15.0, 14.5);
+                cr.line_to(15.0, 12.0);
+                cr.move_to(10.0, 4.0);
+                cr.line_to(16.0, 4.0);
+                cr.line_to(16.0, 10.0);
+                cr.move_to(16.0, 4.0);
+                cr.line_to(8.0, 12.0);
+                cr.stroke().expect("External link icon stroke");
+            }
         }
     });
-    branch_icon
+    icon
 }
 
 pub fn render(
