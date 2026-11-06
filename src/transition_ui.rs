@@ -222,6 +222,7 @@ fn open_transition_form(
     root.append(&actions);
     let progress_apply = progress.clone();
     let apply_button = apply.clone();
+    let error_apply = error.clone();
     apply.connect_clicked(move |_| {
         let mut values = Map::new();
         for (field, control) in &controls {
@@ -229,8 +230,8 @@ fn open_transition_form(
             match result {
                 Ok(value) => { values.insert(field.id.clone(), value); }
                 Err(message) => {
-                    error.set_text(&message);
-                    error.set_visible(true);
+                    error_apply.set_text(&message);
+                    error_apply.set_visible(true);
                     return;
                 }
             }
