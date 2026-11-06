@@ -400,6 +400,13 @@ button.sidebar-action {
   border: 1px solid alpha(@window_fg_color, 0.06);
   font-weight: 750;
 }
+/* Full-column tone stays much softer than the matching header.
+   These colors are shared by the column body and header, for both themes. */
+.board-column.column-tone-0 { background-color: alpha(#3299e6, 0.075); }
+.board-column.column-tone-1 { background-color: alpha(#8b72df, 0.075); }
+.board-column.column-tone-2 { background-color: alpha(#d5a048, 0.080); }
+.board-column.column-tone-3 { background-color: alpha(#41ad86, 0.070); }
+.board-column.column-tone-4 { background-color: alpha(#bc76a7, 0.075); }
 .board-column.column-tone-0 .board-column-header { background-color: alpha(#3299e6, 0.16); }
 .board-column.column-tone-1 .board-column-header { background-color: alpha(#8b72df, 0.16); }
 .board-column.column-tone-2 .board-column-header { background-color: alpha(#d5a048, 0.17); }
