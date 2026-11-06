@@ -18,7 +18,6 @@ use crate::{
 };
 
 const COLUMN_WIDTH: i32 = 302;
-const DETAIL_WIDTH: i32 = 470;
 const COLLAPSED_COLUMN_WIDTH: i32 = 116;
 
 #[derive(Clone)]
@@ -469,7 +468,7 @@ fn build_ui(app: &adw::Application) {
         let layout = layout.clone();
         let layout_save_timer = layout_save_timer.clone();
         move |paned| {
-            if !sidebar.upgrade().is_some_and(|sidebar| sidebar.is_visible()) {
+            if sidebar.upgrade().is_none_or(|sidebar| !sidebar.is_visible()) {
                 return;
             }
             let width = paned.position();
@@ -504,7 +503,7 @@ fn build_ui(app: &adw::Application) {
         let layout = layout.clone();
         let layout_save_timer = layout_save_timer.clone();
         move |paned| {
-            if !detail_panel.upgrade().is_some_and(|panel| panel.is_visible())
+            if detail_panel.upgrade().is_none_or(|panel| !panel.is_visible())
                 || paned.width() < 650
             {
                 return;
