@@ -12,7 +12,8 @@ use gtk::glib;
 
 use crate::{
     issue_detail,
-    jira::{AuthMode, Credentials, Issue, JiraClient, Project, ProjectStatus},
+    jira::{AuthMode, Credentials, Issue, IssueTransition, JiraClient, Project, ProjectStatus},
+    transition_ui,
     preferences::{self, BoardSettings, IssueScope, UiLayout, ViewSettings},
     secrets,
 };
@@ -42,6 +43,9 @@ struct Ui {
     pinned_box: gtk::Box,
     pinned_count: gtk::Label,
     detail_box: gtk::Box,
+    detail_actions: gtk::Box,
+    detail_request: Rc<Cell<u64>>,
+    transition_busy: Rc<Cell<bool>>,
     detail_panel: gtk::Box,
     detail_heading: gtk::Label,
     open_in_jira: gtk::Button,
@@ -143,6 +147,8 @@ enum Event {
     Loaded(u64, Credentials, Result<Loaded, String>),
     BoardLoaded(u64, BoardKey, Result<BoardData, String>),
     ImageLoaded(u64, String, String, Result<Vec<u8>, String>),
+    TransitionsLoaded(u64, u64, String, Result<Vec<IssueTransition>, String>),
+    TransitionFinished(u64, String, String, String, Result<(), String>),
     Disconnected(u64, Result<(), String>),
 }
 
@@ -393,6 +399,10 @@ fn build_ui(app: &adw::Application) {
     detail_scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
     detail_scroll.set_vexpand(true);
     let detail_content = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    let detail_actions = gtk::Box::new(gtk::Orientation::Vertical, 8);
+    detail_actions.add_css_class("detail-actions");
+    detail_actions.set_visible(false);
+    detail_content.append(&detail_actions);
     detail_content.append(&detail_scroll);
     let detail_toolbar = adw::ToolbarView::new();
     detail_toolbar.set_vexpand(true);
@@ -570,8 +580,10 @@ fn build_ui(app: &adw::Application) {
         connect_button, disconnect_button, refresh_button,
         manage_projects_button, manage_columns_button, search, center_title,
         board_box, pinned_section, pinned_box, pinned_count,
-        detail_box, detail_panel, detail_heading, open_in_jira, copy_branch, pin_detail, inner_split,
+        detail_box, detail_actions, detail_panel, detail_heading, open_in_jira, copy_branch, pin_detail, inner_split,
         state: state.clone(),
+        detail_request: Rc::new(Cell::new(0)),
+        transition_busy: Rc::new(Cell::new(false)),
         saved_detail_width: Rc::new(Cell::new(initial_layout.detail_width)),
         mine_filter, unassigned_filter, all_filter, sprint_filter,
         restoring_view: Rc::new(Cell::new(false)),
@@ -843,6 +855,7 @@ fn wire_actions(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>) {
             };
             ui.restoring_view.set(true);
             set_busy(&ui, &state, false);
+            ui.transition_busy.set(false);
             ui.header_title.set_subtitle("Not connected");
             ui.status.set_text("Disconnected");
             ui.projects_label.set_text("Choose projects to begin");
@@ -957,6 +970,100 @@ fn handle_event(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>, eve
                 }
             }
         }
+        Event::TransitionsLoaded(id, request, key, result) => {
+            if state.borrow().generation != id
+                || ui.detail_request.get() != request
+                || ui.selected_issue.borrow().as_deref() != Some(key.as_str())
+            {
+                return;
+            }
+            match result {
+                Ok(transitions) => {
+                    let Some(account) = state.borrow().account.clone() else { return };
+                    let base_url = account.base_url.clone();
+                    let cloud = account.mode == AuthMode::Cloud;
+                    let selected_issue = ui.selected_issue.clone();
+                    let transition_busy = ui.transition_busy.clone();
+                    let detail_actions = ui.detail_actions.downgrade();
+                    let state_for_submit = state.clone();
+                    let sender_for_submit = sender.clone();
+                    let selected_key = key.clone();
+                    let submit: transition_ui::TransitionSubmit = Rc::new(move |transition, fields| {
+                        if transition_busy.get()
+                            || selected_issue.borrow().as_deref() != Some(selected_key.as_str())
+                        {
+                            return;
+                        }
+                        let Some(account) = state_for_submit.borrow().account.clone() else { return };
+                        let id = state_for_submit.borrow().generation;
+                        transition_busy.set(true);
+                        if let Some(actions) = detail_actions.upgrade() {
+                            actions.set_sensitive(false);
+                        }
+                        let key = selected_key.clone();
+                        let sender = sender_for_submit.clone();
+                        thread::spawn(move || {
+                            let result = (|| -> anyhow::Result<()> {
+                                JiraClient::new(account)?.transition_issue(&key, &transition.id, fields)
+                            })().map_err(|err| err.to_string());
+                            let _ = sender.send(Event::TransitionFinished(
+                                id, key, transition.to_id, transition.to_name, result
+                            ));
+                        });
+                    });
+                    ui.detail_actions.set_sensitive(!ui.transition_busy.get());
+                    transition_ui::render_actions(
+                        &ui.detail_actions, &ui.window, &key, &base_url, cloud, transitions, submit,
+                    );
+                }
+                Err(error) => {
+                    clear_box(&ui.detail_actions);
+                    let label = gtk::Label::new(Some("Unable to load workflow actions"));
+                    label.set_xalign(0.0);
+                    ui.detail_actions.append(&label);
+                    show_error(ui, &error);
+                }
+            }
+        }
+        Event::TransitionFinished(id, key, to_id, to_name, result) => {
+            if state.borrow().generation != id { return; }
+            ui.transition_busy.set(false);
+            ui.detail_actions.set_sensitive(true);
+            match result {
+                Ok(()) => {
+                    {
+                        let mut s = state.borrow_mut();
+                        if let Some(issue) = s.issues.iter_mut().find(|issue| issue.key == key) {
+                            issue.status = to_name.clone();
+                            if !to_id.is_empty() {
+                                issue.status_id = to_id;
+                            }
+                        }
+                    }
+                    render_board(ui, &state.borrow());
+                    if ui.selected_issue.borrow().as_deref() == Some(key.as_str()) {
+                        let issue = state.borrow().issues.iter().find(|issue| issue.key == key).cloned();
+                        let account = state.borrow().account.clone();
+                        if let Some(issue) = issue {
+                            let base_url = account.as_ref().map(|a| a.base_url.as_str()).unwrap_or("");
+                            *ui.image_slots.borrow_mut() =
+                                issue_detail::render(&ui.detail_box, &issue, base_url);
+                            if let Some(account) = account.clone() {
+                                load_issue_images(&ui.events, account, &issue, id);
+                            }
+                        }
+                        request_transitions(&ui.detail_actions, &ui.detail_request, &ui.events, account, id, &key);
+                    }
+                    ui.toast.add_toast(adw::Toast::new(&format!("Moved to {to_name}")));
+                }
+                Err(error) => {
+                    show_error(ui, &error);
+                    if ui.selected_issue.borrow().as_deref() == Some(key.as_str()) {
+                        request_transitions(&ui.detail_actions, &ui.detail_request, &ui.events, state.borrow().account.clone(), id, &key);
+                    }
+                }
+            }
+        }
         Event::ImageLoaded(id, key, attachment_id, result) => {
             if state.borrow().generation != id
                 || ui.selected_issue.borrow().as_deref() != Some(key.as_str())
@@ -977,6 +1084,7 @@ fn handle_event(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>, eve
 }
 
 fn start_refresh(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>, account: Credentials, save: bool) {
+    ui.transition_busy.set(false);
     let id = {
         let mut s = state.borrow_mut();
         s.generation += 1;
@@ -2457,6 +2565,8 @@ fn issue_button(issue: &Issue, ui: &Ui, base_url: &str, account: Option<&Credent
     let base_url = base_url.to_owned();
     let account = account.cloned();
     let image_slots = ui.image_slots.clone();
+    let actions = ui.detail_actions.clone();
+    let detail_request = ui.detail_request.clone();
     let events = ui.events.clone();
     button.connect_clicked(move |button| {
         if let Some(selected_button) = selected_button.upgrade()
@@ -2483,22 +2593,9 @@ fn issue_button(issue: &Issue, ui: &Ui, base_url: &str, account: Option<&Credent
                 inner_split.set_position(available - width);
             }
         }
+        request_transitions(&actions, &detail_request, &events, account.clone(), generation, &issue.key);
         if let Some(account) = account.clone() {
-            let attachments: Vec<_> = issue.attachments.iter()
-                .filter(|a| a.is_image() && !a.content_url.is_empty()).cloned().collect();
-            if !attachments.is_empty() {
-                let events = events.clone();
-                let key = issue.key.clone();
-                thread::spawn(move || {
-                    let Ok(client) = JiraClient::new(account) else { return };
-                    for attachment in attachments {
-                        let result = client.image_bytes(&attachment).map_err(|e| e.to_string());
-                        let _ = events.send(Event::ImageLoaded(
-                            generation, key.clone(), attachment.id, result
-                        ));
-                    }
-                });
-            }
+            load_issue_images(&events, account, &issue, generation);
         }
     });
     let tile = gtk::Overlay::new();
@@ -2522,6 +2619,52 @@ fn issue_button(issue: &Issue, ui: &Ui, base_url: &str, account: Option<&Credent
     }
     tile.add_overlay(&pin);
     tile
+}
+
+fn request_transitions(
+    actions: &gtk::Box,
+    request_counter: &Cell<u64>,
+    events: &Sender<Event>,
+    account: Option<Credentials>,
+    generation: u64,
+    key: &str,
+) {
+    let request = request_counter.get().wrapping_add(1);
+    request_counter.set(request);
+    actions.set_visible(true);
+    actions.set_sensitive(true);
+    clear_box(actions);
+    let loading = gtk::Label::new(Some("Loading workflow actions…"));
+    loading.add_css_class("dim-label");
+    loading.set_xalign(0.0);
+    actions.append(&loading);
+    let Some(account) = account else { return };
+    let key = key.to_owned();
+    let events = events.clone();
+    thread::spawn(move || {
+        let result = JiraClient::new(account)
+            .and_then(|client| client.issue_transitions(&key))
+            .map_err(|err| err.to_string());
+        let _ = events.send(Event::TransitionsLoaded(generation, request, key, result));
+    });
+}
+
+fn load_issue_images(events: &Sender<Event>, account: Credentials, issue: &Issue, generation: u64) {
+    let attachments: Vec<_> = issue.attachments.iter()
+        .filter(|attachment| attachment.is_image() && !attachment.content_url.is_empty())
+        .cloned().collect();
+    if attachments.is_empty() { return; }
+    let events = events.clone();
+    let key = issue.key.clone();
+    thread::spawn(move || {
+        let Ok(client) = JiraClient::new(account) else { return };
+        for attachment in attachments {
+            let result = client.image_bytes(&attachment).map_err(|err| err.to_string());
+            let _ = events.send(Event::ImageLoaded(
+                generation, key.clone(), attachment.id, result
+            ));
+        }
+    });
 }
 
 fn set_busy(ui: &Ui, state: &Rc<RefCell<State>>, busy: bool) {
