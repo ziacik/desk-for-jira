@@ -22,6 +22,8 @@ pub struct BoardSettings {
     // A migration marker: older versions created a separate column for every project status.
     #[serde(default)]
     pub grouping_version: u8,
+    #[serde(default)]
+    pub pinned_issues: Vec<String>,
 }
 impl ProjectStatus {
     pub fn reference(&self) -> StatusRef {
@@ -37,6 +39,17 @@ fn category_position(category: StatusCategory) -> u8 {
 }
 
 impl BoardSettings {
+    /// Toggle the pinned state of one Jira issue, preserving pin order.
+    pub fn toggle_pinned(&mut self, key: &str) -> bool {
+        if let Some(index) = self.pinned_issues.iter().position(|pinned| pinned == key) {
+            self.pinned_issues.remove(index);
+            false
+        } else {
+            self.pinned_issues.push(key.to_owned());
+            true
+        }
+    }
+
     /// Use actual workflow status IDs, never Jira board columns or matching names.
     pub fn reconcile(&mut self, available: &[ProjectStatus]) {
         let initial_layout = self.columns.is_empty();
