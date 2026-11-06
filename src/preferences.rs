@@ -195,10 +195,65 @@ impl BoardSettings {
         }
     }
 }
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IssueScope {
+    #[default]
+    Mine,
+    Unassigned,
+    All,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ViewSettings {
+    pub scope: IssueScope,
+    pub active_sprint_only: bool,
+    pub project_filter: Option<String>,
+    pub search: String,
+    pub collapsed_columns: HashSet<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct UiLayout {
+    pub window_width: i32,
+    pub window_height: i32,
+    pub sidebar_visible: bool,
+    pub sidebar_width: i32,
+    pub detail_width: i32,
+}
+
+impl Default for UiLayout {
+    fn default() -> Self {
+        Self {
+            window_width: 1460,
+            window_height: 860,
+            sidebar_visible: true,
+            sidebar_width: 224,
+            detail_width: 470,
+        }
+    }
+}
+
+impl UiLayout {
+    pub fn sanitized(mut self) -> Self {
+        self.window_width = self.window_width.max(960);
+        self.window_height = self.window_height.max(580);
+        self.sidebar_width = self.sidebar_width.clamp(184, 800);
+        self.detail_width = self.detail_width.clamp(320, 1000);
+        self
+    }
+}
+
 #[derive(Default, Serialize, Deserialize)]
 struct Preferences {
     #[serde(default)]
     board_by_site: HashMap<String, BoardSettings>,
+    #[serde(default)]
+    view_by_site: HashMap<String, ViewSettings>,
+    #[serde(default)]
+    ui_layout: UiLayout,
 }
 fn preferences_path() -> Result<PathBuf> {
     let root = env::var_os("XDG_CONFIG_HOME").filter(|p| !p.is_empty()).map(PathBuf::from)
@@ -216,19 +271,46 @@ fn read_preferences(path: &PathBuf) -> Result<Preferences> {
 pub fn load(base_url: &str) -> Result<BoardSettings> {
     Ok(read_preferences(&preferences_path()?)?.board_by_site.get(base_url).cloned().unwrap_or_default())
 }
-pub fn save(base_url: &str, settings: &BoardSettings) -> Result<()> {
-    let path = preferences_path()?;
-    let mut prefs = read_preferences(&path)?;
-    prefs.board_by_site.insert(base_url.into(), settings.clone());
+fn write_preferences(path: &PathBuf, prefs: &Preferences) -> Result<()> {
     let parent = path.parent().context("Missing settings directory")?;
     fs::create_dir_all(parent)?;
     let temp = parent.join(format!("board-settings-{}.tmp", std::process::id()));
-    fs::write(&temp, serde_json::to_vec_pretty(&prefs)?)?;
-    if let Err(error) = fs::rename(&temp, &path) {
+    fs::write(&temp, serde_json::to_vec_pretty(prefs)?)?;
+    if let Err(error) = fs::rename(&temp, path) {
         let _ = fs::remove_file(&temp);
         return Err(error).with_context(|| format!("Could not save {}", path.display()));
     }
     Ok(())
+}
+
+pub fn save(base_url: &str, settings: &BoardSettings) -> Result<()> {
+    let path = preferences_path()?;
+    let mut prefs = read_preferences(&path)?;
+    prefs.board_by_site.insert(base_url.into(), settings.clone());
+    write_preferences(&path, &prefs)
+}
+
+pub fn load_view(base_url: &str) -> Result<ViewSettings> {
+    Ok(read_preferences(&preferences_path()?)?
+        .view_by_site.get(base_url).cloned().unwrap_or_default())
+}
+
+pub fn save_view(base_url: &str, view: &ViewSettings) -> Result<()> {
+    let path = preferences_path()?;
+    let mut prefs = read_preferences(&path)?;
+    prefs.view_by_site.insert(base_url.into(), view.clone());
+    write_preferences(&path, &prefs)
+}
+
+pub fn load_layout() -> Result<UiLayout> {
+    Ok(read_preferences(&preferences_path()?)?.ui_layout.sanitized())
+}
+
+pub fn save_layout(layout: &UiLayout) -> Result<()> {
+    let path = preferences_path()?;
+    let mut prefs = read_preferences(&path)?;
+    prefs.ui_layout = layout.clone().sanitized();
+    write_preferences(&path, &prefs)
 }
 #[cfg(test)]
 mod tests {
@@ -505,7 +587,44 @@ mod tests {
     fn per_site_roundtrip() {
         let mut prefs = Preferences::default();
         prefs.board_by_site.insert("first".into(), BoardSettings { projects: vec!["ART".into()], ..BoardSettings::default() });
+        prefs.view_by_site.insert("first".into(), ViewSettings {
+            scope: IssueScope::Unassigned,
+            active_sprint_only: true,
+            project_filter: Some("ART".into()),
+            search: "regression".into(),
+            collapsed_columns: HashSet::from(["In Review".into()]),
+        });
+        prefs.view_by_site.insert("second".into(), ViewSettings { scope: IssueScope::All, ..ViewSettings::default() });
+        prefs.ui_layout.sidebar_width = 300;
         let decoded: Preferences = serde_json::from_slice(&serde_json::to_vec(&prefs).unwrap()).unwrap();
         assert_eq!(decoded.board_by_site["first"].projects, vec!["ART"]);
+        assert_eq!(decoded.view_by_site["first"], prefs.view_by_site["first"]);
+        assert_eq!(decoded.view_by_site["second"].scope, IssueScope::All);
+        assert_eq!(decoded.ui_layout.sidebar_width, 300);
+    }
+
+    #[test]
+    fn old_board_settings_without_ui_keys_still_load() {
+        let old = serde_json::json!({
+            "board_by_site": { "https://jira.example": {"projects": ["ART"]} }
+        });
+        let prefs: Preferences = serde_json::from_value(old).unwrap();
+        assert_eq!(prefs.board_by_site["https://jira.example"].projects, vec!["ART"]);
+        assert!(prefs.view_by_site.is_empty());
+        assert_eq!(prefs.ui_layout, UiLayout::default());
+    }
+
+    #[test]
+    fn layout_limits_invalid_saved_dimensions() {
+        let layout = UiLayout {
+            window_width: -1, window_height: 100,
+            sidebar_width: -20, detail_width: 99,
+            ..UiLayout::default()
+        };
+        assert_eq!(layout.sanitized(), UiLayout {
+            window_width: 960, window_height: 580,
+            sidebar_width: 184, detail_width: 320,
+            ..UiLayout::default()
+        });
     }
 }
