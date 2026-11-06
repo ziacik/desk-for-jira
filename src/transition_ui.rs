@@ -53,14 +53,14 @@ pub fn render_actions(
         let button = gtk::Button::with_label(&transition.name);
         button.add_css_class("transition-action");
         button.set_tooltip_text(Some(&format!("Move to {}", transition.to_name)));
-        let parent = parent.clone();
+        let parent = parent.downgrade();
         let key = issue_key.to_owned();
         let base_url = base_url.to_owned();
         let submit = submit.clone();
         button.connect_clicked(move |_| {
             if transition.required_fields.is_empty() {
                 submit(transition.clone(), Map::new());
-            } else {
+            } else if let Some(parent) = parent.upgrade() {
                 open_transition_form(&parent, &key, &base_url, cloud, transition.clone(), submit.clone());
             }
         });
@@ -110,18 +110,20 @@ fn open_transition_form(
         let actions = gtk::Box::new(gtk::Orientation::Horizontal, 8);
         actions.set_halign(gtk::Align::End);
         let cancel = gtk::Button::with_label("Cancel");
-        let dialog_cancel = dialog.clone();
-        cancel.connect_clicked(move |_| dialog_cancel.close());
+        let dialog_cancel = dialog.downgrade();
+        cancel.connect_clicked(move |_| {
+            if let Some(dialog) = dialog_cancel.upgrade() { dialog.close(); }
+        });
         actions.append(&cancel);
         let open = gtk::Button::with_label("Open in Jira");
         open.add_css_class("suggested-action");
         let url = format!("{}/browse/{issue_key}", base_url.trim_end_matches('/'));
-        let dialog_open = dialog.clone();
+        let dialog_open = dialog.downgrade();
         open.connect_clicked(move |_| {
             let _ = gtk::gio::AppInfo::launch_default_for_uri(
                 &url, None::<&gtk::gio::AppLaunchContext>,
             );
-            dialog_open.close();
+            if let Some(dialog) = dialog_open.upgrade() { dialog.close(); }
         });
         actions.append(&open);
         root.append(&actions);
@@ -191,14 +193,16 @@ fn open_transition_form(
     let actions = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     actions.set_halign(gtk::Align::End);
     let cancel = gtk::Button::with_label("Cancel");
-    let dialog_cancel = dialog.clone();
-    cancel.connect_clicked(move |_| dialog_cancel.close());
+    let dialog_cancel = dialog.downgrade();
+    cancel.connect_clicked(move |_| {
+        if let Some(dialog) = dialog_cancel.upgrade() { dialog.close(); }
+    });
     actions.append(&cancel);
     let apply = gtk::Button::with_label(&transition.name);
     apply.add_css_class("suggested-action");
     actions.append(&apply);
     root.append(&actions);
-    let dialog_apply = dialog.clone();
+    let dialog_apply = dialog.downgrade();
     apply.connect_clicked(move |_| {
         let mut values = Map::new();
         for (field, control) in &controls {
@@ -213,7 +217,7 @@ fn open_transition_form(
             }
         }
         submit(transition.clone(), values);
-        dialog_apply.close();
+        if let Some(dialog) = dialog_apply.upgrade() { dialog.close(); }
     });
     dialog.set_child(Some(&root));
     dialog.present();
