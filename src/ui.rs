@@ -982,7 +982,6 @@ fn handle_event(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>, eve
             match result {
                 Ok(transitions) => {
                     let Some(account) = state.borrow().account.clone() else { return };
-                    let base_url = account.base_url.clone();
                     let cloud = account.mode == AuthMode::Cloud;
                     let selected_issue = ui.selected_issue.clone();
                     let transition_busy = ui.transition_busy.clone();
@@ -1035,7 +1034,7 @@ fn handle_event(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>, eve
                     });
                     ui.detail_actions.set_sensitive(!ui.transition_busy.get());
                     transition_ui::render_actions(
-                        &ui.detail_actions, &ui.window, &key, &base_url, cloud,
+                        &ui.detail_actions, &ui.window, &key, cloud,
                         transitions, submit, on_open,
                     );
                 }
