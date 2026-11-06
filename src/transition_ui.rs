@@ -5,10 +5,37 @@ use serde_json::{Map, Value};
 
 use crate::jira::{IssueTransition, TransitionField};
 
-pub type TransitionSubmit = Rc<dyn Fn(IssueTransition, Map<String, Value>)>;
+pub type TransitionSubmit = Rc<dyn Fn(IssueTransition, Map<String, Value>) -> bool>;
+pub type FormOpened = Rc<dyn Fn(TransitionForm)>;
+
+#[derive(Clone)]
+pub struct TransitionForm {
+    pub key: String,
+    pub window: gtk::Window,
+    pub error: gtk::Label,
+    pub submit: gtk::Button,
+    pub progress: gtk::Spinner,
+}
+
+impl TransitionForm {
+    pub fn show_error(&self, message: &str) {
+        self.error.set_text(message);
+        self.error.set_visible(true);
+        self.submit.set_sensitive(true);
+        self.progress.stop();
+        self.progress.set_visible(false);
+    }
+
+    pub fn close(&self) {
+        self.window.close();
+    }
+}
 
 enum FieldControl {
     Text(gtk::Entry),
+    Paragraph(gtk::TextView),
+    Structured(gtk::TextView),
+    Boolean(gtk::CheckButton),
     Single(gtk::DropDown),
     Multiple(Vec<gtk::CheckButton>),
 }
@@ -27,6 +54,7 @@ pub fn render_actions(
     cloud: bool,
     transitions: Vec<IssueTransition>,
     submit: TransitionSubmit,
+    on_open: FormOpened,
 ) {
     clear(container);
     container.set_visible(true);
@@ -57,11 +85,12 @@ pub fn render_actions(
         let key = issue_key.to_owned();
         let base_url = base_url.to_owned();
         let submit = submit.clone();
+        let on_open = on_open.clone();
         button.connect_clicked(move |_| {
             if transition.required_fields.is_empty() {
                 submit(transition.clone(), Map::new());
             } else if let Some(parent) = parent.upgrade() {
-                open_transition_form(&parent, &key, &base_url, cloud, transition.clone(), submit.clone());
+                open_transition_form(&parent, &key, &base_url, cloud, transition.clone(), submit.clone(), on_open.clone());
             }
         });
         actions.insert(&button, -1);
@@ -76,13 +105,14 @@ fn open_transition_form(
     cloud: bool,
     transition: IssueTransition,
     submit: TransitionSubmit,
+    on_open: FormOpened,
 ) {
     let dialog = gtk::Window::builder()
         .title(format!("{} · {}", issue_key, transition.name))
         .transient_for(parent)
         .modal(true)
-        .default_width(460)
-        .default_height(350)
+        .default_width(500)
+        .default_height(420)
         .build();
     let root = gtk::Box::new(gtk::Orientation::Vertical, 15);
     root.set_margin_top(20);
@@ -95,44 +125,7 @@ fn open_transition_form(
     title.set_xalign(0.0);
     root.append(&title);
 
-    let unsupported: Vec<_> = transition.required_fields.iter()
-        .filter(|field| !field.is_supported())
-        .map(|field| field.name.as_str()).collect();
-
-    if !unsupported.is_empty() {
-        let description = gtk::Label::new(Some(&format!(
-            "This transition requires fields that cannot be edited here: {}. Complete it in Jira.",
-            unsupported.join(", ")
-        )));
-        description.set_wrap(true);
-        description.set_xalign(0.0);
-        root.append(&description);
-        let actions = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-        actions.set_halign(gtk::Align::End);
-        let cancel = gtk::Button::with_label("Cancel");
-        let dialog_cancel = dialog.downgrade();
-        cancel.connect_clicked(move |_| {
-            if let Some(dialog) = dialog_cancel.upgrade() { dialog.close(); }
-        });
-        actions.append(&cancel);
-        let open = gtk::Button::with_label("Open in Jira");
-        open.add_css_class("suggested-action");
-        let url = format!("{}/browse/{issue_key}", base_url.trim_end_matches('/'));
-        let dialog_open = dialog.downgrade();
-        open.connect_clicked(move |_| {
-            let _ = gtk::gio::AppInfo::launch_default_for_uri(
-                &url, None::<&gtk::gio::AppLaunchContext>,
-            );
-            if let Some(dialog) = dialog_open.upgrade() { dialog.close(); }
-        });
-        actions.append(&open);
-        root.append(&actions);
-        dialog.set_child(Some(&root));
-        dialog.present();
-        return;
-    }
-
-    let explanation = gtk::Label::new(Some("Fill in the required fields to complete this transition."));
+    let explanation = gtk::Label::new(Some("Complete the required Jira fields before changing the status."));
     explanation.add_css_class("dim-label");
     explanation.set_xalign(0.0);
     explanation.set_wrap(true);
@@ -161,12 +154,34 @@ fn open_transition_form(
             select.set_hexpand(true);
             row.append(&select);
             FieldControl::Single(select)
+        } else if field.schema_type == "boolean" {
+            let toggle = gtk::CheckButton::with_label("Yes");
+            row.append(&toggle);
+            FieldControl::Boolean(toggle)
+        } else if field.uses_structured_input() {
+            let hint = gtk::Label::new(Some("Advanced Jira field · enter a JSON value"));
+            hint.add_css_class("dim-label");
+            hint.set_xalign(0.0);
+            row.append(&hint);
+            let input = text_area("{}", true);
+            row.append(&text_area_frame(&input));
+            FieldControl::Structured(input)
+        } else if field.is_multiline() {
+            let input = text_area("", false);
+            row.append(&text_area_frame(&input));
+            FieldControl::Paragraph(input)
         } else {
             let input = gtk::Entry::new();
             let placeholder = match field.schema_type.as_str() {
                 "date" => "YYYY-MM-DD",
+                "datetime" => "2026-11-06T15:30:00.000+0100",
                 "number" => "Enter a number",
-                "array" => "Comma-separated values",
+                "user" if cloud => "Atlassian account ID",
+                "user" => "Jira username",
+                "option" | "resolution" | "priority" | "version"
+                    | "component" | "issuetype" | "project" => "Jira field value ID",
+                "array" if field.item_type == "string" => "Comma-separated values",
+                "array" => "Comma-separated Jira value IDs",
                 _ => "Enter a value",
             };
             input.set_placeholder_text(Some(placeholder));
@@ -198,11 +213,15 @@ fn open_transition_form(
         if let Some(dialog) = dialog_cancel.upgrade() { dialog.close(); }
     });
     actions.append(&cancel);
+    let progress = gtk::Spinner::new();
+    progress.set_visible(false);
+    actions.append(&progress);
     let apply = gtk::Button::with_label(&transition.name);
     apply.add_css_class("suggested-action");
     actions.append(&apply);
     root.append(&actions);
-    let dialog_apply = dialog.downgrade();
+    let progress_apply = progress.clone();
+    let apply_button = apply.clone();
     apply.connect_clicked(move |_| {
         let mut values = Map::new();
         for (field, control) in &controls {
@@ -216,17 +235,55 @@ fn open_transition_form(
                 }
             }
         }
-        submit(transition.clone(), values);
-        if let Some(dialog) = dialog_apply.upgrade() { dialog.close(); }
+        if submit(transition.clone(), values) {
+            apply_button.set_sensitive(false);
+            progress_apply.set_visible(true);
+            progress_apply.start();
+        }
     });
     dialog.set_child(Some(&root));
+    on_open(TransitionForm {
+        key: issue_key.to_owned(),
+        window: dialog.clone(),
+        error,
+        submit: apply,
+        progress,
+    });
     dialog.present();
+}
+
+fn text_area(initial: &str, monospace: bool) -> gtk::TextView {
+    let input = gtk::TextView::new();
+    input.set_wrap_mode(gtk::WrapMode::WordChar);
+    input.set_top_margin(9);
+    input.set_bottom_margin(9);
+    input.set_left_margin(10);
+    input.set_right_margin(10);
+    input.set_monospace(monospace);
+    input.buffer().set_text(initial);
+    input
+}
+
+fn text_area_frame(input: &gtk::TextView) -> gtk::ScrolledWindow {
+    let frame = gtk::ScrolledWindow::new();
+    frame.add_css_class("frame");
+    frame.set_min_content_height(96);
+    frame.set_max_content_height(160);
+    frame.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
+    frame.set_child(Some(input));
+    frame
 }
 
 fn control_value(field: &TransitionField, control: &FieldControl, cloud: bool) -> Result<Value, String> {
     match control {
         FieldControl::Text(input) => field.text_value(input.text().as_str(), cloud)
             .map_err(|error| error.to_string()),
+        FieldControl::Paragraph(input) | FieldControl::Structured(input) => {
+            let buffer = input.buffer();
+            let text = buffer.text(&buffer.start_iter(), &buffer.end_iter(), false);
+            field.text_value(&text, cloud).map_err(|error| error.to_string())
+        }
+        FieldControl::Boolean(input) => Ok(Value::Bool(input.is_active())),
         FieldControl::Single(dropdown) => {
             let selected = dropdown.selected();
             if selected == 0 {
