@@ -2974,13 +2974,21 @@ fn watch_detail_resize(ui: &Ui) {
     ui.inner_split.add_controller(keys);
 }
 
+fn detail_split_position(available: i32, separator: i32, preferred_width: i32) -> Option<i32> {
+    if available < 640 {
+        return None;
+    }
+    let separator = separator.clamp(0, 24);
+    let width = preferred_width.min(available - separator - 300).max(320);
+    Some(available - separator - width)
+}
+
 fn restore_detail_width(paned: &gtk::Paned, panel: &gtk::Box, preferred_width: i32) {
     let available = paned.width();
-    if available >= 640 {
-        // Account for the separator: end-child width is NOT width - position.
-        let separator = (available - paned.position() - panel.width()).clamp(0, 24);
-        let width = preferred_width.min(available - separator - 300).max(320);
-        paned.set_position(available - separator - width);
+    // Account for the separator: end-child width is NOT width - position.
+    let separator = available - paned.position() - panel.width();
+    if let Some(position) = detail_split_position(available, separator, preferred_width) {
+        paned.set_position(position);
     }
 }
 
@@ -3455,6 +3463,26 @@ mod scope_tests {
         let mut epic = issue("ART-1", "1", "Parent");
         epic.is_epic = true;
         assert!(pinned_issue_refs(&settings, &[], &[epic]).is_empty());
+    }
+
+    #[test]
+    fn splitter_clicks_are_distinguished_from_clicks_in_panels() {
+        assert!(pointer_on_detail_splitter(600.0, 600));
+        assert!(pointer_on_detail_splitter(584.0, 600));
+        assert!(!pointer_on_detail_splitter(580.0, 600));
+        assert!(!pointer_on_detail_splitter(750.0, 600));
+    }
+
+    #[test]
+    fn restored_detail_width_accounts_for_separator_and_small_windows() {
+        // 1240 wide paned, 6 px separator, 540 px detail => start pane 694.
+        assert_eq!(detail_split_position(1240, 6, 540), Some(694));
+        // A large user preference must survive without the previous 1000 px cap.
+        assert_eq!(detail_split_position(1800, 6, 1180), Some(614));
+        // Keep a 300 px board even if the requested detail width is huge.
+        assert_eq!(detail_split_position(900, 6, 1180), Some(300));
+        // Never restore from a zero/unallocated GTK widget.
+        assert_eq!(detail_split_position(0, 6, 540), None);
     }
 
     #[test]
