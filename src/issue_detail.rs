@@ -82,11 +82,35 @@ pub(crate) fn header_action_icon(kind: HeaderActionIcon) -> gtk::DrawingArea {
     icon
 }
 
+fn section_heading(title: &str, icon: &str, count: Option<usize>) -> gtk::Box {
+    let heading = gtk::Box::new(gtk::Orientation::Horizontal, 9);
+    heading.add_css_class("detail-section-heading");
+    let image = gtk::Image::from_icon_name(icon);
+    image.add_css_class("detail-section-icon");
+    heading.append(&image);
+    let label = gtk::Label::new(Some(title));
+    label.add_css_class("detail-section-title");
+    label.set_xalign(0.0);
+    heading.append(&label);
+    if let Some(count) = count {
+        let badge = gtk::Label::new(Some(&count.to_string()));
+        badge.add_css_class("detail-section-count");
+        heading.append(&badge);
+    }
+    heading
+}
+
 pub fn render(
     container: &gtk::Box,
     issue: &Issue,
     base_url: &str,
+    actions: &gtk::Box,
 ) -> DetailRender {
+    // Keep the existing transition widget and its handlers alive when the
+    // issue is refreshed, then reparent it into the new issue hero.
+    if let Some(parent) = actions.parent().and_then(|widget| widget.downcast::<gtk::Box>().ok()) {
+        parent.remove(actions);
+    }
     while let Some(child) = container.first_child() {
         container.remove(&child);
     }
@@ -94,16 +118,32 @@ pub fn render(
     let mut slots = ImageSlots::new();
     let mut used_images = HashSet::new();
 
-    let header = gtk::Box::new(gtk::Orientation::Vertical, 10);
+    let header = gtk::Box::new(gtk::Orientation::Vertical, 12);
     header.add_css_class("detail-hero");
-    let eyebrow = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-    let kind_label = if issue.kind.is_empty() { "Ticket" } else { &issue.kind };
-    let kind = gtk::Label::new(Some(kind_label));
-    kind.add_css_class("detail-kind");
-    kind.set_halign(gtk::Align::Start);
-    kind.set_xalign(0.5);
-    eyebrow.append(&kind);
 
+    let eyebrow = gtk::Box::new(gtk::Orientation::Horizontal, 9);
+    eyebrow.add_css_class("detail-eyebrow");
+    let kind = issue.kind.to_ascii_lowercase();
+    let (kind_icon, kind_class) = match kind.as_str() {
+        "bug" => ("dialog-warning-symbolic", "kind-bug"),
+        "story" => ("starred-symbolic", "kind-story"),
+        _ => ("view-list-symbolic", "kind-task"),
+    };
+    let type_mark = gtk::CenterBox::new();
+    type_mark.add_css_class("detail-type-mark");
+    type_mark.add_css_class(kind_class);
+    type_mark.set_size_request(27, 27);
+    let type_icon = gtk::Image::from_icon_name(kind_icon);
+    type_mark.set_center_widget(Some(&type_icon));
+    eyebrow.append(&type_mark);
+    let key = gtk::Label::new(Some(&issue.key));
+    key.add_css_class("detail-key");
+    key.set_selectable(true);
+    eyebrow.append(&key);
+    let kind_label = if issue.kind.is_empty() { "Ticket" } else { &issue.kind };
+    let kind_badge = gtk::Label::new(Some(kind_label));
+    kind_badge.add_css_class("detail-kind");
+    eyebrow.append(&kind_badge);
     header.append(&eyebrow);
 
     let summary = gtk::Label::new(Some(&issue.summary));
@@ -113,33 +153,50 @@ pub fn render(
     summary.set_selectable(true);
     summary.set_xalign(0.0);
     header.append(&summary);
+
+    let badges = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    badges.add_css_class("detail-badges");
+    let status = gtk::Label::new(Some(if issue.status.is_empty() { "—" } else { &issue.status }));
+    status.add_css_class("detail-status-pill");
+    badges.append(&status);
+    let priority = gtk::Label::new(Some(if issue.priority.is_empty() { "—" } else { &issue.priority }));
+    priority.add_css_class("detail-priority-pill");
+    badges.append(&priority);
+    header.append(&badges);
+
     if let Some(epic) = &issue.epic {
         let epic_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-        let epic_caption = gtk::Label::new(Some("Epic"));
-        epic_caption.add_css_class("detail-field-label");
-        epic_row.append(&epic_caption);
+        epic_row.add_css_class("detail-epic-row");
+        let epic_icon = gtk::Image::from_icon_name("view-list-symbolic");
+        epic_icon.add_css_class("detail-epic-icon");
+        epic_row.append(&epic_icon);
         let title = if epic.summary.is_empty() { &epic.key } else { &epic.summary };
         if base_url.is_empty() {
-            epic_row.append(&gtk::Label::new(Some(title)));
+            let label = gtk::Label::new(Some(title));
+            label.set_xalign(0.0);
+            label.set_wrap(true);
+            epic_row.append(&label);
         } else {
             let url = format!("{base_url}/browse/{}", epic.key);
             let link = gtk::LinkButton::with_label(&url, title);
+            link.add_css_class("detail-epic-link");
             link.set_tooltip_text(Some(&epic.key));
             epic_row.append(&link);
         }
         header.append(&epic_row);
     }
+
+    // Workflow actions belong to the issue header, not to a detached strip.
+    header.append(actions);
     container.append(&header);
 
     let metadata = gtk::Grid::new();
     metadata.add_css_class("detail-metadata");
-    metadata.set_row_spacing(12);
-    metadata.set_column_spacing(16);
+    metadata.set_row_spacing(17);
+    metadata.set_column_spacing(24);
     let fix_versions = issue.fix_versions.join(", ");
     let affects_versions = issue.affects_versions.join(", ");
     for (index, (title, value)) in [
-        ("Status", issue.status.as_str()),
-        ("Priority", issue.priority.as_str()),
         ("Assignee", issue.assignee.as_str()),
         ("Updated", issue.updated.as_str()),
         ("Fix Version/s", fix_versions.as_str()),
@@ -153,9 +210,6 @@ pub fn render(
         cell.append(&caption);
         let value = gtk::Label::new(Some(if value.is_empty() { "—" } else { value }));
         value.add_css_class("detail-field-value");
-        if title == "Status" {
-            value.add_css_class("detail-status");
-        }
         value.set_wrap(true);
         value.set_xalign(0.0);
         value.set_selectable(true);
@@ -166,10 +220,7 @@ pub fn render(
 
     let section = gtk::Box::new(gtk::Orientation::Vertical, 12);
     section.add_css_class("detail-section");
-    let heading = gtk::Label::new(Some("Description"));
-    heading.add_css_class("detail-section-title");
-    heading.set_xalign(0.0);
-    section.append(&heading);
+    section.append(&section_heading("Description", "text-x-generic-symbolic", None));
 
     let body = gtk::Box::new(gtk::Orientation::Vertical, 10);
     body.add_css_class("detail-body");
@@ -194,19 +245,28 @@ pub fn render(
     if !remaining.is_empty() {
         let attachments = gtk::Box::new(gtk::Orientation::Vertical, 10);
         attachments.add_css_class("detail-section");
-        let title = gtk::Label::new(Some("Attachments"));
-        title.add_css_class("detail-section-title");
-        title.set_xalign(0.0);
-        attachments.append(&title);
+        attachments.append(&section_heading("Attachments", "mail-attachment-symbolic", Some(remaining.len())));
         for attachment in remaining {
             if attachment.is_image() {
                 append_image(&attachments, attachment, &mut slots);
-            } else if safe_url(&attachment.content_url) {
-                let link = gtk::LinkButton::with_label(&attachment.content_url, &attachment.filename);
-                link.set_halign(gtk::Align::Start);
-                attachments.append(&link);
             } else {
-                add_text(&attachments, &attachment.filename, "issue-prose");
+                let file = gtk::Box::new(gtk::Orientation::Horizontal, 9);
+                file.add_css_class("detail-file");
+                let icon = gtk::Image::from_icon_name("text-x-generic-symbolic");
+                icon.add_css_class("detail-file-icon");
+                file.append(&icon);
+                if safe_url(&attachment.content_url) {
+                    let link = gtk::LinkButton::with_label(&attachment.content_url, &attachment.filename);
+                    link.add_css_class("detail-file-link");
+                    link.set_halign(gtk::Align::Start);
+                    file.append(&link);
+                } else {
+                    let label = gtk::Label::new(Some(&attachment.filename));
+                    label.set_xalign(0.0);
+                    label.set_wrap(true);
+                    file.append(&label);
+                }
+                attachments.append(&file);
             }
         }
         container.append(&attachments);
@@ -214,11 +274,8 @@ pub fn render(
 
     let comments_section = gtk::Box::new(gtk::Orientation::Vertical, 12);
     comments_section.add_css_class("detail-section");
-    let comments_title = gtk::Label::new(Some("Comments"));
-    comments_title.add_css_class("detail-section-title");
-    comments_title.set_xalign(0.0);
-    comments_section.append(&comments_title);
-    let comments = gtk::Box::new(gtk::Orientation::Vertical, 10);
+    comments_section.append(&section_heading("Comments", "document-edit-symbolic", None));
+    let comments = gtk::Box::new(gtk::Orientation::Vertical, 0);
     show_comments_loading(&comments);
     comments_section.append(&comments);
     container.append(&comments_section);
@@ -249,20 +306,35 @@ pub fn render_comments(
     }
     let mut used_images = HashSet::new();
     for comment in comments {
-        let card = gtk::Box::new(gtk::Orientation::Vertical, 9);
+        let card = gtk::Box::new(gtk::Orientation::Horizontal, 12);
         card.add_css_class("issue-comment");
-        let header = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+
+        let initial = comment.author.chars()
+            .find(|c| c.is_alphanumeric())
+            .map(|c| c.to_uppercase().to_string())
+            .unwrap_or_else(|| "?".to_owned());
+        let avatar = gtk::Label::new(Some(&initial));
+        avatar.add_css_class("issue-comment-avatar");
+        avatar.set_size_request(34, 34);
+        avatar.set_halign(gtk::Align::Start);
+        avatar.set_valign(gtk::Align::Start);
+        card.append(&avatar);
+
+        let content = gtk::Box::new(gtk::Orientation::Vertical, 8);
+        content.add_css_class("issue-comment-content");
+        content.set_hexpand(true);
+        let heading = gtk::Box::new(gtk::Orientation::Horizontal, 8);
         let author = gtk::Label::new(Some(&comment.author));
         author.add_css_class("issue-comment-author");
         author.set_xalign(0.0);
         author.set_hexpand(true);
         author.set_ellipsize(gtk::pango::EllipsizeMode::End);
-        header.append(&author);
+        heading.append(&author);
         let date = gtk::Label::new(Some(&format_comment_time(&comment.created)));
         date.add_css_class("issue-comment-date");
         date.set_xalign(1.0);
-        header.append(&date);
-        card.append(&header);
+        heading.append(&date);
+        content.append(&heading);
 
         let body = gtk::Box::new(gtk::Orientation::Vertical, 8);
         body.add_css_class("detail-body");
@@ -276,7 +348,8 @@ pub fn render_comments(
         if body.first_child().is_none() {
             add_text(&body, "Empty comment", "detail-empty");
         }
-        card.append(&body);
+        content.append(&body);
+        card.append(&content);
         container.append(&card);
     }
     slots
@@ -374,7 +447,7 @@ pub fn set_image(slots: &ImageSlots, id: &str, bytes: Option<&[u8]>) {
             picture.set_content_fit(gtk::ContentFit::Contain);
             picture.set_can_shrink(true);
             picture.set_hexpand(true);
-            picture.set_height_request(220);
+            picture.set_height_request(190);
 
             // Keep the preview keyboard-accessible and reuse the already loaded
             // texture for the full-resolution viewer (no second network request).
