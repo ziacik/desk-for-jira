@@ -2317,7 +2317,7 @@ fn visible_board_groups<'a>(
         {
             matches.push(issue);
         } else if let Some((_, matches, _)) = groups.iter_mut()
-            .find(|(title, _, _)| title == "Other")
+            .find(|(_, _, statuses)| statuses.is_empty())
         {
             matches.push(issue);
         } else {
@@ -2625,12 +2625,10 @@ fn issue_button(issue: &Issue, ui: &Ui, base_url: &str, account: Option<&Credent
     // Reserve room for the pin action overlay, even with a long issue type.
     meta.set_margin_end(28);
     let kind = issue.kind.to_ascii_lowercase();
-    let (kind_icon, kind_class) = if kind.contains("bug") {
-        ("dialog-warning-symbolic", "kind-bug")
-    } else if kind.contains("story") {
-        ("starred-symbolic", "kind-story")
-    } else {
-        ("view-list-symbolic", "kind-task")
+    let (kind_icon, kind_class) = match kind.as_str() {
+        "bug" => ("dialog-warning-symbolic", "kind-bug"),
+        "story" => ("starred-symbolic", "kind-story"),
+        _ => ("view-list-symbolic", "kind-task"),
     };
     // GtkCenterBox centres the glyph within its square background, instead of
     // letting GtkBox position the glyph against the leading edge.
@@ -2654,8 +2652,9 @@ fn issue_button(issue: &Issue, ui: &Ui, base_url: &str, account: Option<&Credent
         kind.add_css_class("ticket-kind");
         meta.append(&kind);
     }
-    let priority = issue.priority.to_ascii_lowercase();
-    if matches!(priority.as_str(), "highest" | "high" | "critical" | "blocker") {
+    // Jira priority names are configurable ("2 - High" is a real example).
+    // Display the server value without assigning severity from English text.
+    if !issue.priority.is_empty() {
         let badge = gtk::Label::new(Some(&issue.priority));
         badge.add_css_class("ticket-priority");
         meta.append(&badge);
@@ -3172,6 +3171,27 @@ mod scope_tests {
             vec!["Open", "Done"],
         );
         assert_eq!(settings.columns.len(), 3);
+    }
+
+    #[test]
+    fn custom_column_named_other_does_not_absorb_unmapped_tickets() {
+        let mut settings = board_settings();
+        settings.columns.push(preferences::Column {
+            title: "Other".into(),
+            statuses: vec![preferences::StatusRef {
+                project_key: "ART".into(), status_id: "9".into(),
+            }],
+        });
+        let issues = [
+            issue("ART-9", "9", "Explicitly mapped to Other"),
+            issue("ART-404", "404", "Unmapped issue"),
+        ];
+        let groups = visible_board_groups(&settings, &issues, "");
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].1.iter().map(|issue| issue.key.as_str())
+            .collect::<Vec<_>>(), vec!["ART-9"]);
+        assert_eq!(groups[1].1.iter().map(|issue| issue.key.as_str())
+            .collect::<Vec<_>>(), vec!["ART-404"]);
     }
 
     #[test]
