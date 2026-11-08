@@ -85,15 +85,32 @@ pub fn render_actions(
         let submit = submit.clone();
         let on_open = on_open.clone();
         button.connect_clicked(move |_| {
-            if transition.required_fields.is_empty() {
-                submit(transition.clone(), Map::new());
-            } else if let Some(parent) = parent.upgrade() {
-                open_transition_form(&parent, &key, cloud, transition.clone(), submit.clone(), on_open.clone());
+            if let Some(parent) = parent.upgrade() {
+                activate_transition(
+                    &parent, &key, cloud, transition.clone(), submit.clone(), on_open.clone(),
+                );
             }
         });
         actions.insert(&button, -1);
     }
     container.append(&actions);
+}
+
+/// Execute a workflow action from either the inspector or the command palette.
+/// Transitions with required fields use the same validation dialog in both places.
+pub fn activate_transition(
+    parent: &adw::ApplicationWindow,
+    issue_key: &str,
+    cloud: bool,
+    transition: IssueTransition,
+    submit: TransitionSubmit,
+    on_open: FormOpened,
+) {
+    if transition.required_fields.is_empty() {
+        submit(transition, Map::new());
+    } else {
+        open_transition_form(parent, issue_key, cloud, transition, submit, on_open);
+    }
 }
 
 fn open_transition_form(
