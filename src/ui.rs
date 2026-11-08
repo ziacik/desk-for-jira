@@ -3252,7 +3252,10 @@ mod detail_layout_tests {
 
         let context = glib::MainContext::default();
         let advance = || {
-            while context.pending() {
+            // A frame source can remain perpetually ready; never drain the
+            // context indefinitely in a test helper.
+            for _ in 0..16 {
+                if !context.pending() { break; }
                 context.iteration(false);
             }
             std::thread::sleep(Duration::from_millis(16));
