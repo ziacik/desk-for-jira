@@ -118,54 +118,104 @@ button.collapsed-expand:hover {
   color: alpha(@window_fg_color, 0.78);
 }
 
-/* Readable, theme-aware issue inspector. Never use fixed light-only text colors. */
+/* The inspector has one accented hero; the content below stays calm and flat. */
 .detail-panel {
   color: @window_fg_color;
   background-color: @window_bg_color;
   border-left: 1px solid alpha(@window_fg_color, 0.10);
 }
-.detail-panel-header {
-  border-bottom: 1px solid alpha(@window_fg_color, 0.08);
-}
 .detail-hero {
-  padding-bottom: 3px;
+  padding: 19px 20px 17px;
+  border-radius: 15px;
+  background-color: alpha(@accent_bg_color, 0.055);
+  border: 1px solid alpha(@accent_color, 0.13);
+}
+.detail-eyebrow {
+  color: alpha(@window_fg_color, 0.7);
+}
+.detail-type-mark {
+  min-width: 27px;
+  min-height: 27px;
+  border-radius: 8px;
+  background-color: alpha(#3299e6, 0.15);
+  color: #1876c6;
+}
+.detail-type-mark.kind-bug {
+  color: #bd5843;
+  background-color: alpha(#eb7655, 0.16);
+}
+.detail-type-mark.kind-story {
+  color: #7551bb;
+  background-color: alpha(#9a78e8, 0.16);
+}
+.detail-type-mark image {
+  -gtk-icon-size: 15px;
 }
 .detail-key {
-  color: @accent_color;
+  color: alpha(@window_fg_color, 0.72);
   font-weight: 750;
   font-size: 0.92em;
-  letter-spacing: 0.02em;
 }
 .detail-kind {
-  color: alpha(@window_fg_color, 0.65);
-  font-size: 0.9em;
-  font-weight: 500;
+  color: alpha(@window_fg_color, 0.72);
+  font-size: 0.80em;
+  padding: 3px 8px;
+  border-radius: 999px;
+  background-color: alpha(@window_fg_color, 0.065);
 }
 .detail-title {
   color: @window_fg_color;
-  font-weight: 750;
-  font-size: 1.4em;
+  font-weight: 780;
+  font-size: 1.55em;
+  line-height: 1.2;
+}
+.detail-status-pill {
+  color: @accent_color;
+  background-color: alpha(@accent_bg_color, 0.16);
+  border: 1px solid alpha(@accent_color, 0.17);
+  border-radius: 999px;
+  padding: 5px 10px;
+  font-size: 0.85em;
+  font-weight: 720;
+}
+.detail-priority-pill {
+  color: alpha(@window_fg_color, 0.83);
+  background-color: alpha(@window_fg_color, 0.065);
+  border-radius: 999px;
+  padding: 5px 10px;
+  font-size: 0.85em;
+  font-weight: 600;
+}
+.detail-epic-row {
+  color: alpha(@window_fg_color, 0.72);
+  font-size: 0.91em;
+}
+.detail-epic-icon {
+  color: #8668be;
+  -gtk-icon-size: 14px;
+}
+button.detail-epic-link,
+button.detail-file-link {
+  min-height: 0;
+  padding: 0;
+  background: transparent;
+  border: none;
+  box-shadow: none;
 }
 .detail-metadata {
-  padding: 16px;
-  border-radius: 12px;
-  background-color: alpha(@window_fg_color, 0.04);
-  border: 1px solid alpha(@window_fg_color, 0.055);
+  padding: 4px 2px 20px;
+  border-bottom: 1px solid alpha(@window_fg_color, 0.11);
 }
 .detail-field-label {
-  color: alpha(@window_fg_color, 0.66);
-  font-size: 0.86em;
+  color: alpha(@window_fg_color, 0.59);
+  font-size: 0.85em;
 }
 .detail-field-value {
   color: @window_fg_color;
-  font-size: 0.95em;
-  font-weight: 570;
+  font-size: 0.98em;
+  font-weight: 640;
 }
-.detail-status {
-  font-weight: 700;
-  color: @accent_color;
-}
-/* Same compact hit area as the other headerbar icon actions. */
+/* Toolbar actions share one icon system and compact hit areas. */
 button.detail-header-action {
   min-width: 24px;
   min-height: 24px;
@@ -178,34 +228,54 @@ button.detail-header-action {
 button.detail-header-action:hover {
   background-color: alpha(@window_fg_color, 0.08);
 }
-
 .detail-section {
-  padding-top: 6px;
+  padding-top: 4px;
+}
+.detail-section-heading {
+  padding-bottom: 7px;
+  border-bottom: 1px solid alpha(@window_fg_color, 0.085);
+}
+.detail-section-icon {
+  color: @accent_color;
+  -gtk-icon-size: 16px;
 }
 .detail-section-title {
   color: @window_fg_color;
-  font-size: 1em;
-  font-weight: 750;
+  font-size: 1.08em;
+  font-weight: 760;
 }
-.detail-body {
+.detail-section-count {
+  color: alpha(@window_fg_color, 0.67);
+  background-color: alpha(@window_fg_color, 0.075);
+  font-size: 0.78em;
+  font-weight: 650;
+  border-radius: 999px;
+  padding: 3px 8px;
+}
+.detail-body,
+.issue-prose {
   color: @window_fg_color;
 }
 .issue-comment {
-  padding: 12px;
-  border-radius: 11px;
-  border: 1px solid alpha(@window_fg_color, 0.07);
-  background-color: alpha(@window_fg_color, 0.025);
+  padding: 12px 0 15px;
+  border-bottom: 1px solid alpha(@window_fg_color, 0.08);
+}
+.issue-comment-avatar {
+  min-width: 34px;
+  min-height: 34px;
+  border-radius: 999px;
+  color: @accent_color;
+  background-color: alpha(@accent_bg_color, 0.16);
+  font-size: 0.95em;
+  font-weight: 750;
 }
 .issue-comment-author {
   color: @window_fg_color;
-  font-weight: 700;
+  font-weight: 740;
 }
 .issue-comment-date {
-  color: alpha(@window_fg_color, 0.6);
-  font-size: 0.84em;
-}
-.issue-prose {
-  color: @window_fg_color;
+  color: alpha(@window_fg_color, 0.58);
+  font-size: 0.82em;
 }
 .issue-heading {
   color: @window_fg_color;
@@ -258,19 +328,19 @@ button.detail-header-action:hover {
   border-right: 1px solid alpha(@window_fg_color, 0.09);
 }
 .issue-image-card {
-  padding: 8px;
-  border: 1px solid alpha(@window_fg_color, 0.085);
-  border-radius: 10px;
-  background-color: @card_bg_color;
+  padding: 5px;
+  border: 1px solid alpha(@window_fg_color, 0.075);
+  border-radius: 11px;
+  background-color: alpha(@window_fg_color, 0.018);
 }
 .issue-image-slot {
   color: @window_fg_color;
-  min-height: 160px;
+  min-height: 90px;
 }
 button.issue-image-preview {
   padding: 0;
   border: none;
-  border-radius: 6px;
+  border-radius: 7px;
   background: transparent;
   box-shadow: none;
 }
@@ -282,14 +352,24 @@ button.issue-image-preview:focus-visible {
   outline-offset: 2px;
 }
 .issue-image-caption {
-  color: alpha(@window_fg_color, 0.7);
-  font-size: 0.84em;
+  color: alpha(@window_fg_color, 0.62);
+  padding: 3px 4px 2px;
+  font-size: 0.81em;
+}
+.detail-file {
+  min-height: 34px;
+  padding: 5px 10px;
+  border-radius: 9px;
+  background-color: alpha(@window_fg_color, 0.035);
+}
+.detail-file-icon {
+  color: alpha(@window_fg_color, 0.57);
+  -gtk-icon-size: 15px;
 }
 .detail-empty {
-  color: alpha(@window_fg_color, 0.65);
+  color: alpha(@window_fg_color, 0.63);
   font-style: italic;
 }
-
 
 /* Desk for Jira: visual system built on theme-aware Adwaita surfaces. */
 .workspace-root {
@@ -499,19 +579,6 @@ button.issue-card label.ticket-epic-label {
   color: alpha(@window_fg_color, 0.78);
   font-size: 0.82em;
 }
-.detail-panel {
-  background-color: @window_bg_color;
-  border-left: 1px solid alpha(@window_fg_color, 0.11);
-}
-.detail-metadata {
-  border-radius: 13px;
-  padding: 15px;
-  background-color: alpha(@window_fg_color, 0.038);
-}
-.detail-section-title {
-  font-size: 1.04em;
-}
-.detail-key, .detail-status, .issue-list-marker { color: #4c72dc; }
 label link, label link:visited { color: #416dde; }
 label link:hover { color: #618bff; }
 
@@ -555,15 +622,10 @@ button:checked .unassigned-question {
 
 /* Workflow controls belong to the issue, not to the board's visual columns. */
 .detail-actions {
-  padding: 12px 22px 13px;
-  border-bottom: 1px solid alpha(@window_fg_color, 0.085);
-  background-color: alpha(@window_fg_color, 0.025);
-}
-.detail-actions-heading {
-  color: alpha(@window_fg_color, 0.70);
-  font-size: 0.78em;
-  font-weight: 700;
-  letter-spacing: 0.04em;
+  padding-top: 12px;
+  margin-top: 3px;
+  border-top: 1px solid alpha(@window_fg_color, 0.10);
+  background-color: transparent;
 }
 button.transition-action {
   color: @window_fg_color;
