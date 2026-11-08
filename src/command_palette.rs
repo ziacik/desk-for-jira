@@ -375,8 +375,7 @@ pub(crate) fn open(
 
     entry.connect_search_changed({
         let remote_issues = remote_issues.clone();
-        let error = error.clone();
-        let loading = loading.clone();
+        let status = status.clone();
         let request_id = request_id.clone();
         let debounce = debounce.clone();
         let update = update.clone();
@@ -387,9 +386,12 @@ pub(crate) fn open(
                 source.remove();
             }
             remote_issues.borrow_mut().clear();
-            *error.borrow_mut() = None;
             let jql = make_search_jql(entry.text().as_str());
-            loading.set(jql.is_some() && account.is_some());
+            {
+                let mut status = status.borrow_mut();
+                status.search_error = None;
+                status.search_loading = jql.is_some() && account.is_some();
+            }
             update();
             if let (Some(jql), Some(account)) = (jql, account.clone()) {
                 let sender = sender.clone();
@@ -423,8 +425,8 @@ pub(crate) fn open(
     glib::timeout_add_local(Duration::from_millis(90), {
         let update = update.clone();
         let remote_issues = remote_issues.clone();
-        let error = error.clone();
-        let loading = loading.clone();
+        let status = status.clone();
+        let all_items = all_items.clone();
         let request_id = request_id.clone();
         move || {
             if closed.get() {
@@ -434,11 +436,28 @@ pub(crate) fn open(
                 if id != request_id.get() {
                     continue;
                 }
-                loading.set(false);
+                status.borrow_mut().search_loading = false;
                 match result {
                     Ok(issues) => *remote_issues.borrow_mut() = issues,
-                    Err(message) => *error.borrow_mut() = Some(message),
+                    Err(message) => status.borrow_mut().search_error = Some(message),
                 }
+                update();
+            }
+            while let Ok((key, result)) = transition_receiver.try_recv() {
+                let mut status = status.borrow_mut();
+                status.transitions_loading = false;
+                match result {
+                    Ok(transitions) => {
+                        let actions = transition_items(&key, transitions);
+                        let mut items = all_items.borrow_mut();
+                        let index = items.iter().position(|item| {
+                            matches!(item.command, PaletteCommand::OpenIssue(_))
+                        }).unwrap_or(items.len());
+                        items.splice(index..index, actions);
+                    }
+                    Err(message) => status.transitions_error = Some(message),
+                }
+                drop(status);
                 update();
             }
             glib::ControlFlow::Continue
