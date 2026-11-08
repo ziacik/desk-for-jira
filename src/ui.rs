@@ -12,6 +12,7 @@ use gtk::glib;
 
 use crate::{
     issue_detail,
+    command_palette::{self, PaletteCommand, PaletteItem},
     jira::{AuthMode, Credentials, Issue, IssueTransition, JiraClient, Project, ProjectStatus},
     transition_ui,
     preferences::{self, BoardSettings, IssueScope, UiLayout, ViewSettings},
@@ -36,6 +37,8 @@ struct Ui {
     refresh_button: gtk::Button,
     manage_projects_button: gtk::Button,
     manage_columns_button: gtk::Button,
+    palette_button: gtk::Button,
+    palette_window: Rc<RefCell<Option<gtk::Window>>>,
     search: gtk::SearchEntry,
     center_title: gtk::Label,
     board_box: gtk::Box,
@@ -93,6 +96,7 @@ struct State {
     statuses: Vec<ProjectStatus>,
     issues: Vec<Issue>,
     pinned_issues: Vec<Issue>,
+    recent_issues: Vec<Issue>,
     issue_scope: IssueScope,
     active_sprint_only: bool,
     issue_cache: HashMap<BoardKey, Vec<Issue>>,
@@ -228,11 +232,17 @@ fn build_ui(app: &adw::Application) {
         .icon_name("view-refresh-symbolic")
         .tooltip_text("Refresh Jira data")
         .build();
+    let palette_button = gtk::Button::builder()
+        .icon_name("system-search-symbolic")
+        .tooltip_text("Command palette (Ctrl+K)")
+        .build();
+    palette_button.add_css_class("flat");
     let spinner = gtk::Spinner::new();
     spinner.set_visible(false);
     header.pack_start(&sidebar_toggle);
     header.pack_end(&disconnect_button);
     header.pack_end(&refresh_button);
+    header.pack_end(&palette_button);
     header.pack_end(&spinner);
 
 
@@ -588,7 +598,9 @@ fn build_ui(app: &adw::Application) {
         window, toast, header_title, spinner, status, projects_label, sidebar_projects,
         project_filter: Rc::new(RefCell::new(None)),
         connect_button, disconnect_button, refresh_button,
-        manage_projects_button, manage_columns_button, search, center_title,
+        manage_projects_button, manage_columns_button, palette_button,
+        palette_window: Rc::new(RefCell::new(None)),
+        search, center_title,
         board_box, pinned_section, pinned_box, pinned_scroll, pinned_count,
         detail_box, detail_actions, detail_panel, detail_heading, open_in_jira, copy_branch, pin_detail, inner_split,
         state: state.clone(),
@@ -631,6 +643,7 @@ fn build_ui(app: &adw::Application) {
             let state = state.borrow();
             let issue = key.as_deref().and_then(|key| {
                 state.issues.iter().chain(state.pinned_issues.iter())
+                    .chain(state.recent_issues.iter())
                     .find(|issue| issue.key == key)
             });
             if let Some(issue) = issue
@@ -650,6 +663,7 @@ fn build_ui(app: &adw::Application) {
                 let state = ui.state.borrow();
                 key.as_deref().and_then(|key| {
                     state.issues.iter().chain(state.pinned_issues.iter())
+                        .chain(state.recent_issues.iter())
                         .find(|issue| issue.key == key).cloned()
                 })
             };
@@ -675,8 +689,18 @@ fn build_ui(app: &adw::Application) {
         let saved_width = ui.saved_detail_width.clone();
         let selected_issue = ui.selected_issue.clone();
         let selected_button = ui.selected_button.clone();
+        let command_ui = ui.clone();
+        let command_state = state.clone();
+        let command_sender = sender.clone();
         let keys = gtk::EventControllerKey::new();
+        keys.set_propagation_phase(gtk::PropagationPhase::Capture);
         keys.connect_key_pressed(move |_, key, _, modifiers| {
+            if key == gtk::gdk::Key::k
+                && modifiers.contains(gtk::gdk::ModifierType::CONTROL_MASK)
+            {
+                show_command_palette(&command_ui, &command_state, &command_sender);
+                return glib::Propagation::Stop;
+            }
             let (Some(panel), Some(search)) = (panel.upgrade(), search.upgrade())
                 else { return glib::Propagation::Proceed };
             if key == gtk::gdk::Key::Escape && panel.is_visible() && !search.has_focus() {
@@ -756,6 +780,14 @@ fn build_ui(app: &adw::Application) {
 }
 
 fn wire_actions(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>) {
+    {
+        let ui = ui.clone();
+        let state = state.clone();
+        let sender = sender.clone();
+        ui.palette_button.clone().connect_clicked(move |_| {
+            show_command_palette(&ui, &state, &sender);
+        });
+    }
     for (button, scope) in [
         (ui.mine_filter.clone(), IssueScope::Mine),
         (ui.unassigned_filter.clone(), IssueScope::Unassigned),
@@ -858,6 +890,7 @@ fn wire_actions(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>) {
                 s.projects.clear();
                 s.issues.clear();
                 s.pinned_issues.clear();
+                s.recent_issues.clear();
                 s.statuses.clear();
                 s.settings = BoardSettings::default();
                 s.issue_scope = IssueScope::Mine;
@@ -926,6 +959,7 @@ fn handle_event(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>, eve
                         s.statuses.clear();
                         s.issues.clear();
                         s.pinned_issues.clear();
+                        s.recent_issues.clear();
                         s.clear_board_cache();
                         s.issue_scope = view.scope;
                         s.active_sprint_only = view.active_sprint_only;
