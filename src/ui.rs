@@ -2407,6 +2407,10 @@ fn render_board(ui: &Ui, state: &State) {
         && !groups.iter().any(|(_, issues)| issues.iter().any(|issue| issue.key == key))
         && !pinned_issue_refs(&state.settings, &state.issues, &state.pinned_issues)
             .iter().any(|issue| issue.key == key)
+        // Keep a ticket found through global Jira search open even though
+        // it is not a member of the currently loaded board.
+        && !state.recent_issues.iter().any(|issue| issue.key == key
+            && !state.issues.iter().any(|loaded| loaded.key == key))
     {
         close_issue_details(ui);
     }
