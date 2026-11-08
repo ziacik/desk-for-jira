@@ -148,13 +148,19 @@ impl State {
     }
 }
 
+#[derive(Debug)]
+struct TransitionFailure {
+    message: String,
+    worklog_recorded: bool,
+}
+
 enum Event {
     Stored(Result<Option<Credentials>, String>),
     Loaded(u64, Credentials, Result<Loaded, String>),
     BoardLoaded(u64, BoardKey, Result<BoardData, String>),
     ImageLoaded(u64, String, String, Result<Vec<u8>, String>),
     TransitionsLoaded(u64, u64, String, Result<Vec<IssueTransition>, String>),
-    TransitionFinished(u64, String, IssueTransition, Result<(), String>),
+    TransitionFinished(u64, String, IssueTransition, Result<(), TransitionFailure>),
     Disconnected(u64, Result<(), String>),
 }
 
@@ -936,7 +942,7 @@ fn transition_submit(
     let state = state.clone();
     let sender = sender.clone();
     let selected_key = selected_key.to_owned();
-    Rc::new(move |transition, fields, issue_edits| {
+    Rc::new(move |transition, fields, issue_edits, worklog| {
         if transition_busy.get()
             || selected_issue.borrow().as_deref() != Some(selected_key.as_str())
         {
@@ -951,23 +957,31 @@ fn transition_submit(
         let key = selected_key.clone();
         let sender = sender.clone();
         thread::spawn(move || {
+            let mut worklog_recorded = false;
+            let mut issue_fields_saved = false;
             let result = (|| -> anyhow::Result<()> {
                 let client = JiraClient::new(account)?;
-                let has_edits = !issue_edits.is_empty();
-                if has_edits {
+                if !issue_edits.is_empty() {
                     client.edit_issue_fields(&key, issue_edits)?;
+                    issue_fields_saved = true;
+                }
+                if let Some(log) = worklog {
+                    client.add_worklog(&key, log)?;
+                    worklog_recorded = true;
                 }
                 client.transition_issue(&key, &transition.id, fields)
-                    .map_err(|error| {
-                        if has_edits {
-                            anyhow::anyhow!(
-                                "Issue fields were saved, but the status change failed: {error}"
-                            )
-                        } else {
-                            error
-                        }
-                    })
-            })().map_err(|err| err.to_string());
+            })().map_err(|error| {
+                let note = match (issue_fields_saved, worklog_recorded) {
+                    (true, true) => "Issue fields and work were saved, but the status did not change. ",
+                    (true, false) => "Issue fields were saved, but the status did not change. ",
+                    (false, true) => "Work was logged, but the status did not change. ",
+                    (false, false) => "",
+                };
+                TransitionFailure {
+                    message: format!("{note}{error}"),
+                    worklog_recorded,
+                }
+            });
             let _ = sender.send(Event::TransitionFinished(id, key, transition, result));
         });
         true
@@ -1179,9 +1193,9 @@ fn handle_event(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>, eve
                         .is_some_and(|form| form.key == key);
                     if has_form {
                         if let Some(form) = ui.transition_form.borrow().as_ref() {
-                            form.show_error(&error);
+                            form.show_error(&error.message, error.worklog_recorded);
                         }
-                    } else if transition_error_needs_input(&error) {
+                    } else if transition_error_needs_input(&error.message) {
                         if let Some(account) = state.borrow().account.as_ref() {
                             let cloud = account.mode == AuthMode::Cloud;
                             transition_ui::open_transition_form(
@@ -1190,11 +1204,11 @@ fn handle_event(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>, eve
                                 transition_form_opened(ui),
                             );
                             if let Some(form) = ui.transition_form.borrow().as_ref() {
-                                form.show_error(&error);
+                                form.show_error(&error.message, error.worklog_recorded);
                             }
                         }
                     } else {
-                        show_error(ui, &error);
+                        show_error(ui, &error.message);
                     }
                 }
             }
