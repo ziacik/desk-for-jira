@@ -1,4 +1,4 @@
-use std::{collections::{HashMap, HashSet}, io::Read, time::Duration};
+use std::{collections::{HashMap, HashSet}, fmt, io::Read, time::Duration};
 
 use anyhow::{Context, Result, bail, ensure};
 use reqwest::blocking::{Client, RequestBuilder};
@@ -94,6 +94,42 @@ impl Attachment {
     }
 }
 
+
+/// A rejected Jira transition with the original HTTP status and structured
+/// field keys. Human-readable error messages must never be reverse-parsed to
+/// determine field identity.
+#[derive(Debug)]
+pub struct JiraTransitionError {
+    pub status: u16,
+    pub message: String,
+    pub field_keys: Vec<String>,
+}
+
+impl JiraTransitionError {
+    fn from_response(status: u16, body: &str) -> Self {
+        let field_keys = serde_json::from_str::<Value>(body).ok()
+            .and_then(|response| response.get("errors").and_then(Value::as_object).cloned())
+            .map(|errors| errors.into_keys().collect())
+            .unwrap_or_default();
+        Self {
+            status,
+            message: jira_error_message(body),
+            field_keys,
+        }
+    }
+
+    pub fn is_validation_failure(&self) -> bool {
+        matches!(self.status, 400 | 422)
+    }
+}
+
+impl fmt::Display for JiraTransitionError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Jira HTTP {}: {}", self.status, self.message)
+    }
+}
+
+impl std::error::Error for JiraTransitionError {}
 
 #[derive(Clone, Debug)]
 pub struct TransitionChoice {
@@ -380,7 +416,7 @@ impl JiraClient {
         let status = response.status();
         if !status.is_success() {
             let body = response.text().unwrap_or_default();
-            bail!("Jira HTTP {}: {}", status.as_u16(), jira_error_message(&body));
+            return Err(JiraTransitionError::from_response(status.as_u16(), &body).into());
         }
         Ok(())
     }
@@ -1401,6 +1437,23 @@ mod transition_tests {
         let transitions = parse_issue_transitions(&data);
         assert_eq!(transitions.len(), 1);
         assert!(transitions[0].fields.is_empty());
+    }
+
+    #[test]
+    fn uses_machine_field_keys_instead_of_error_message_guesses() {
+        let structured = JiraTransitionError::from_response(
+            400,
+            r#"{"errorMessages":["Please fill impact assessment and fix versions"],"errors":{"customfield_10135":"Required","fixVersions":"Required"}}"#,
+        );
+        assert_eq!(structured.field_keys, vec!["customfield_10135", "fixVersions"]);
+        assert!(structured.is_validation_failure());
+
+        let unstructured = JiraTransitionError::from_response(
+            400, r#"{"errorMessages":["Please fill impact assessment and fix versions"]}"#,
+        );
+        assert!(unstructured.field_keys.is_empty());
+        assert!(unstructured.is_validation_failure());
+        assert!(!JiraTransitionError::from_response(403, "Forbidden").is_validation_failure());
     }
 
     #[test]
