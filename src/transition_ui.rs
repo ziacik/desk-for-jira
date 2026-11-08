@@ -308,11 +308,23 @@ fn append_field_row(form: &gtk::Box, field: &TransitionField, cloud: bool) -> Fi
         FieldControl::Worklog { duration, note }
     } else if !field.choices.is_empty() && field.schema_type == "array" {
         let mut checks = Vec::new();
+        let choices = gtk::FlowBox::new();
+        choices.set_selection_mode(gtk::SelectionMode::None);
+        choices.set_max_children_per_line(3);
+        choices.set_column_spacing(10);
+        choices.set_row_spacing(7);
         for choice in &field.choices {
             let check = gtk::CheckButton::with_label(&choice.label);
-            row.append(&check);
+            choices.insert(&check, -1);
             checks.push(check);
         }
+        let scroll = gtk::ScrolledWindow::new();
+        scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
+        scroll.set_min_content_height(75);
+        scroll.set_max_content_height(200);
+        scroll.set_propagate_natural_height(true);
+        scroll.set_child(Some(&choices));
+        row.append(&scroll);
         FieldControl::Multiple(checks)
     } else if !field.choices.is_empty() {
         let labels = std::iter::once("Select a value…")
@@ -470,7 +482,10 @@ fn control_value(
 fn valid_worklog_duration(value: &str) -> bool {
     let mut parts = value.split_whitespace();
     let valid_part = |part: &str| {
-        let (digits, unit) = part.split_at(part.len().saturating_sub(1));
+        let Some((offset, _)) = part.char_indices().last() else {
+            return false;
+        };
+        let (digits, unit) = part.split_at(offset);
         !digits.is_empty() && digits.bytes().all(|digit| digit.is_ascii_digit())
             && digits.parse::<u32>().is_ok_and(|amount| amount > 0)
             && matches!(unit, "w" | "d" | "h" | "m")
@@ -519,7 +534,7 @@ mod tests {
         for text in ["45m", "2h", "1h 30m", "1d 2h 5m"] {
             assert!(valid_worklog_duration(text), "{text}");
         }
-        for text in ["", "{}", "0m", "30", "garbage"] {
+        for text in ["", "{}", "0m", "30", "garbage", "😀"] {
             assert!(!valid_worklog_duration(text), "{text}");
         }
     }
