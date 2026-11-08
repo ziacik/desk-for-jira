@@ -81,10 +81,25 @@ struct FormField {
 
 fn field_mentioned(message: &str, field: &TransitionField) -> bool {
     let error = message.to_lowercase();
-    (field.is_worklog() && (error.contains("time spent") || error.contains("log work")))
-        || error.contains(&field.id.to_lowercase())
-        || (field.name.chars().count() >= 4
-            && error.contains(&field.name.to_lowercase()))
+    if field.is_worklog() && (error.contains("time spent") || error.contains("log work")) {
+        return true;
+    }
+    if field.name.chars().count() >= 4 && error.contains(&field.name.to_lowercase()) {
+        return true;
+    }
+
+    // Jira may report machine field IDs, e.g. "versions: Required".
+    // An ordinary substring search is wrong: "versions" also occurs in
+    // "fix versions", so it falsely asks for Affects versions.
+    let id = field.id.to_lowercase();
+    let key = format!("{id}:");
+    error.split([';', '\n']).any(|part| {
+        let part = part.trim();
+        let part = part.strip_prefix("jira http 400:")
+            .or_else(|| part.strip_prefix("jira http 422:"))
+            .unwrap_or(part).trim();
+        part.starts_with(&key)
+    }) || ["'", "\"","`"].iter().any(|quote| error.contains(&format!("{quote}{id}{quote}")))
 }
 
 fn referenced_fields(message: &str, fields: &[TransitionField]) -> Vec<TransitionField> {
@@ -577,6 +592,25 @@ mod tests {
             custom_type: String::new(), required: false, choices: vec![],
         };
         assert!(field_mentioned("Time spent is required", &worklog));
+    }
+
+    #[test]
+    fn distinguishes_fix_versions_from_affects_versions() {
+        let fix_versions = TransitionField {
+            id: "fixVersions".into(), name: "Fix versions".into(),
+            schema_type: "array".into(), item_type: "version".into(),
+            custom_type: String::new(), required: false, choices: vec![],
+        };
+        let affects_versions = TransitionField {
+            id: "versions".into(), name: "Affects versions".into(),
+            ..fix_versions.clone()
+        };
+        let jira_error = "Jira HTTP 400: Please fill the impact assessment and fix versions fields.";
+        assert!(field_mentioned(jira_error, &fix_versions));
+        assert!(!field_mentioned(jira_error, &affects_versions));
+        assert!(!field_mentioned("Jira HTTP 400: fixVersions: Required", &affects_versions));
+        assert!(field_mentioned("Jira HTTP 400: versions: Required", &affects_versions));
+        assert!(field_mentioned("Affects versions must be set", &affects_versions));
     }
 
     #[test]
