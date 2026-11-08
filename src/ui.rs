@@ -150,7 +150,7 @@ enum Event {
     BoardLoaded(u64, BoardKey, Result<BoardData, String>),
     ImageLoaded(u64, String, String, Result<Vec<u8>, String>),
     TransitionsLoaded(u64, u64, String, Result<Vec<IssueTransition>, String>),
-    TransitionFinished(u64, String, String, String, Result<(), String>),
+    TransitionFinished(u64, String, IssueTransition, Result<(), String>),
     Disconnected(u64, Result<(), String>),
 }
 
@@ -891,6 +891,88 @@ fn wire_actions(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>) {
     }
 }
 
+fn transition_submit(
+    ui: &Ui,
+    state: &Rc<RefCell<State>>,
+    sender: &Sender<Event>,
+    selected_key: &str,
+) -> transition_ui::TransitionSubmit {
+    let selected_issue = ui.selected_issue.clone();
+    let transition_busy = ui.transition_busy.clone();
+    let detail_actions = ui.detail_actions.downgrade();
+    let state = state.clone();
+    let sender = sender.clone();
+    let selected_key = selected_key.to_owned();
+    Rc::new(move |transition, fields, issue_edits| {
+        if transition_busy.get()
+            || selected_issue.borrow().as_deref() != Some(selected_key.as_str())
+        {
+            return false;
+        }
+        let Some(account) = state.borrow().account.clone() else { return false };
+        let id = state.borrow().generation;
+        transition_busy.set(true);
+        if let Some(actions) = detail_actions.upgrade() {
+            actions.set_sensitive(false);
+        }
+        let key = selected_key.clone();
+        let sender = sender.clone();
+        thread::spawn(move || {
+            let result = (|| -> anyhow::Result<()> {
+                let client = JiraClient::new(account)?;
+                let has_edits = !issue_edits.is_empty();
+                if has_edits {
+                    client.edit_issue_fields(&key, issue_edits)?;
+                }
+                client.transition_issue(&key, &transition.id, fields)
+                    .map_err(|error| {
+                        if has_edits {
+                            anyhow::anyhow!(
+                                "Issue fields were saved, but the status change failed: {error}"
+                            )
+                        } else {
+                            error
+                        }
+                    })
+            })().map_err(|err| err.to_string());
+            let _ = sender.send(Event::TransitionFinished(id, key, transition, result));
+        });
+        true
+    })
+}
+
+fn transition_form_opened(ui: &Ui) -> transition_ui::FormOpened {
+    let form_slot = ui.transition_form.clone();
+    Rc::new(move |form| {
+        let previous = form_slot.borrow_mut().take();
+        if let Some(previous) = previous {
+            previous.close();
+        }
+        let weak_slot = Rc::downgrade(&form_slot);
+        form.window.connect_close_request(move |window| {
+            if let Some(slot) = weak_slot.upgrade() {
+                let is_current = slot.borrow().as_ref()
+                    .is_some_and(|current| current.window == *window);
+                if is_current {
+                    slot.borrow_mut().take();
+                }
+            }
+            glib::Propagation::Proceed
+        });
+        *form_slot.borrow_mut() = Some(form);
+    })
+}
+
+fn transition_error_needs_input(error: &str) -> bool {
+    let lower = error.to_ascii_lowercase();
+    lower.contains("jira http 400:")
+        || lower.contains("jira http 422:")
+        || lower.contains(" is required")
+        || lower.contains("required field")
+        || lower.contains("cannot be empty")
+        || lower.contains("must be specified")
+}
+
 fn handle_event(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>, event: Event) {
     match event {
         Event::Stored(Ok(Some(account))) => start_refresh(ui, state, sender, account, false),
@@ -992,69 +1074,8 @@ fn handle_event(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>, eve
                 Ok(transitions) => {
                     let Some(account) = state.borrow().account.clone() else { return };
                     let cloud = account.mode == AuthMode::Cloud;
-                    let selected_issue = ui.selected_issue.clone();
-                    let transition_busy = ui.transition_busy.clone();
-                    let detail_actions = ui.detail_actions.downgrade();
-                    let state_for_submit = state.clone();
-                    let sender_for_submit = sender.clone();
-                    let selected_key = key.clone();
-                    let submit: transition_ui::TransitionSubmit = Rc::new(move |transition, fields, issue_edits| {
-                        if transition_busy.get()
-                            || selected_issue.borrow().as_deref() != Some(selected_key.as_str())
-                        {
-                            return false;
-                        }
-                        let Some(account) = state_for_submit.borrow().account.clone() else { return false };
-                        let id = state_for_submit.borrow().generation;
-                        transition_busy.set(true);
-                        if let Some(actions) = detail_actions.upgrade() {
-                            actions.set_sensitive(false);
-                        }
-                        let key = selected_key.clone();
-                        let sender = sender_for_submit.clone();
-                        thread::spawn(move || {
-                            let result = (|| -> anyhow::Result<()> {
-                                let client = JiraClient::new(account)?;
-                                let has_edits = !issue_edits.is_empty();
-                                if has_edits {
-                                    client.edit_issue_fields(&key, issue_edits)?;
-                                }
-                                client.transition_issue(&key, &transition.id, fields)
-                                    .map_err(|error| {
-                                        if has_edits {
-                                            anyhow::anyhow!(
-                                                "Issue fields were saved, but the status change failed: {error}"
-                                            )
-                                        } else {
-                                            error
-                                        }
-                                    })
-                            })().map_err(|err| err.to_string());
-                            let _ = sender.send(Event::TransitionFinished(
-                                id, key, transition.to_id, transition.to_name, result
-                            ));
-                        });
-                        true
-                    });
-                    let form_slot = ui.transition_form.clone();
-                    let on_open: transition_ui::FormOpened = Rc::new(move |form| {
-                        let previous = form_slot.borrow_mut().take();
-                        if let Some(previous) = previous {
-                            previous.close();
-                        }
-                        let weak_slot = Rc::downgrade(&form_slot);
-                        form.window.connect_close_request(move |window| {
-                            if let Some(slot) = weak_slot.upgrade() {
-                                let is_current = slot.borrow().as_ref()
-                                    .is_some_and(|current| current.window == *window);
-                                if is_current {
-                                    slot.borrow_mut().take();
-                                }
-                            }
-                            glib::Propagation::Proceed
-                        });
-                        *form_slot.borrow_mut() = Some(form);
-                    });
+                    let submit = transition_submit(ui, state, sender, &key);
+                    let on_open = transition_form_opened(ui);
                     ui.detail_actions.set_sensitive(!ui.transition_busy.get());
                     transition_ui::render_actions(
                         &ui.detail_actions, &ui.window, &key, cloud,
@@ -1070,7 +1091,7 @@ fn handle_event(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>, eve
                 }
             }
         }
-        Event::TransitionFinished(id, key, to_id, to_name, result) => {
+        Event::TransitionFinished(id, key, transition, result) => {
             if state.borrow().generation != id { return; }
             ui.transition_busy.set(false);
             ui.detail_actions.set_sensitive(true);
@@ -1083,9 +1104,9 @@ fn handle_event(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>, eve
                     {
                         let mut s = state.borrow_mut();
                         if let Some(issue) = s.issues.iter_mut().find(|issue| issue.key == key) {
-                            issue.status = to_name.clone();
-                            if !to_id.is_empty() {
-                                issue.status_id = to_id;
+                            issue.status = transition.to_name.clone();
+                            if !transition.to_id.is_empty() {
+                                issue.status_id = transition.to_id.clone();
                             }
                         }
                     }
@@ -1103,23 +1124,32 @@ fn handle_event(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>, eve
                         }
                         request_transitions(&ui.detail_actions, &ui.detail_request, &ui.events, account, id, &key);
                     }
-                    ui.toast.add_toast(adw::Toast::new(&format!("Moved to {to_name}")));
+                    ui.toast.add_toast(adw::Toast::new(&format!("Moved to {}", transition.to_name)));
                 }
                 Err(error) => {
+                    if ui.selected_issue.borrow().as_deref() != Some(key.as_str()) {
+                        return;
+                    }
                     let has_form = ui.transition_form.borrow().as_ref()
                         .is_some_and(|form| form.key == key);
                     if has_form {
                         if let Some(form) = ui.transition_form.borrow().as_ref() {
                             form.show_error(&error);
                         }
+                    } else if transition_error_needs_input(&error) {
+                        if let Some(account) = state.borrow().account.as_ref() {
+                            let cloud = account.mode == AuthMode::Cloud;
+                            transition_ui::open_transition_form(
+                                &ui.window, &key, cloud, transition,
+                                transition_submit(ui, state, sender, &key),
+                                transition_form_opened(ui),
+                            );
+                            if let Some(form) = ui.transition_form.borrow().as_ref() {
+                                form.show_error(&error);
+                            }
+                        }
                     } else {
                         show_error(ui, &error);
-                        if ui.selected_issue.borrow().as_deref() == Some(key.as_str()) {
-                            request_transitions(
-                                &ui.detail_actions, &ui.detail_request, &ui.events,
-                                state.borrow().account.clone(), id, &key,
-                            );
-                        }
                     }
                 }
             }
@@ -2840,6 +2870,20 @@ fn clear_box(container: &gtk::Box) {
 
 fn show_error(ui: &Ui, error: &str) {
     ui.toast.add_toast(adw::Toast::new(error));
+}
+
+#[cfg(test)]
+mod workflow_error_tests {
+    use super::*;
+
+    #[test]
+    fn opens_editor_only_for_validation_failures() {
+        assert!(transition_error_needs_input("Jira HTTP 400: customfield_123: Required"));
+        assert!(transition_error_needs_input("Jira HTTP 422: missing field"));
+        assert!(transition_error_needs_input("Field A is required"));
+        assert!(!transition_error_needs_input("Jira HTTP 401: Unauthorized"));
+        assert!(!transition_error_needs_input("Could not connect to Jira"));
+    }
 }
 
 #[cfg(test)]
