@@ -167,7 +167,6 @@ button.collapsed-expand:hover {
   color: @window_fg_color;
   font-weight: 780;
   font-size: 1.55em;
-  line-height: 1.2;
 }
 .detail-status-pill {
   color: @accent_color;
