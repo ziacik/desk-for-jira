@@ -3250,7 +3250,7 @@ mod detail_layout_tests {
         window.present();
 
         let context = glib::MainContext::default();
-        let mut advance = || {
+        let advance = || {
             while context.pending() {
                 context.iteration(false);
             }
