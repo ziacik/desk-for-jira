@@ -3139,6 +3139,7 @@ mod scope_tests {
             kind: String::new(),
             priority: String::new(),
             fix_versions: Vec::new(),
+            affects_versions: Vec::new(),
             assignee: String::new(),
             updated: String::new(),
             description: String::new(),
