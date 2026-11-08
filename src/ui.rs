@@ -170,7 +170,7 @@ enum Event {
     Loaded(u64, Credentials, Result<Loaded, String>),
     BoardLoaded(u64, BoardKey, Result<BoardData, String>),
     RememberedIssueLoaded(u64, String, Result<Vec<Issue>, String>),
-    PaletteIssueLoaded(u64, String, Result<Issue, String>),
+    PaletteIssueLoaded(u64, String, Box<Result<Issue, String>>),
     OpenLinkedIssue(String),
     ImageLoaded(u64, String, String, Result<Vec<u8>, String>),
     CommentsLoaded(u64, u64, String, Result<Vec<IssueComment>, String>),
@@ -1125,7 +1125,7 @@ fn handle_event(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>, eve
                 return;
             }
             ui.pending_direct_issue.borrow_mut().take();
-            match result {
+            match *result {
                 Ok(issue) => {
                     open_issue(ui, &issue, None);
                     if !state.borrow().busy {
@@ -3142,7 +3142,7 @@ fn open_issue_by_key(ui: &Ui, key: &str) {
         let result = JiraClient::new(account)
             .and_then(|client| client.issue_by_key(&key))
             .map_err(|error| error.to_string());
-        let _ = events.send(Event::PaletteIssueLoaded(generation, key, result));
+        let _ = events.send(Event::PaletteIssueLoaded(generation, key, Box::new(result)));
     });
 }
 
