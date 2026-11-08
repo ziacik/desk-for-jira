@@ -257,16 +257,19 @@ pub(crate) fn open(
     let update: Rc<dyn Fn()> = Rc::new({
         let list = list.clone();
         let hint = hint.clone();
-        let entry = entry.clone();
+        let entry = entry.downgrade();
         let shown_items = shown_items.clone();
         let remote_issues = remote_issues.clone();
         let error = error.clone();
         let loading = loading.clone();
-        move || render_results(
-            &list, &hint, &all_items, &remote_issues.borrow(),
-            entry.text().as_str(), (loading.get(), error.borrow().as_deref()),
-            &shown_items,
-        )
+        move || {
+            let Some(entry) = entry.upgrade() else { return; };
+            render_results(
+                &list, &hint, &all_items, &remote_issues.borrow(),
+                entry.text().as_str(), (loading.get(), error.borrow().as_deref()),
+                &shown_items,
+            );
+        }
     });
     update();
 
