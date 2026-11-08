@@ -118,6 +118,10 @@ impl TransitionField {
             || self.custom_type.ends_with(":textarea")
     }
 
+    pub fn is_worklog(&self) -> bool {
+        self.id == "worklog" || self.schema_type == "worklog"
+    }
+
     pub fn uses_structured_input(&self) -> bool {
         self.choices.is_empty()
             && !matches!(
@@ -298,32 +302,9 @@ impl JiraClient {
             .query(&[("expand", "transitions.fields")]))?;
         let mut transitions = parse_issue_transitions(&data);
 
-        // The transition screen may mark already-populated fields as required.
-        // Existing values generally satisfy that constraint without re-entering
-        // them. Retrieve the relevant issue fields in one request when possible.
-        let required: HashSet<String> = transitions.iter()
-            .flat_map(|transition| transition.fields.iter()
-                .filter(|field| field.required).map(|field| field.id.clone()))
-            .collect();
-        if !required.is_empty() {
-            let list = required.into_iter().collect::<Vec<_>>().join(",");
-            let path = format!("/rest/api/{version}/issue/{key}");
-            if let Ok(issue) = self.read_json(self.http.get(self.url(&path))
-                .query(&[("fields", list)]))
-                && let Some(values) = issue.get("fields").and_then(Value::as_object)
-            {
-                for transition in &mut transitions {
-                    for field in &mut transition.fields {
-                        if values.get(&field.id).is_some_and(field_has_value) {
-                            field.required = false;
-                        }
-                    }
-                }
-            }
-        }
-        // Workflow validators may require issue fields that do not appear on
-        // the transition screen. Offer fields editable separately on the issue
-        // instead of pretending the transition metadata covers all validators.
+        // An issue field may already be populated even when its transition-screen
+        // metadata says "required". Never ask the user to re-enter that value.
+        // Query the current issue after collecting both screen and edit metadata.
         let edit_path = format!("/rest/api/{version}/issue/{key}/editmeta");
         if let Ok(editmeta) = self.read_json(self.http.get(self.url(&edit_path)))
             && let Some(meta_fields) = editmeta.get("fields").and_then(Value::as_object)
@@ -334,6 +315,23 @@ impl JiraClient {
                     field.id != "comment" && !transition.fields.iter()
                         .any(|screen_field| screen_field.id == field.id)
                 }).cloned().collect();
+            }
+        }
+        let field_ids: HashSet<String> = transitions.iter()
+            .flat_map(|transition| transition.fields.iter().chain(&transition.edit_fields))
+            .filter(|field| !field.is_worklog())
+            .map(|field| field.id.clone())
+            .collect();
+        if !field_ids.is_empty() {
+            let names = field_ids.into_iter().collect::<Vec<_>>().join(",");
+            let issue_path = format!("/rest/api/{version}/issue/{key}");
+            if let Ok(issue) = self.read_json(self.http.get(self.url(&issue_path))
+                .query(&[("fields", names)]))
+                && let Some(values) = issue.get("fields").and_then(Value::as_object)
+            {
+                for transition in &mut transitions {
+                    remove_populated_fields(transition, values);
+                }
             }
         }
         Ok(transitions)
@@ -347,6 +345,21 @@ impl JiraClient {
         let path = format!("/rest/api/{version}/issue/{key}");
         let response = self.authorize(self.http.put(self.url(&path))
             .json(&json!({"fields": fields})))
+            .header(reqwest::header::ACCEPT, "application/json")
+            .send().context("Could not connect to Jira")?;
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().unwrap_or_default();
+            bail!("Jira HTTP {}: {}", status.as_u16(), jira_error_message(&body));
+        }
+        Ok(())
+    }
+
+    pub fn add_worklog(&self, key: &str, worklog: Value) -> Result<()> {
+        let version = if self.account.mode == AuthMode::Cloud { "3" } else { "2" };
+        let path = format!("/rest/api/{version}/issue/{key}/worklog");
+        let response = self.authorize(self.http.post(self.url(&path))
+            .json(&worklog))
             .header(reqwest::header::ACCEPT, "application/json")
             .send().context("Could not connect to Jira")?;
         let status = response.status();
@@ -921,6 +934,20 @@ fn field_has_value(value: &Value) -> bool {
     }
 }
 
+fn remove_populated_fields(
+    transition: &mut IssueTransition,
+    values: &serde_json::Map<String, Value>,
+) {
+    // Worklog is an action, not a value that can be satisfied by a prior log.
+    // Other already-set fields are left unchanged and excluded from the form.
+    transition.fields.retain(|field| {
+        field.is_worklog() || !values.get(&field.id).is_some_and(field_has_value)
+    });
+    transition.edit_fields.retain(|field| {
+        field.is_worklog() || !values.get(&field.id).is_some_and(field_has_value)
+    });
+}
+
 fn parse_transition_fields(metadata_fields: &serde_json::Map<String, Value>) -> Vec<TransitionField> {
     let mut fields = Vec::new();
     for (id, metadata) in metadata_fields {
@@ -1252,6 +1279,51 @@ mod transition_tests {
         assert!(!comment.required);
         let defaulted = transition.fields.iter().find(|field| field.id == "customfield_42").unwrap();
         assert!(!defaulted.required);
+    }
+
+    #[test]
+    fn existing_fix_and_affects_versions_are_not_requested_again() {
+        let mut transition = IssueTransition {
+            id: "31".into(), name: "Review".into(),
+            to_name: "Review".into(), to_id: "3".into(),
+            fields: vec![
+                TransitionField { id: "fixVersions".into(), name: "Fix versions".into(),
+                    schema_type: "array".into(), item_type: "version".into(),
+                    custom_type: String::new(), required: true, choices: vec![] },
+                TransitionField { id: "versions".into(), name: "Affects versions".into(),
+                    schema_type: "array".into(), item_type: "version".into(),
+                    custom_type: String::new(), required: true, choices: vec![] },
+                TransitionField { id: "customfield_123".into(), name: "Impact assessment".into(),
+                    schema_type: "string".into(), item_type: String::new(),
+                    custom_type: String::new(), required: false, choices: vec![] },
+            ],
+            edit_fields: vec![],
+        };
+        let values = json!({
+            "fixVersions": [{"id":"14070","name":"19.2 Bugfix 2"}],
+            "versions": [{"id":"10000","name":"15.0.0"}],
+            "customfield_123": null
+        });
+        remove_populated_fields(&mut transition, values.as_object().unwrap());
+        assert_eq!(transition.fields.len(), 1);
+        assert_eq!(transition.fields[0].id, "customfield_123");
+    }
+
+    #[test]
+    fn log_work_is_not_satisfied_by_an_older_worklog() {
+        let mut transition = IssueTransition {
+            id: "31".into(), name: "Review".into(),
+            to_name: "Review".into(), to_id: "3".into(),
+            fields: vec![TransitionField {
+                id: "worklog".into(), name: "Log work".into(), required: true,
+                schema_type: "array".into(), item_type: "worklog".into(),
+                custom_type: String::new(), choices: vec![],
+            }],
+            edit_fields: vec![],
+        };
+        remove_populated_fields(&mut transition,
+            json!({"worklog": [{"id":"99"}]}).as_object().unwrap());
+        assert_eq!(transition.fields.len(), 1);
     }
 
     #[test]
