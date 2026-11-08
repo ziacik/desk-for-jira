@@ -83,6 +83,13 @@ pub struct Issue {
 }
 
 #[derive(Clone, Debug)]
+pub struct IssueComment {
+    pub author: String,
+    pub created: String,
+    pub body: Value,
+}
+
+#[derive(Clone, Debug)]
 pub struct Attachment {
     pub id: String,
     pub filename: String,
@@ -653,6 +660,32 @@ impl JiraClient {
         Ok(bytes)
     }
 
+    /// Fetch complete comments only for the selected issue, not on board loads.
+    /// Jira Cloud returns ADF; Jira Server may use plain-text bodies.
+    pub fn issue_comments(&self, key: &str) -> Result<Vec<IssueComment>> {
+        let version = if self.account.mode == AuthMode::Cloud { "3" } else { "2" };
+        let path = format!("/rest/api/{version}/issue/{key}/comment");
+        let mut start_at = 0usize;
+        let mut comments = Vec::new();
+        loop {
+            let page = self.read_json(self.http.get(self.url(&path))
+                .query(&[("startAt", start_at), ("maxResults", PAGE_SIZE)]))?;
+            let values = page.get("comments").and_then(Value::as_array)
+                .context("Jira returned an invalid comments response")?;
+            let received = values.len();
+            comments.extend(values.iter().filter_map(parse_issue_comment));
+            start_at += received;
+            if received == 0
+                || page.get("total").and_then(Value::as_u64)
+                    .is_some_and(|total| start_at as u64 >= total)
+            {
+                break;
+            }
+        }
+        comments.sort_by(|left, right| right.created.cmp(&left.created));
+        Ok(comments)
+    }
+
     // Older Jira Server projects use the custom Epic Link field instead of parent.
     // Field IDs vary between instances, so never hardcode customfield_10014.
     fn legacy_epic_link_field(&self) -> Option<String> {
@@ -941,6 +974,17 @@ fn parse_issue(v: &Value, epic_link_field: Option<&str>) -> Option<Issue> {
             })).collect(),
         is_epic,
         epic,
+    })
+}
+
+fn parse_issue_comment(value: &Value) -> Option<IssueComment> {
+    Some(IssueComment {
+        author: value.get("author")
+            .and_then(|author| author.get("displayName").or_else(|| author.get("name")))
+            .and_then(Value::as_str).unwrap_or("Unknown user").to_owned(),
+        created: value.get("created").and_then(Value::as_str)
+            .unwrap_or("").to_owned(),
+        body: value.get("body")?.clone(),
     })
 }
 
@@ -1319,6 +1363,30 @@ mod tests {
         for issue in issues.iter().skip(2) {
             assert!(issue.affects_versions.is_empty());
         }
+    }
+
+    #[test]
+    fn parses_comments_with_cloud_adf_and_server_plain_text() {
+        let cloud = parse_issue_comment(&json!({
+            "id": "42", "author": {"displayName": "Anna"},
+            "created": "2026-11-08T13:20:01.000+0100",
+            "body": {"type": "doc", "version": 1, "content": [
+                {"type": "paragraph", "content": [
+                    {"type": "text", "text": "Hello", "marks": [{"type": "strong"}]}
+                ]}
+            ]}
+        })).unwrap();
+        assert_eq!(cloud.author, "Anna");
+        assert_eq!(cloud.body["content"][0]["content"][0]["text"], "Hello");
+
+        let server = parse_issue_comment(&json!({
+            "author": {"name": "legacy-user"},
+            "created": "2026-11-01T09:10:00.000+0100",
+            "body": "Plain text"
+        })).unwrap();
+        assert_eq!(server.author, "legacy-user");
+        assert_eq!(server.body.as_str(), Some("Plain text"));
+        assert!(parse_issue_comment(&json!({"author": {}})).is_none());
     }
 
     #[test]
