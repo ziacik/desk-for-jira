@@ -2951,7 +2951,8 @@ fn watch_detail_resize(ui: &Ui) {
         }
         glib::Propagation::Proceed
     });
-    ui.inner_split.add_controller(observer);
+    // Capture at the window, before GTK's own Paned drag gesture claims events.
+    ui.window.add_controller(observer);
 
     // GtkPaned also supports resizing its handle with the keyboard.
     let keys = gtk::EventControllerKey::new();
