@@ -505,11 +505,9 @@ fn build_ui(app: &adw::Application) {
     history_forward.set_sensitive(false);
     history_nav.append(&history_forward);
     detail_header.pack_start(&history_nav);
-    let detail_box = gtk::Box::new(gtk::Orientation::Vertical, 18);
-    detail_box.set_margin_top(20);
-    detail_box.set_margin_start(22);
-    detail_box.set_margin_end(22);
-    detail_box.set_margin_bottom(28);
+    // Keep the header full-bleed; individual content sections own their padding.
+    let detail_box = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    detail_box.set_hexpand(true);
     let detail_scroll = gtk::ScrolledWindow::new();
     detail_scroll.set_min_content_width(360);
     detail_scroll.set_propagate_natural_width(false);
