@@ -15,6 +15,7 @@ use crate::jira::{Credentials, Issue, JiraClient};
 #[derive(Clone)]
 pub(crate) enum PaletteCommand {
     OpenIssue(Issue),
+    ChangeStatus(Issue),
     FilterProject(Option<String>),
     ChooseProjects,
     EditColumns,
@@ -311,7 +312,7 @@ pub(crate) fn open(
                 let next = if key == gtk::gdk::Key::Down { current + 1 } else { (current - 1).max(0) };
                 if let Some(row) = list.row_at_index(next) {
                     list.select_row(Some(&row));
-                    row.grab_focus();
+                    // Keep focus in SearchEntry so subsequent typing edits the query.
                 }
                 glib::Propagation::Stop
             }
