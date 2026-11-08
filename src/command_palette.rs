@@ -104,10 +104,10 @@ fn render_results(
     all_items: &[PaletteItem],
     remote_issues: &[Issue],
     query: &str,
-    loading: bool,
-    error: Option<&str>,
+    search_status: (bool, Option<&str>),
     shown_items: &RefCell<Vec<PaletteItem>>,
 ) {
+    let (loading, error) = search_status;
     while let Some(row) = list.row_at_index(0) {
         list.remove(&row);
     }
@@ -264,7 +264,7 @@ pub(crate) fn open(
         let loading = loading.clone();
         move || render_results(
             &list, &hint, &all_items, &remote_issues.borrow(),
-            entry.text().as_str(), loading.get(), error.borrow().as_deref(),
+            entry.text().as_str(), (loading.get(), error.borrow().as_deref()),
             &shown_items,
         )
     });
@@ -342,7 +342,9 @@ pub(crate) fn open(
             update();
             if let (Some(jql), Some(account)) = (jql, account.clone()) {
                 let sender = sender.clone();
+                let finished_timer = debounce.clone();
                 let source = glib::timeout_add_local_once(Duration::from_millis(300), move || {
+                    finished_timer.borrow_mut().take();
                     thread::spawn(move || {
                         let result = (|| -> anyhow::Result<Vec<Issue>> {
                             JiraClient::new(account)?.quick_search_issues(&jql)
