@@ -225,6 +225,7 @@ pub struct ViewSettings {
     pub project_filter: Option<String>,
     pub search: String,
     pub collapsed_columns: HashSet<String>,
+    pub open_issue: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -628,6 +629,7 @@ mod tests {
             project_filter: Some("ART".into()),
             search: "regression".into(),
             collapsed_columns: HashSet::from(["In Review".into()]),
+            open_issue: Some("ART-42".into()),
         });
         prefs.view_by_site.insert("second".into(), ViewSettings { scope: IssueScope::All, ..ViewSettings::default() });
         prefs.ui_layout.sidebar_width = 300;
@@ -635,6 +637,8 @@ mod tests {
         assert_eq!(decoded.board_by_site["first"].projects, vec!["ART"]);
         assert_eq!(decoded.view_by_site["first"], prefs.view_by_site["first"]);
         assert_eq!(decoded.view_by_site["second"].scope, IssueScope::All);
+        assert_eq!(decoded.view_by_site["first"].open_issue.as_deref(), Some("ART-42"));
+        assert_eq!(decoded.view_by_site["second"].open_issue, None);
         assert_eq!(decoded.ui_layout.sidebar_width, 300);
     }
 
@@ -646,6 +650,10 @@ mod tests {
         let prefs: Preferences = serde_json::from_value(old).unwrap();
         assert_eq!(prefs.board_by_site["https://jira.example"].projects, vec!["ART"]);
         assert!(prefs.view_by_site.is_empty());
+        let old_view: ViewSettings = serde_json::from_value(serde_json::json!({
+            "scope": "unassigned", "search": "bug"
+        })).unwrap();
+        assert_eq!(old_view.open_issue, None);
         assert_eq!(prefs.ui_layout, UiLayout::default());
     }
 
