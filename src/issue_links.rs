@@ -47,7 +47,7 @@ fn escaped(text: &str) -> String {
     glib::markup_escape_text(text).to_string()
 }
 
-fn link(key: &str, href: &str, label: &str) -> String {
+fn link(href: &str, label: &str) -> String {
     format!("<a href=\"{}\"><b>{}</b></a>", escaped(href), escaped(label))
 }
 
@@ -68,7 +68,7 @@ pub fn markup_from_text(text: &str, base_url: &str) -> String {
             {
                 result.push_str(&escaped(&text[plain_from..i]));
                 let title = if label == url || label.trim().is_empty() { &key } else { label };
-                result.push_str(&link(&key, url, title));
+                result.push_str(&link(url, title));
                 i = end;
                 plain_from = i;
                 continue;
@@ -93,7 +93,7 @@ pub fn markup_from_text(text: &str, base_url: &str) -> String {
             }
             if let Some(key) = key_from_url(&text[i..trimmed], base_url) {
                 result.push_str(&escaped(&text[plain_from..i]));
-                result.push_str(&link(&key, &text[i..trimmed], &key));
+                result.push_str(&link(&text[i..trimmed], &key));
                 i = trimmed;
                 plain_from = i;
             } else {
@@ -120,7 +120,7 @@ pub fn markup_from_text(text: &str, base_url: &str) -> String {
                 if end > dash + 1 && after {
                     let key = &text[i..end];
                     result.push_str(&escaped(&text[plain_from..i]));
-                    result.push_str(&link(key, &format!("{}/browse/{key}", base_url.trim_end_matches('/')), key));
+                    result.push_str(&link(&format!("{}/browse/{key}", base_url.trim_end_matches('/')), key));
                     i = end;
                     plain_from = i;
                     continue;
