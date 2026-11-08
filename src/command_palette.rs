@@ -150,13 +150,17 @@ fn issue_number_candidates(query: &str, projects: &[String]) -> Vec<PaletteItem>
     }).collect()
 }
 
+struct PaletteQuery<'a> {
+    text: &'a str,
+    project_keys: &'a [String],
+}
+
 fn render_results(
     list: &gtk::ListBox,
     hint: &gtk::Label,
     all_items: &[PaletteItem],
     remote_issues: &[Issue],
-    project_keys: &[String],
-    query: &str,
+    query: PaletteQuery<'_>,
     status: &PaletteStatus,
     shown_items: &RefCell<Vec<PaletteItem>>,
 ) {
@@ -167,7 +171,7 @@ fn render_results(
     while let Some(row) = list.row_at_index(0) {
         list.remove(&row);
     }
-    let needle = query.trim().to_lowercase();
+    let needle = query.text.trim().to_lowercase();
     let mut matched: Vec<PaletteItem> = all_items
         .iter()
         .filter(|item| if needle.is_empty() { item.featured } else { item.matches(&needle) })
@@ -194,7 +198,7 @@ fn render_results(
     }
     let mut suggested_direct_open = false;
     if matched.is_empty() && !status.search_loading {
-        let candidates = issue_number_candidates(query, project_keys);
+        let candidates = issue_number_candidates(query.text, query.project_keys);
         suggested_direct_open = !candidates.is_empty();
         matched.extend(candidates);
     }
@@ -354,7 +358,8 @@ pub(crate) fn open(
             let Some(entry) = entry.upgrade() else { return; };
             render_results(
                 &list, &hint, &all_items.borrow(), &remote_issues.borrow(),
-                &project_keys, entry.text().as_str(), &status.borrow(), &shown_items,
+                PaletteQuery { text: entry.text().as_str(), project_keys: &project_keys },
+                &status.borrow(), &shown_items,
             );
         }
     });
