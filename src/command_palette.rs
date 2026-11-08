@@ -145,7 +145,7 @@ fn issue_number_candidates(query: &str, projects: &[String]) -> Vec<PaletteItem>
         Some(PaletteItem::new(
             &key, "Open directly from Jira · not yet verified",
             "Open ticket", "document-open-symbolic", false,
-            PaletteCommand::OpenIssueByKey(key),
+            PaletteCommand::OpenIssueByKey(key.clone()),
         ))
     }).collect()
 }
