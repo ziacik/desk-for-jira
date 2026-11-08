@@ -305,6 +305,7 @@ pub(crate) fn open(
     let all_items = Rc::new(RefCell::new(all_items));
 
     let update: Rc<dyn Fn()> = Rc::new({
+        let all_items = all_items.clone();
         let list = list.clone();
         let hint = hint.clone();
         let entry = entry.downgrade();
