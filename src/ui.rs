@@ -2321,7 +2321,14 @@ fn visible_board_groups<'a>(
         {
             matches.push(issue);
         } else {
-            groups.push(("Other".into(), vec![issue], Vec::new()));
+            // Keep the fallback separate from a real, user-configured
+            // column named "Other", including its visible label.
+            let name = if groups.iter().any(|(title, _, _)| title == "Other") {
+                "Unmapped"
+            } else {
+                "Other"
+            };
+            groups.push((name.into(), vec![issue], Vec::new()));
         }
     }
 
@@ -3188,6 +3195,8 @@ mod scope_tests {
         ];
         let groups = visible_board_groups(&settings, &issues, "");
         assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].0, "Other");
+        assert_eq!(groups[1].0, "Unmapped");
         assert_eq!(groups[0].1.iter().map(|issue| issue.key.as_str())
             .collect::<Vec<_>>(), vec!["ART-9"]);
         assert_eq!(groups[1].1.iter().map(|issue| issue.key.as_str())
