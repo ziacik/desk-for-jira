@@ -258,11 +258,13 @@ fn open_transition_form(
     let progress_apply = progress.clone();
     let apply_button = apply.clone();
     let error_apply = error.clone();
+    let controls_for_apply = controls.clone();
+    let edit_fields_for_form = transition.edit_fields.clone();
     apply.connect_clicked(move |_| {
         error_apply.set_visible(false);
         let mut values = Map::new();
         let mut issue_edits = Map::new();
-        for item in controls.borrow().iter() {
+        for item in controls_for_apply.borrow().iter() {
             match control_value(&item.field, &item.control, cloud) {
                 Ok(Some(value)) => {
                     if item.update_issue {
@@ -294,7 +296,7 @@ fn open_transition_form(
         progress,
         fields_box: form,
         controls,
-        extra_fields: transition.edit_fields.clone(),
+        extra_fields: edit_fields_for_form,
         cloud,
     });
     dialog.present();
