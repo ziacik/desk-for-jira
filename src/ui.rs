@@ -2760,7 +2760,8 @@ fn show_command_palette(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Eve
                 show_column_editor(&ui_for_action, &state_for_action);
             }
             PaletteCommand::Refresh => {
-                if let Some(account) = state_for_action.borrow().account.clone() {
+                let account = { state_for_action.borrow().account.clone() };
+                if let Some(account) = account {
                     start_refresh(&ui_for_action, &state_for_action, &sender_for_action, account, false);
                 } else {
                     show_login(&ui_for_action, &state_for_action, &sender_for_action);
