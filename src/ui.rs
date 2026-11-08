@@ -39,6 +39,7 @@ struct Ui {
     manage_columns_button: gtk::Button,
     palette_button: gtk::Button,
     palette_window: Rc<RefCell<Option<gtk::Window>>>,
+    pending_direct_issue: Rc<RefCell<Option<String>>>,
     search: gtk::SearchEntry,
     center_title: gtk::Label,
     board_box: gtk::Box,
@@ -167,6 +168,7 @@ enum Event {
     Loaded(u64, Credentials, Result<Loaded, String>),
     BoardLoaded(u64, BoardKey, Result<BoardData, String>),
     RememberedIssueLoaded(u64, String, Result<Vec<Issue>, String>),
+    PaletteIssueLoaded(u64, String, Result<Issue, String>),
     ImageLoaded(u64, String, String, Result<Vec<u8>, String>),
     CommentsLoaded(u64, u64, String, Result<Vec<IssueComment>, String>),
     TransitionsLoaded(u64, u64, String, Result<Vec<IssueTransition>, String>),
@@ -596,6 +598,7 @@ fn build_ui(app: &adw::Application) {
         connect_button, disconnect_button, refresh_button,
         manage_projects_button, manage_columns_button, palette_button,
         palette_window: Rc::new(RefCell::new(None)),
+        pending_direct_issue: Rc::new(RefCell::new(None)),
         search, center_title,
         board_box, pinned_section, pinned_box, pinned_scroll, pinned_count,
         detail_box, comments_box: Rc::new(RefCell::new(gtk::Box::new(gtk::Orientation::Vertical, 10))),
@@ -1104,6 +1107,25 @@ fn handle_event(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>, eve
                     show_empty(&ui.board_box, "Could not load project board", &error);
                     show_error(ui, &error);
                 }
+            }
+        }
+        Event::PaletteIssueLoaded(id, key, result) => {
+            // A site change, another ticket selection, or closing the inspector
+            // must cancel a pending direct-open result.
+            if state.borrow().generation != id
+                || ui.pending_direct_issue.borrow().as_deref() != Some(key.as_str())
+            {
+                return;
+            }
+            ui.pending_direct_issue.borrow_mut().take();
+            match result {
+                Ok(issue) => {
+                    open_issue(ui, &issue, None);
+                    if !state.borrow().busy {
+                        render_board(ui, &state.borrow());
+                    }
+                }
+                Err(error) => show_error(ui, &format!("Could not open {key}: {error}")),
             }
         }
         Event::RememberedIssueLoaded(id, key, result) => {
@@ -2399,6 +2421,7 @@ fn dismiss_issue_details(ui: &Ui) {
 }
 
 fn close_issue_details(ui: &Ui) {
+    ui.pending_direct_issue.borrow_mut().take();
     remember_visible_detail_width(ui);
     let previous_form = ui.transition_form.borrow_mut().take();
     if let Some(form) = previous_form {
@@ -2788,7 +2811,7 @@ fn show_command_palette(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Eve
         return;
     }
 
-    let (items, account) = {
+    let (items, account, project_keys) = {
         let s = state.borrow();
         let mut items = vec![
             PaletteItem::new("Refresh Jira", "Reload issues and project data", "Command",
@@ -2848,7 +2871,7 @@ fn show_command_palette(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Eve
                     PaletteCommand::OpenIssue(issue.clone())));
             }
         }
-        (items, s.account.clone())
+        (items, s.account.clone(), s.settings.projects.clone())
     };
 
     let ui_for_action = ui.clone();
@@ -2858,6 +2881,25 @@ fn show_command_palette(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Eve
         match action {
             PaletteCommand::OpenIssue(issue) => {
                 open_issue(&ui_for_action, &issue, None);
+            }
+            PaletteCommand::OpenIssueByKey(key) => {
+                let (account, generation) = {
+                    let state = state_for_action.borrow();
+                    (state.account.clone(), state.generation)
+                };
+                let Some(account) = account else {
+                    show_error(&ui_for_action, "Connect to Jira to open this ticket");
+                    return;
+                };
+                *ui_for_action.pending_direct_issue.borrow_mut() = Some(key.clone());
+                ui_for_action.toast.add_toast(adw::Toast::new(&format!("Opening {key}…")));
+                let sender = sender_for_action.clone();
+                thread::spawn(move || {
+                    let result = JiraClient::new(account)
+                        .and_then(|client| client.issue_by_key(&key))
+                        .map_err(|error| error.to_string());
+                    let _ = sender.send(Event::PaletteIssueLoaded(generation, key, result));
+                });
             }
             PaletteCommand::Transition { issue_key, transition } => {
                 if ui_for_action.transition_busy.get() {
@@ -2922,7 +2964,7 @@ fn show_command_palette(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Eve
         }
     });
     let palette = command_palette::open(
-        &ui.window, items, account, ui.selected_issue.borrow().clone(), on_activate,
+        &ui.window, items, account, project_keys, ui.selected_issue.borrow().clone(), on_activate,
     );
     let weak_slot = Rc::downgrade(&ui.palette_window);
     palette.connect_close_request(move |window| {
@@ -3053,6 +3095,7 @@ fn restore_detail_width(paned: &gtk::Paned, panel: &gtk::Box, preferred_width: i
 }
 
 fn open_issue(ui: &Ui, issue: &Issue, source_button: Option<&gtk::Button>) {
+    ui.pending_direct_issue.borrow_mut().take();
     let previous_form = ui.transition_form.borrow_mut().take();
     if let Some(form) = previous_form {
         form.close();
