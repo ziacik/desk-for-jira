@@ -255,7 +255,7 @@ impl UiLayout {
         self.window_width = self.window_width.max(960);
         self.window_height = self.window_height.max(580);
         self.sidebar_width = self.sidebar_width.clamp(184, 800);
-        self.detail_width = self.detail_width.clamp(320, 1000);
+        self.detail_width = self.detail_width.clamp(320, 2048);
         self
     }
 }
@@ -655,6 +655,15 @@ mod tests {
         })).unwrap();
         assert_eq!(old_view.open_issue, None);
         assert_eq!(prefs.ui_layout, UiLayout::default());
+    }
+
+    #[test]
+    fn saved_layout_keeps_user_resized_detail_width() {
+        let mut prefs = Preferences::default();
+        prefs.ui_layout.detail_width = 1180;
+        let restored: Preferences =
+            serde_json::from_slice(&serde_json::to_vec(&prefs).unwrap()).unwrap();
+        assert_eq!(restored.ui_layout.sanitized().detail_width, 1180);
     }
 
     #[test]

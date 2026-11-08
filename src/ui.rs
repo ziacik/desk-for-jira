@@ -61,6 +61,8 @@ struct Ui {
     state: Rc<RefCell<State>>,
     saved_detail_width: Rc<Cell<i32>>,
     restoring_detail_width: Rc<Cell<bool>>,
+    layout: Rc<RefCell<UiLayout>>,
+    layout_save_timer: Rc<RefCell<Option<glib::SourceId>>>,
     inner_split: gtk::Paned,
     image_slots: Rc<RefCell<issue_detail::ImageSlots>>,
     events: Sender<Event>,
@@ -585,33 +587,6 @@ fn build_ui(app: &adw::Application) {
     inner_split.set_shrink_end_child(true);
     inner_split.set_hexpand(true);
     workspace_split.set_end_child(Some(&inner_split));
-    inner_split.connect_position_notify({
-        let detail_panel = detail_panel.downgrade();
-        let saved_detail_width = saved_detail_width.clone();
-        let restoring_detail_width = restoring_detail_width.clone();
-        let layout = layout.clone();
-        let layout_save_timer = layout_save_timer.clone();
-        move |paned| {
-            // Showing a hidden pane can reposition the splitter before GTK allocates it.
-            // Only a real visible resize should replace the remembered width.
-            if restoring_detail_width.get()
-                || detail_panel.upgrade().is_none_or(|panel| !panel.is_visible())
-                || paned.width() < 650
-            {
-                return;
-            }
-            let width = paned.width() - paned.position();
-            if !(320..=1000).contains(&width) || width >= paned.width() - 300 {
-                return;
-            }
-            saved_detail_width.set(width);
-            let changed = layout.borrow().detail_width != width;
-            if changed {
-                layout.borrow_mut().detail_width = width;
-                queue_layout_save(&layout, &layout_save_timer);
-            }
-        }
-    });
     let toast = adw::ToastOverlay::new();
     toast.set_child(Some(&workspace_split));
     window.set_content(Some(&toast));
@@ -632,6 +607,7 @@ fn build_ui(app: &adw::Application) {
         transition_busy: Rc::new(Cell::new(false)),
         transition_form: Rc::new(RefCell::new(None)),
         saved_detail_width, restoring_detail_width,
+        layout: layout.clone(), layout_save_timer: layout_save_timer.clone(),
         mine_filter, unassigned_filter, all_filter, sprint_filter,
         restoring_view: Rc::new(Cell::new(false)),
         image_slots: Rc::new(RefCell::new(issue_detail::ImageSlots::new())),
@@ -641,6 +617,7 @@ fn build_ui(app: &adw::Application) {
         selected_button: Rc::new(RefCell::new(None)),
         collapsed_columns: Rc::new(RefCell::new(HashSet::new())),
     };
+    watch_detail_resize(&ui);
     {
         // The action always opens the currently selected issue, not the
         // issue whose details happened to be rendered when it was created.
@@ -737,8 +714,10 @@ fn build_ui(app: &adw::Application) {
         let layout_save_timer = layout_save_timer.clone();
         let sidebar = sidebar.downgrade();
         let workspace_split = workspace_split.downgrade();
+        let close_ui = ui.clone();
         let saved_detail_width = ui.saved_detail_width.clone();
         move |window| {
+            remember_visible_detail_width(&close_ui);
             let mut settings = layout.borrow_mut();
             if window.width() >= 960 && window.height() >= 580 {
                 settings.window_width = window.width();
@@ -2421,6 +2400,7 @@ fn dismiss_issue_details(ui: &Ui) {
 }
 
 fn close_issue_details(ui: &Ui) {
+    remember_visible_detail_width(ui);
     let previous_form = ui.transition_form.borrow_mut().take();
     if let Some(form) = previous_form {
         form.close();
@@ -2958,11 +2938,118 @@ fn show_command_palette(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Eve
     *ui.palette_window.borrow_mut() = Some(palette);
 }
 
-fn restore_detail_width(paned: &gtk::Paned, preferred_width: i32) {
+/// The pointer must start on the splitter, not on any widget inside the panel.
+fn pointer_on_detail_splitter(x: f64, position: i32) -> bool {
+    (x - f64::from(position)).abs() <= 16.0
+}
+
+/// Only save the width of a fully allocated, visible inspector. GtkPaned
+/// changes its position automatically when the window or its children resize;
+/// those notifications are not user-initiated splitter movements.
+fn remember_visible_detail_width(ui: &Ui) {
+    if !ui.detail_panel.is_visible() || ui.restoring_detail_width.get() {
+        return;
+    }
+    let width = ui.detail_panel.width();
+    let available = ui.inner_split.width();
+    if available < 640 || !(320..=2048).contains(&width) || width > available {
+        return;
+    }
+    ui.saved_detail_width.set(width);
+    if ui.layout.borrow().detail_width != width {
+        ui.layout.borrow_mut().detail_width = width;
+        queue_layout_save(&ui.layout, &ui.layout_save_timer);
+    }
+}
+
+/// Save after GTK has allocated the new position, not during the input event
+/// (when the end child's reported width may still be from the previous frame).
+fn capture_detail_width_after_layout(ui: &Ui) {
+    let ui = ui.clone();
+    let frames = Rc::new(Cell::new(0_u8));
+    let paned = ui.inner_split.clone();
+    paned.add_tick_callback(move |_, _| {
+        frames.set(frames.get() + 1);
+        if frames.get() < 2 {
+            glib::ControlFlow::Continue
+        } else {
+            remember_visible_detail_width(&ui);
+            glib::ControlFlow::Break
+        }
+    });
+}
+
+/// GtkPaned has no user-resize signal: notify::position also fires during
+/// automatic allocation. Observe raw pointer events without claiming GTK's
+/// own drag gesture, and save the final allocated child width on release.
+fn watch_detail_resize(ui: &Ui) {
+    let drag_started_on_handle = Rc::new(Cell::new(false));
+    let observer = gtk::EventControllerLegacy::new();
+    observer.set_propagation_phase(gtk::PropagationPhase::Capture);
+    let ui_events = ui.clone();
+    observer.connect_event(move |_, event| {
+        match event.event_type() {
+            gtk::gdk::EventType::ButtonPress | gtk::gdk::EventType::TouchBegin => {
+                let on_handle = event.position().and_then(|(x, y)| {
+                    ui_events.window.compute_point(
+                        &ui_events.inner_split,
+                        &gtk::graphene::Point::new(x as f32, y as f32),
+                    )
+                }).is_some_and(|point| {
+                    ui_events.detail_panel.is_visible()
+                        && pointer_on_detail_splitter(
+                            f64::from(point.x()), ui_events.inner_split.position(),
+                        )
+                });
+                drag_started_on_handle.set(on_handle);
+            }
+            gtk::gdk::EventType::ButtonRelease | gtk::gdk::EventType::TouchEnd => {
+                if drag_started_on_handle.replace(false) {
+                    capture_detail_width_after_layout(&ui_events);
+                }
+            }
+            gtk::gdk::EventType::TouchCancel => drag_started_on_handle.set(false),
+            _ => {}
+        }
+        glib::Propagation::Proceed
+    });
+    // Capture at the window, before GTK's own Paned drag gesture claims events.
+    ui.window.add_controller(observer);
+
+    // GtkPaned also supports resizing its handle with the keyboard.
+    let keys = gtk::EventControllerKey::new();
+    keys.set_propagation_phase(gtk::PropagationPhase::Capture);
+    let ui_keys = ui.clone();
+    keys.connect_key_released(move |_, key, _, _| {
+        if ui_keys.inner_split.has_focus()
+            && matches!(
+                key,
+                gtk::gdk::Key::Left | gtk::gdk::Key::Right |
+                gtk::gdk::Key::KP_Left | gtk::gdk::Key::KP_Right |
+                gtk::gdk::Key::Home | gtk::gdk::Key::End
+            )
+        {
+            capture_detail_width_after_layout(&ui_keys);
+        }
+    });
+    ui.inner_split.add_controller(keys);
+}
+
+fn detail_split_position(available: i32, separator: i32, preferred_width: i32) -> Option<i32> {
+    if available < 640 {
+        return None;
+    }
+    let separator = separator.clamp(0, 24);
+    let width = preferred_width.min(available - separator - 300).max(320);
+    Some(available - separator - width)
+}
+
+fn restore_detail_width(paned: &gtk::Paned, panel: &gtk::Box, preferred_width: i32) {
     let available = paned.width();
-    if available >= 640 {
-        let width = preferred_width.min(available - 300).max(320);
-        paned.set_position(available - width);
+    // Account for the separator: end-child width is NOT width - position.
+    let separator = available - paned.position() - panel.width();
+    if let Some(position) = detail_split_position(available, separator, preferred_width) {
+        paned.set_position(position);
     }
 }
 
@@ -3002,13 +3089,22 @@ fn open_issue(ui: &Ui, issue: &Issue, source_button: Option<&gtk::Button>) {
         // position notifications must not overwrite the saved user preference.
         ui.restoring_detail_width.set(true);
         ui.detail_panel.set_visible(true);
-        restore_detail_width(&ui.inner_split, ui.saved_detail_width.get());
+        restore_detail_width(&ui.inner_split, &ui.detail_panel, ui.saved_detail_width.get());
         let width = ui.saved_detail_width.clone();
+        let panel = ui.detail_panel.downgrade();
         let restoring = ui.restoring_detail_width.clone();
+        let frames = Rc::new(Cell::new(0_u8));
         ui.inner_split.add_tick_callback(move |paned, _| {
-            restore_detail_width(paned, width.get());
-            restoring.set(false);
-            glib::ControlFlow::Break
+            if let Some(panel) = panel.upgrade() {
+                restore_detail_width(paned, &panel, width.get());
+            }
+            frames.set(frames.get() + 1);
+            if frames.get() < 2 {
+                glib::ControlFlow::Continue
+            } else {
+                restoring.set(false);
+                glib::ControlFlow::Break
+            }
         });
     }
     request_transitions(&ui.detail_actions, &ui.detail_request, &ui.events,
@@ -3233,6 +3329,75 @@ fn clear_box(container: &gtk::Box) {
 
 fn show_error(ui: &Ui, error: &str) {
     ui.toast.add_toast(adw::Toast::new(error));
+}
+
+#[cfg(test)]
+mod detail_layout_tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    // Exercise GTK's real size allocation, including the hidden pane and
+    // separator. Pure math tests cannot catch GTK's position adjustments.
+    #[gtk::test]
+    fn inspector_width_survives_hiding_and_reopening() {
+        let window = gtk::Window::new();
+        window.set_default_size(1440, 750);
+        let split = gtk::Paned::new(gtk::Orientation::Horizontal);
+        split.set_resize_start_child(true);
+        split.set_resize_end_child(false);
+        split.set_shrink_start_child(true);
+        split.set_shrink_end_child(true);
+        let board = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        board.set_width_request(300);
+        let detail = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        detail.set_width_request(390);
+        detail.set_visible(false);
+        split.set_start_child(Some(&board));
+        split.set_end_child(Some(&detail));
+        window.set_child(Some(&split));
+        window.present();
+
+        let context = glib::MainContext::default();
+        let advance = || {
+            // A frame source can remain perpetually ready; never drain the
+            // context indefinitely in a test helper.
+            for _ in 0..16 {
+                if !context.pending() { break; }
+                context.iteration(false);
+            }
+            std::thread::sleep(Duration::from_millis(16));
+        };
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while split.width() < 900 && Instant::now() < deadline {
+            advance();
+        }
+        assert!(
+            split.width() >= 900,
+            "GTK did not allocate the test window (window={}, split={})",
+            window.width(), split.width()
+        );
+
+        for _ in 0..2 {
+            detail.set_visible(true);
+            let deadline = Instant::now() + Duration::from_secs(3);
+            while Instant::now() < deadline {
+                restore_detail_width(&split, &detail, 620);
+                advance();
+                if (detail.width() - 620).abs() <= 2 {
+                    break;
+                }
+            }
+            assert!(
+                (detail.width() - 620).abs() <= 2,
+                "GTK inspector should be 620 px, got {}",
+                detail.width()
+            );
+            detail.set_visible(false);
+            advance();
+            advance();
+        }
+        window.close();
+    }
 }
 
 #[cfg(test)]
@@ -3489,6 +3654,26 @@ mod scope_tests {
         let mut epic = issue("ART-1", "1", "Parent");
         epic.is_epic = true;
         assert!(pinned_issue_refs(&settings, &[], &[epic]).is_empty());
+    }
+
+    #[test]
+    fn splitter_clicks_are_distinguished_from_clicks_in_panels() {
+        assert!(pointer_on_detail_splitter(600.0, 600));
+        assert!(pointer_on_detail_splitter(584.0, 600));
+        assert!(!pointer_on_detail_splitter(580.0, 600));
+        assert!(!pointer_on_detail_splitter(750.0, 600));
+    }
+
+    #[test]
+    fn restored_detail_width_accounts_for_separator_and_small_windows() {
+        // 1240 wide paned, 6 px separator, 540 px detail => start pane 694.
+        assert_eq!(detail_split_position(1240, 6, 540), Some(694));
+        // A large user preference must survive without the previous 1000 px cap.
+        assert_eq!(detail_split_position(1800, 6, 1180), Some(614));
+        // Keep a 300 px board even if the requested detail width is huge.
+        assert_eq!(detail_split_position(900, 6, 1180), Some(300));
+        // Never restore from a zero/unallocated GTK widget.
+        assert_eq!(detail_split_position(0, 6, 540), None);
     }
 
     #[test]
