@@ -311,7 +311,7 @@ pub fn render_comments(
 
         let initial = comment.author.chars()
             .find(|c| c.is_alphanumeric())
-            .map(|c| c.to_uppercase().to_string())
+            .map(|c| c.to_uppercase().collect::<String>())
             .unwrap_or_else(|| "?".to_owned());
         let avatar = gtk::Label::new(Some(&initial));
         avatar.add_css_class("issue-comment-avatar");
