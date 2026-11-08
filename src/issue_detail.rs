@@ -1,12 +1,13 @@
-use std::collections::{HashMap, HashSet};
+use std::{collections::{HashMap, HashSet}, rc::Rc};
 
 use adw::prelude::*;
 use gtk::glib;
 use serde_json::Value;
 
-use crate::jira::{Attachment, Issue, IssueComment};
+use crate::{issue_links, jira::{Attachment, Issue, IssueComment}};
 
 pub type ImageSlots = HashMap<String, Vec<(gtk::Box, String)>>;
+pub type OpenIssueLink = Rc<dyn Fn(&str)>;
 
 pub struct DetailRender {
     pub images: ImageSlots,
@@ -105,6 +106,7 @@ pub fn render(
     issue: &Issue,
     base_url: &str,
     actions: &gtk::Box,
+    on_issue_link: &OpenIssueLink,
 ) -> DetailRender {
     // Keep the existing transition widget and its handlers alive when the
     // issue is refreshed, then reparent it into the new issue hero.
@@ -181,6 +183,12 @@ pub fn render(
             let link = gtk::LinkButton::with_label(&url, title);
             link.add_css_class("detail-epic-link");
             link.set_tooltip_text(Some(&epic.key));
+            let key = epic.key.clone();
+            let on_issue_link = on_issue_link.clone();
+            link.connect_activate_link(move |_| {
+                on_issue_link(&key);
+                glib::Propagation::Stop
+            });
             epic_row.append(&link);
         }
         header.append(&epic_row);
@@ -239,10 +247,10 @@ pub fn render(
         .filter(|nodes| !nodes.is_empty());
     if let Some(nodes) = rendered {
         for node in nodes {
-            render_block(&body, node, &issue.attachments, &mut used_images, &mut slots);
+            render_block(&body, node, &issue.attachments, &mut used_images, &mut slots, base_url, on_issue_link);
         }
     } else if !issue.description.is_empty() {
-        render_legacy(&body, &issue.description, &issue.attachments, &mut used_images, &mut slots);
+        render_legacy(&body, &issue.description, &issue.attachments, &mut used_images, &mut slots, base_url, on_issue_link);
     } else {
         add_text(&body, "No description yet.", "detail-empty");
     }
@@ -307,6 +315,8 @@ pub fn render_comments(
     container: &gtk::Box,
     comments: &[IssueComment],
     attachments: &[Attachment],
+    base_url: &str,
+    on_issue_link: &OpenIssueLink,
 ) -> ImageSlots {
     clear_comments(container);
     let mut slots = ImageSlots::new();
@@ -350,10 +360,10 @@ pub fn render_comments(
         body.add_css_class("detail-body");
         if let Some(nodes) = comment.body.get("content").and_then(Value::as_array) {
             for node in nodes {
-                render_block(&body, node, attachments, &mut used_images, &mut slots);
+                render_block(&body, node, attachments, &mut used_images, &mut slots, base_url, on_issue_link);
             }
         } else if let Some(text) = comment.body.as_str() {
-            render_legacy(&body, text, attachments, &mut used_images, &mut slots);
+            render_legacy(&body, text, attachments, &mut used_images, &mut slots, base_url, on_issue_link);
         }
         if body.first_child().is_none() {
             add_text(&body, "Empty comment", "detail-empty");
@@ -534,7 +544,7 @@ fn add_text(container: &gtk::Box, text: &str, class: &str) {
     add_markup(container, &glib::markup_escape_text(text), class);
 }
 
-fn add_markup(container: &gtk::Box, markup: &str, class: &str) {
+fn add_markup(container: &gtk::Box, markup: &str, class: &str) -> gtk::Label {
     let label = gtk::Label::new(None);
     label.set_markup(markup);
     label.add_css_class(class);
@@ -544,6 +554,29 @@ fn add_markup(container: &gtk::Box, markup: &str, class: &str) {
     label.set_xalign(0.0);
     label.set_valign(gtk::Align::Start);
     container.append(&label);
+    label
+}
+
+/// Normal external URLs still use GTK's default browser handler. Links to
+/// the connected Jira instance are stopped here and dispatched inside the app.
+fn add_rich_markup(
+    container: &gtk::Box,
+    markup: &str,
+    class: &str,
+    base_url: &str,
+    on_issue_link: &OpenIssueLink,
+) {
+    let label = add_markup(container, markup, class);
+    let base_url = base_url.to_owned();
+    let on_issue_link = on_issue_link.clone();
+    label.connect_activate_link(move |_, href| {
+        if let Some(key) = issue_links::key_from_url(href, &base_url) {
+            on_issue_link(&key);
+            glib::Propagation::Stop
+        } else {
+            glib::Propagation::Proceed
+        }
+    });
 }
 
 fn render_block(
@@ -552,20 +585,22 @@ fn render_block(
     attachments: &[Attachment],
     used: &mut HashSet<String>,
     slots: &mut ImageSlots,
+    base_url: &str,
+    on_issue_link: &OpenIssueLink,
 ) {
     let kind = node.get("type").and_then(Value::as_str).unwrap_or("");
     match kind {
         "paragraph" => {
-            let markup = inline_children(node);
+            let markup = inline_children(node, base_url);
             if !markup.is_empty() {
-                add_markup(parent, &markup, "issue-prose");
+                add_rich_markup(parent, &markup, "issue-prose", base_url, on_issue_link);
             }
         }
         "heading" => {
             let level = node.get("attrs").and_then(|a| a.get("level"))
                 .and_then(Value::as_u64).unwrap_or(2);
             let class = if level <= 2 { "issue-heading" } else { "issue-subheading" };
-            add_markup(parent, &inline_children(node), class);
+            add_rich_markup(parent, &inline_children(node, base_url), class, base_url, on_issue_link);
         }
         "bulletList" | "orderedList" => {
             let start = node.get("attrs").and_then(|a| a.get("order"))
@@ -585,7 +620,7 @@ fn render_block(
                 let content = gtk::Box::new(gtk::Orientation::Vertical, 6);
                 content.set_hexpand(true);
                 for child in children(item) {
-                    render_block(&content, child, attachments, used, slots);
+                    render_block(&content, child, attachments, used, slots, base_url, on_issue_link);
                 }
                 row.append(&content);
                 parent.append(&row);
@@ -595,19 +630,21 @@ fn render_block(
             let box_ = gtk::Box::new(gtk::Orientation::Vertical, 8);
             box_.add_css_class(if kind == "panel" { "issue-panel" } else { "issue-quote" });
             for child in children(node) {
-                render_block(&box_, child, attachments, used, slots);
+                render_block(&box_, child, attachments, used, slots, base_url, on_issue_link);
             }
             parent.append(&box_);
         }
         "codeBlock" => {
             let mut code = String::new();
             collect_text(node, &mut code);
-            add_text(parent, code.trim_end_matches('\n'), "issue-code");
+            add_rich_markup(parent,
+                &issue_links::markup_from_text(code.trim_end_matches('\n'), base_url),
+                "issue-code", base_url, on_issue_link);
         }
         "rule" => parent.append(&gtk::Separator::new(gtk::Orientation::Horizontal)),
         "mediaSingle" | "mediaGroup" => {
             for child in children(node) {
-                render_block(parent, child, attachments, used, slots);
+                render_block(parent, child, attachments, used, slots, base_url, on_issue_link);
             }
         }
         "media" => {
@@ -629,7 +666,7 @@ fn render_block(
                     cell_box.add_css_class("issue-table-cell");
                     cell_box.set_hexpand(true);
                     for child in children(cell) {
-                        render_block(&cell_box, child, attachments, used, slots);
+                        render_block(&cell_box, child, attachments, used, slots, base_url, on_issue_link);
                     }
                     row_box.append(&cell_box);
                 }
@@ -639,7 +676,7 @@ fn render_block(
         }
         _ => {
             for child in children(node) {
-                render_block(parent, child, attachments, used, slots);
+                render_block(parent, child, attachments, used, slots, base_url, on_issue_link);
             }
         }
     }
@@ -649,11 +686,11 @@ fn children(node: &Value) -> &[Value] {
     node.get("content").and_then(Value::as_array).map_or(&[], Vec::as_slice)
 }
 
-fn inline_children(node: &Value) -> String {
-    children(node).iter().map(inline_markup).collect()
+fn inline_children(node: &Value, base_url: &str) -> String {
+    children(node).iter().map(|child| inline_markup(child, base_url)).collect()
 }
 
-fn inline_markup(node: &Value) -> String {
+fn inline_markup(node: &Value, base_url: &str) -> String {
     let kind = node.get("type").and_then(Value::as_str).unwrap_or("");
     let text = match kind {
         "text" => node.get("text").and_then(Value::as_str).unwrap_or(""),
@@ -666,15 +703,40 @@ fn inline_markup(node: &Value) -> String {
             let url = node.get("attrs").and_then(|a| a.get("url"))
                 .and_then(Value::as_str).unwrap_or("");
             if safe_url(url) {
+                let display = issue_links::key_from_url(url, base_url);
+                let label = display.as_deref().unwrap_or(url);
                 return format!("<a href=\"{}\">{}</a>",
-                    glib::markup_escape_text(url), glib::markup_escape_text(url));
+                    glib::markup_escape_text(url),
+                    if display.is_some() {
+                        format!("<b>{}</b>", glib::markup_escape_text(label))
+                    } else {
+                        glib::markup_escape_text(label).to_string()
+                    });
             }
             return glib::markup_escape_text(url).to_string();
         }
-        _ => return inline_children(node),
+        _ => return inline_children(node, base_url),
     };
-    let mut markup = glib::markup_escape_text(text).to_string();
-    if let Some(marks) = node.get("marks").and_then(Value::as_array) {
+    let marks = node.get("marks").and_then(Value::as_array);
+    let explicit_link = marks.into_iter().flatten().find_map(|mark| {
+        (mark.get("type").and_then(Value::as_str) == Some("link"))
+            .then(|| mark.get("attrs").and_then(|attrs| attrs.get("href"))
+                .and_then(Value::as_str).filter(|url| safe_url(url)))
+            .flatten()
+    });
+    // ADF links own their content: never nest another <a> inside them.
+    // When Jira linked the whole URL, render the short issue key instead.
+    let mut markup = if let Some(url) = explicit_link {
+        let label = if text == url {
+            issue_links::key_from_url(url, base_url).unwrap_or_else(|| text.to_owned())
+        } else {
+            text.to_owned()
+        };
+        glib::markup_escape_text(&label).to_string()
+    } else {
+        issue_links::markup_from_text(text, base_url)
+    };
+    if let Some(marks) = marks {
         for mark in marks {
             match mark.get("type").and_then(Value::as_str).unwrap_or("") {
                 "strong" => markup = format!("<b>{markup}</b>"),
@@ -686,7 +748,12 @@ fn inline_markup(node: &Value) -> String {
                     if let Some(url) = mark.get("attrs").and_then(|a| a.get("href"))
                         .and_then(Value::as_str).filter(|url| safe_url(url))
                     {
-                        markup = format!("<a href=\"{}\">{markup}</a>",
+                        let content = if issue_links::key_from_url(url, base_url).is_some() {
+                            format!("<b>{markup}</b>")
+                        } else {
+                            markup
+                        };
+                        markup = format!("<a href=\"{}\">{content}</a>",
                             glib::markup_escape_text(url));
                     }
                 }
@@ -767,6 +834,8 @@ fn render_legacy(
     attachments: &[Attachment],
     used: &mut HashSet<String>,
     slots: &mut ImageSlots,
+    base_url: &str,
+    on_issue_link: &OpenIssueLink,
 ) {
     for paragraph in text.split("\n\n").filter(|p| !p.trim().is_empty()) {
         let trimmed = paragraph.trim();
@@ -780,9 +849,11 @@ fn render_legacy(
         } else if let Some(heading) = trimmed.strip_prefix("h2. ")
             .or_else(|| trimmed.strip_prefix("h3. "))
         {
-            add_text(parent, heading, "issue-heading");
+            add_rich_markup(parent, &issue_links::markup_from_text(heading, base_url),
+                "issue-heading", base_url, on_issue_link);
         } else {
-            add_text(parent, paragraph, "issue-prose");
+            add_rich_markup(parent, &issue_links::markup_from_text(paragraph, base_url),
+                "issue-prose", base_url, on_issue_link);
         }
     }
 }
@@ -845,10 +916,29 @@ mod tests {
             {"type":"text","text":" click", "marks":[{"type":"link","attrs":{"href":"https://example.com/?a=1&b=2"}}]},
             {"type":"text","text":" unsafe", "marks":[{"type":"link","attrs":{"href":"javascript:alert(1)"}}]}
         ]});
-        let markup = inline_children(&node);
+        let markup = inline_children(&node, "https://jira.example.com");
         assert!(markup.contains("<b>A &lt; B &amp; C</b>"));
         assert!(markup.contains("<a href=\"https://example.com/?a=1&amp;b=2\"> click</a>"));
         assert!(!markup.contains("javascript:"));
+    }
+
+    #[test]
+    fn adf_issue_references_are_readable_and_clickable() {
+        let site = "https://jira.example.com";
+        let paragraph = json!({"type":"paragraph","content":[
+            {"type":"text","text":"See ART-2272, "},
+            {"type":"text","text":"https://jira.example.com/browse/AFB-42",
+             "marks":[{"type":"link","attrs":{"href":"https://jira.example.com/browse/AFB-42"}}]},
+            {"type":"text","text":" or this task",
+             "marks":[{"type":"link","attrs":{"href":"https://jira.example.com/browse/ART-8"}}]},
+            {"type":"inlineCard","attrs":{"url":"https://jira.example.com/browse/ART-9"}}
+        ]});
+        let markup = inline_children(&paragraph, site);
+        assert!(markup.contains("<b>ART-2272</b>"));
+        assert!(markup.contains("<b>AFB-42</b>"));
+        assert!(!markup.contains(">https://jira.example.com/browse/AFB-42</a>"));
+        assert!(markup.contains("<b> or this task</b>"));
+        assert!(markup.contains("<b>ART-9</b>"));
     }
 
     #[test]

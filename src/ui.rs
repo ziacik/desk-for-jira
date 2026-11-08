@@ -169,6 +169,7 @@ enum Event {
     BoardLoaded(u64, BoardKey, Result<BoardData, String>),
     RememberedIssueLoaded(u64, String, Result<Vec<Issue>, String>),
     PaletteIssueLoaded(u64, String, Result<Issue, String>),
+    OpenLinkedIssue(String),
     ImageLoaded(u64, String, String, Result<Vec<u8>, String>),
     CommentsLoaded(u64, u64, String, Result<Vec<IssueComment>, String>),
     TransitionsLoaded(u64, u64, String, Result<Vec<IssueTransition>, String>),
@@ -1109,6 +1110,7 @@ fn handle_event(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>, eve
                 }
             }
         }
+        Event::OpenLinkedIssue(key) => open_issue_by_key(ui, &key),
         Event::PaletteIssueLoaded(id, key, result) => {
             // A site change, another ticket selection, or closing the inspector
             // must cancel a pending direct-open result.
@@ -1162,16 +1164,20 @@ fn handle_event(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>, eve
             }
             match result {
                 Ok(comments) => {
-                    let attachments = {
+                    let (attachments, base_url) = {
                         let s = state.borrow();
-                        s.issues.iter().chain(s.pinned_issues.iter())
+                        let attachments = s.issues.iter().chain(s.pinned_issues.iter())
                             .chain(s.recent_issues.iter())
                             .find(|issue| issue.key == key)
                             .map(|issue| issue.attachments.clone())
-                            .unwrap_or_default()
+                            .unwrap_or_default();
+                        let base_url = s.account.as_ref()
+                            .map(|account| account.base_url.clone()).unwrap_or_default();
+                        (attachments, base_url)
                     };
+                    let on_issue_link = issue_link_handler(ui);
                     let slots = issue_detail::render_comments(
-                        &ui.comments_box.borrow(), &comments, &attachments,
+                        &ui.comments_box.borrow(), &comments, &attachments, &base_url, &on_issue_link,
                     );
                     let image_ids: HashSet<String> = slots.keys().cloned().collect();
                     {
@@ -2883,23 +2889,7 @@ fn show_command_palette(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Eve
                 open_issue(&ui_for_action, &issue, None);
             }
             PaletteCommand::OpenIssueByKey(key) => {
-                let (account, generation) = {
-                    let state = state_for_action.borrow();
-                    (state.account.clone(), state.generation)
-                };
-                let Some(account) = account else {
-                    show_error(&ui_for_action, "Connect to Jira to open this ticket");
-                    return;
-                };
-                *ui_for_action.pending_direct_issue.borrow_mut() = Some(key.clone());
-                ui_for_action.toast.add_toast(adw::Toast::new(&format!("Opening {key}…")));
-                let sender = sender_for_action.clone();
-                thread::spawn(move || {
-                    let result = JiraClient::new(account)
-                        .and_then(|client| client.issue_by_key(&key))
-                        .map_err(|error| error.to_string());
-                    let _ = sender.send(Event::PaletteIssueLoaded(generation, key, result));
-                });
+                open_issue_by_key(&ui_for_action, &key);
             }
             PaletteCommand::Transition { issue_key, transition } => {
                 if ui_for_action.transition_busy.get() {
@@ -3094,6 +3084,53 @@ fn restore_detail_width(paned: &gtk::Paned, panel: &gtk::Box, preferred_width: i
     }
 }
 
+/// Resolve a link from any rich-text surface, even when the issue is not on
+/// the current board. The pending key protects against out-of-order responses.
+fn open_issue_by_key(ui: &Ui, key: &str) {
+    let key = key.to_ascii_uppercase();
+    let cached = {
+        let state = ui.state.borrow();
+        state.recent_issues.iter()
+            .chain(state.issues.iter())
+            .chain(state.pinned_issues.iter())
+            .chain(state.issue_cache.values().flat_map(|issues| issues.iter()))
+            .find(|issue| issue.key == key)
+            .cloned()
+    };
+    if let Some(issue) = cached {
+        open_issue(ui, &issue, None);
+        if !ui.state.borrow().busy {
+            render_board(ui, &ui.state.borrow());
+        }
+        return;
+    }
+
+    let (account, generation) = {
+        let state = ui.state.borrow();
+        (state.account.clone(), state.generation)
+    };
+    let Some(account) = account else {
+        show_error(ui, "Connect to Jira to open this ticket");
+        return;
+    };
+    *ui.pending_direct_issue.borrow_mut() = Some(key.clone());
+    ui.toast.add_toast(adw::Toast::new(&format!("Opening {key}…")));
+    let events = ui.events.clone();
+    thread::spawn(move || {
+        let result = JiraClient::new(account)
+            .and_then(|client| client.issue_by_key(&key))
+            .map_err(|error| error.to_string());
+        let _ = events.send(Event::PaletteIssueLoaded(generation, key, result));
+    });
+}
+
+fn issue_link_handler(ui: &Ui) -> issue_detail::OpenIssueLink {
+    let events = ui.events.clone();
+    Rc::new(move |key| {
+        let _ = events.send(Event::OpenLinkedIssue(key.to_owned()));
+    })
+}
+
 fn open_issue(ui: &Ui, issue: &Issue, source_button: Option<&gtk::Button>) {
     ui.pending_direct_issue.borrow_mut().take();
     let previous_form = ui.transition_form.borrow_mut().take();
@@ -3158,7 +3195,10 @@ fn open_issue(ui: &Ui, issue: &Issue, source_button: Option<&gtk::Button>) {
 }
 
 fn render_issue_detail(ui: &Ui, issue: &Issue, base_url: &str) {
-    let detail = issue_detail::render(&ui.detail_box, issue, base_url, &ui.detail_actions);
+    let on_issue_link = issue_link_handler(ui);
+    let detail = issue_detail::render(
+        &ui.detail_box, issue, base_url, &ui.detail_actions, &on_issue_link,
+    );
     *ui.image_slots.borrow_mut() = detail.images;
     *ui.comments_box.borrow_mut() = detail.comments;
 }
