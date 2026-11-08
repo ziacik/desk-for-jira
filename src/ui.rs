@@ -436,7 +436,6 @@ fn build_ui(app: &adw::Application) {
     let detail_actions = gtk::Box::new(gtk::Orientation::Vertical, 8);
     detail_actions.add_css_class("detail-actions");
     detail_actions.set_visible(false);
-    detail_content.append(&detail_actions);
     detail_content.append(&detail_scroll);
     let detail_toolbar = adw::ToolbarView::new();
     detail_toolbar.set_vexpand(true);
@@ -3020,7 +3019,7 @@ fn open_issue(ui: &Ui, issue: &Issue, source_button: Option<&gtk::Button>) {
 }
 
 fn render_issue_detail(ui: &Ui, issue: &Issue, base_url: &str) {
-    let detail = issue_detail::render(&ui.detail_box, issue, base_url);
+    let detail = issue_detail::render(&ui.detail_box, issue, base_url, &ui.detail_actions);
     *ui.image_slots.borrow_mut() = detail.images;
     *ui.comments_box.borrow_mut() = detail.comments;
 }
