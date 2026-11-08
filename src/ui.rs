@@ -2657,67 +2657,195 @@ fn issue_button(issue: &Issue, ui: &Ui, base_url: &str, account: Option<&Credent
 }
 
 /// Shared selection and detail behavior for board cards and the compact pinned row.
+fn show_command_palette(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>) {
+    if let Some(palette) = ui.palette_window.borrow().as_ref() {
+        palette.present();
+        return;
+    }
+
+    let (items, account) = {
+        let s = state.borrow();
+        let mut items = vec![
+            PaletteItem::new("Refresh Jira", "Reload issues and project data", "Command",
+                "view-refresh-symbolic", true, PaletteCommand::Refresh),
+            PaletteItem::new("Choose projects", "Manage projects on the unified board", "Command",
+                "view-grid-symbolic", true, PaletteCommand::ChooseProjects),
+            PaletteItem::new("Search on board", "Focus the board's local search field", "Command",
+                "system-search-symbolic", false, PaletteCommand::FocusBoardSearch),
+        ];
+        if !s.statuses.is_empty() {
+            items.push(PaletteItem::new("Edit columns", "Reorder and configure workflow columns",
+                "Command", "emblem-system-symbolic", true, PaletteCommand::EditColumns));
+        }
+        let selected = ui.selected_issue.borrow().as_ref().and_then(|key| {
+            s.issues.iter().chain(s.pinned_issues.iter()).chain(s.recent_issues.iter())
+                .find(|issue| &issue.key == key)
+        });
+        if let Some(issue) = selected {
+            let pin_action = if s.settings.pinned_issues.contains(&issue.key) {
+                "Unpin current ticket"
+            } else {
+                "Pin current ticket"
+            };
+            items.push(PaletteItem::new(pin_action, &issue.key, "Ticket action",
+                "view-pin-symbolic", true, PaletteCommand::TogglePin(issue.clone())));
+            items.push(PaletteItem::new("Copy branch name", &issue.key, "Ticket action",
+                "edit-copy-symbolic", true, PaletteCommand::CopyBranch(issue.clone())));
+            items.push(PaletteItem::new("Open current ticket in Jira", &issue.key, "Ticket action",
+                "web-browser-symbolic", false, PaletteCommand::OpenInJira(issue.clone())));
+            items.push(PaletteItem::new("Change ticket status…", &issue.key, "Ticket action",
+                "go-next-symbolic", true, PaletteCommand::ChangeStatus(issue.clone())));
+        }
+        items.push(PaletteItem::new("All projects", "Remove the local project filter", "Project",
+            "view-grid-symbolic", false, PaletteCommand::FilterProject(None)));
+        for key in &s.settings.projects {
+            let title = s.projects.iter().find(|project| &project.key == key)
+                .map(|project| format!("{} · {}", project.key, project.name))
+                .unwrap_or_else(|| key.clone());
+            items.push(PaletteItem::new(title, "Filter unified board to this project",
+                "Project", "folder-symbolic", false,
+                PaletteCommand::FilterProject(Some(key.clone()))));
+        }
+
+        let mut seen = HashSet::new();
+        for issue in &s.recent_issues {
+            if seen.insert(issue.key.clone()) {
+                items.push(PaletteItem::new(issue.key.clone(), issue.summary.clone(),
+                    "Recent", "document-open-recent-symbolic", true,
+                    PaletteCommand::OpenIssue(issue.clone())));
+            }
+        }
+        for issue in s.issues.iter()
+            .chain(s.pinned_issues.iter())
+            .chain(s.issue_cache.values().flat_map(|issues| issues.iter()))
+        {
+            if seen.insert(issue.key.clone()) {
+                items.push(PaletteItem::new(issue.key.clone(), issue.summary.clone(),
+                    "Ticket", "view-list-symbolic", false,
+                    PaletteCommand::OpenIssue(issue.clone())));
+            }
+        }
+        (items, s.account.clone())
+    };
+
+    let ui_for_action = ui.clone();
+    let state_for_action = state.clone();
+    let sender_for_action = sender.clone();
+    let on_activate: Rc<dyn Fn(PaletteCommand)> = Rc::new(move |action| {
+        match action {
+            PaletteCommand::OpenIssue(issue) | PaletteCommand::ChangeStatus(issue) => {
+                open_issue(&ui_for_action, &issue, None);
+            }
+            PaletteCommand::FilterProject(project) => {
+                *ui_for_action.project_filter.borrow_mut() = project;
+                update_project_label(&ui_for_action, &state_for_action);
+                save_view(&ui_for_action, &state_for_action.borrow());
+                render_board(&ui_for_action, &state_for_action.borrow());
+            }
+            PaletteCommand::ChooseProjects => {
+                show_project_picker(&ui_for_action, &state_for_action, &sender_for_action);
+            }
+            PaletteCommand::EditColumns => {
+                show_column_editor(&ui_for_action, &state_for_action);
+            }
+            PaletteCommand::Refresh => {
+                if let Some(account) = state_for_action.borrow().account.clone() {
+                    start_refresh(&ui_for_action, &state_for_action, &sender_for_action, account, false);
+                } else {
+                    show_login(&ui_for_action, &state_for_action, &sender_for_action);
+                }
+            }
+            PaletteCommand::FocusBoardSearch => {
+                ui_for_action.search.grab_focus();
+            }
+            PaletteCommand::TogglePin(issue) => {
+                toggle_pinned_issue(&ui_for_action, &issue);
+            }
+            PaletteCommand::CopyBranch(issue) => {
+                if let Some(display) = gtk::gdk::Display::default() {
+                    let name = issue_detail::suggested_branch_name(&issue.key, &issue.summary);
+                    display.clipboard().set_text(&name);
+                    ui_for_action.toast.add_toast(adw::Toast::new("Branch name copied"));
+                }
+            }
+            PaletteCommand::OpenInJira(issue) => {
+                if let Some(account) = state_for_action.borrow().account.as_ref() {
+                    let url = format!("{}/browse/{}", account.base_url.trim_end_matches('/'), issue.key);
+                    let _ = gtk::gio::AppInfo::launch_default_for_uri(
+                        &url, None::<&gtk::gio::AppLaunchContext>,
+                    );
+                }
+            }
+        }
+    });
+    let palette = command_palette::open(&ui.window, items, account, on_activate);
+    let weak_slot = Rc::downgrade(&ui.palette_window);
+    palette.connect_close_request(move |window| {
+        if let Some(slot) = weak_slot.upgrade()
+            && slot.borrow().as_ref().is_some_and(|current| current == window)
+        {
+            slot.borrow_mut().take();
+        }
+        glib::Propagation::Proceed
+    });
+    *ui.palette_window.borrow_mut() = Some(palette);
+}
+
+fn open_issue(ui: &Ui, issue: &Issue, source_button: Option<&gtk::Button>) {
+    if let Some(form) = ui.transition_form.borrow_mut().take() {
+        form.close();
+    }
+    if let Some(previous) = ui.selected_button.borrow_mut().take() {
+        previous.remove_css_class("selected-issue");
+    }
+    if let Some(button) = source_button {
+        button.add_css_class("selected-issue");
+        *ui.selected_button.borrow_mut() = Some(button.clone());
+    }
+    *ui.selected_issue.borrow_mut() = Some(issue.key.clone());
+
+    let (account, generation) = {
+        let mut state = ui.state.borrow_mut();
+        state.recent_issues.retain(|recent| recent.key != issue.key);
+        state.recent_issues.insert(0, issue.clone());
+        state.recent_issues.truncate(12);
+        (state.account.clone(), state.generation)
+    };
+    let base_url = account.as_ref().map(|account| account.base_url.as_str()).unwrap_or("");
+    ui.detail_heading.set_text(&issue.key);
+    ui.open_in_jira.set_visible(!base_url.is_empty());
+    ui.copy_branch.set_visible(true);
+    ui.pin_detail.set_visible(true);
+    style_pin_button(&ui.pin_detail,
+        ui.state.borrow().settings.pinned_issues.iter().any(|key| key == &issue.key));
+    *ui.image_slots.borrow_mut() = issue_detail::render(&ui.detail_box, issue, base_url);
+    if !ui.detail_panel.is_visible() {
+        ui.detail_panel.set_visible(true);
+        let available = ui.inner_split.width();
+        if available >= 640 {
+            let width = ui.saved_detail_width.get().min(available - 300).max(320);
+            ui.inner_split.set_position(available - width);
+        }
+    }
+    request_transitions(&ui.detail_actions, &ui.detail_request, &ui.events,
+        account.clone(), generation, &issue.key);
+    if let Some(account) = account {
+        load_issue_images(&ui.events, account, issue, generation);
+    }
+}
+
+/// Shared selection behavior for board cards and pinned issues.
 fn connect_issue_open(
     button: &gtk::Button,
     issue: &Issue,
     ui: &Ui,
-    base_url: &str,
-    account: Option<&Credentials>,
-    generation: u64,
+    _base_url: &str,
+    _account: Option<&Credentials>,
+    _generation: u64,
 ) {
+    let ui = ui.clone();
     let issue = issue.clone();
-    let detail_box = ui.detail_box.clone();
-    let detail_panel = ui.detail_panel.clone();
-    let inner_split = ui.inner_split.clone();
-    let detail_heading = ui.detail_heading.clone();
-    let open_in_jira = ui.open_in_jira.clone();
-    let copy_branch = ui.copy_branch.clone();
-    let pin_detail = ui.pin_detail.clone();
-    let state = ui.state.clone();
-    let saved_detail_width = ui.saved_detail_width.clone();
-    let selected_button = Rc::downgrade(&ui.selected_button);
-    let selected_issue = ui.selected_issue.clone();
-    let base_url = base_url.to_owned();
-    let account = account.cloned();
-    let image_slots = ui.image_slots.clone();
-    let actions = ui.detail_actions.clone();
-    let detail_request = ui.detail_request.clone();
-    let transition_form = ui.transition_form.clone();
-    let events = ui.events.clone();
-    button.connect_clicked(move |button| {
-        let previous_form = transition_form.borrow_mut().take();
-        if let Some(form) = previous_form {
-            form.close();
-        }
-        if let Some(selected_button) = selected_button.upgrade()
-            && let Some(previous) = selected_button.borrow_mut().replace(button.clone())
-        {
-            previous.remove_css_class("selected-issue");
-        }
-        button.add_css_class("selected-issue");
-        *selected_issue.borrow_mut() = Some(issue.key.clone());
-        detail_heading.set_text(&issue.key);
-        open_in_jira.set_visible(!base_url.is_empty());
-        copy_branch.set_visible(true);
-        pin_detail.set_visible(true);
-        style_pin_button(
-            &pin_detail,
-            state.borrow().settings.pinned_issues.iter().any(|pinned| pinned == &issue.key),
-        );
-        *image_slots.borrow_mut() = issue_detail::render(&detail_box, &issue, &base_url);
-        if !detail_panel.is_visible() {
-            detail_panel.set_visible(true);
-            let available = inner_split.width();
-            if available >= 640 {
-                let width = saved_detail_width.get().min(available - 300).max(320);
-                inner_split.set_position(available - width);
-            }
-        }
-        request_transitions(&actions, &detail_request, &events, account.clone(), generation, &issue.key);
-        if let Some(account) = account.clone() {
-            load_issue_images(&events, account, &issue, generation);
-        }
-    });
+    button.connect_clicked(move |button| open_issue(&ui, &issue, Some(button)));
 }
 
 fn pinned_issue_tile(
