@@ -72,10 +72,10 @@ struct PaletteStatus {
 
 fn transition_items(key: &str, transitions: Vec<IssueTransition>) -> Vec<PaletteItem> {
     transitions.into_iter().map(|transition| {
-        let title = if transition.required_fields.is_empty() {
-            transition.name.clone()
-        } else {
+        let title = if transition.fields.iter().any(|field| field.required) {
             format!("{}…", transition.name)
+        } else {
+            transition.name.clone()
         };
         let subtitle = format!("{key} · Move to {}", transition.to_name);
         PaletteItem::new(
@@ -486,21 +486,24 @@ mod tests {
             name: "Start progress".to_owned(),
             to_name: "In Progress".to_owned(),
             to_id: "3".to_owned(),
-            required_fields: vec![],
+            fields: vec![],
+            edit_fields: vec![],
         };
         let second = IssueTransition {
             id: "42".to_owned(),
             name: "Resolve".to_owned(),
             to_name: "Done".to_owned(),
             to_id: "10001".to_owned(),
-            required_fields: vec![TransitionField {
+            fields: vec![TransitionField {
                 id: "resolution".to_owned(),
                 name: "Resolution".to_owned(),
                 schema_type: "resolution".to_owned(),
                 item_type: String::new(),
                 custom_type: String::new(),
+                required: true,
                 choices: vec![],
             }],
+            edit_fields: vec![],
         };
         let items = transition_items("ART-123", vec![first, second]);
         assert_eq!(items.len(), 2);
@@ -513,7 +516,7 @@ mod tests {
             PaletteCommand::Transition { issue_key, transition } => {
                 assert_eq!(issue_key, "ART-123");
                 assert_eq!(transition.id, "42");
-                assert_eq!(transition.required_fields.len(), 1);
+                assert_eq!(transition.fields.len(), 1);
             }
             _ => panic!("Transition mapped to an unrelated palette command"),
         }

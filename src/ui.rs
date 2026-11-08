@@ -13,7 +13,7 @@ use gtk::glib;
 use crate::{
     issue_detail,
     command_palette::{self, PaletteCommand, PaletteItem},
-    jira::{AuthMode, Credentials, Issue, IssueTransition, JiraClient, Project, ProjectStatus},
+    jira::{AuthMode, Credentials, Issue, IssueTransition, JiraClient, JiraTransitionError, Project, ProjectStatus},
     transition_ui,
     preferences::{self, BoardSettings, IssueScope, UiLayout, ViewSettings},
     secrets,
@@ -148,13 +148,21 @@ impl State {
     }
 }
 
+#[derive(Debug)]
+struct TransitionFailure {
+    message: String,
+    worklog_recorded: bool,
+    validation_failed: bool,
+    field_keys: Vec<String>,
+}
+
 enum Event {
     Stored(Result<Option<Credentials>, String>),
     Loaded(u64, Credentials, Result<Loaded, String>),
     BoardLoaded(u64, BoardKey, Result<BoardData, String>),
     ImageLoaded(u64, String, String, Result<Vec<u8>, String>),
     TransitionsLoaded(u64, u64, String, Result<Vec<IssueTransition>, String>),
-    TransitionFinished(u64, String, String, String, Result<(), String>),
+    TransitionFinished(u64, String, IssueTransition, Result<(), TransitionFailure>),
     Disconnected(u64, Result<(), String>),
 }
 
@@ -924,6 +932,96 @@ fn wire_actions(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>) {
     }
 }
 
+fn transition_submit(
+    ui: &Ui,
+    state: &Rc<RefCell<State>>,
+    sender: &Sender<Event>,
+    selected_key: &str,
+) -> transition_ui::TransitionSubmit {
+    let selected_issue = ui.selected_issue.clone();
+    let transition_busy = ui.transition_busy.clone();
+    let detail_actions = ui.detail_actions.downgrade();
+    let state = state.clone();
+    let sender = sender.clone();
+    let selected_key = selected_key.to_owned();
+    Rc::new(move |transition, fields, issue_edits, worklog| {
+        if transition_busy.get()
+            || selected_issue.borrow().as_deref() != Some(selected_key.as_str())
+        {
+            return false;
+        }
+        let Some(account) = state.borrow().account.clone() else { return false };
+        let id = state.borrow().generation;
+        transition_busy.set(true);
+        if let Some(actions) = detail_actions.upgrade() {
+            actions.set_sensitive(false);
+        }
+        let key = selected_key.clone();
+        let sender = sender.clone();
+        thread::spawn(move || {
+            let mut worklog_recorded = false;
+            let mut issue_fields_saved = false;
+            let result = (|| -> anyhow::Result<()> {
+                let client = JiraClient::new(account)?;
+                if !issue_edits.is_empty() {
+                    client.edit_issue_fields(&key, issue_edits)?;
+                    issue_fields_saved = true;
+                }
+                if let Some(log) = worklog {
+                    client.add_worklog(&key, log)?;
+                    worklog_recorded = true;
+                }
+                client.transition_issue(&key, &transition.id, fields)
+            })().map_err(|error| {
+                let note = match (issue_fields_saved, worklog_recorded) {
+                    (true, true) => "Issue fields and work were saved, but the status did not change. ",
+                    (true, false) => "Issue fields were saved, but the status did not change. ",
+                    (false, true) => "Work was logged, but the status did not change. ",
+                    (false, false) => "",
+                };
+                let jira = error.downcast_ref::<JiraTransitionError>();
+                TransitionFailure {
+                    message: format!("{note}{error}"),
+                    worklog_recorded,
+                    validation_failed: jira.is_some_and(JiraTransitionError::is_validation_failure),
+                    field_keys: jira.map(|failure| failure.field_keys.clone()).unwrap_or_default(),
+                }
+            });
+            let _ = sender.send(Event::TransitionFinished(id, key, transition, result));
+        });
+        true
+    })
+}
+
+fn transition_form_opened(ui: &Ui) -> transition_ui::FormOpened {
+    let form_slot = ui.transition_form.clone();
+    Rc::new(move |form| {
+        let previous = form_slot.borrow_mut().take();
+        if let Some(previous) = previous {
+            previous.close();
+        }
+        let weak_slot = Rc::downgrade(&form_slot);
+        form.window.connect_close_request(move |window| {
+            if let Some(slot) = weak_slot.upgrade() {
+                let is_current = slot.borrow().as_ref()
+                    .is_some_and(|current| current.window == *window);
+                if is_current {
+                    slot.borrow_mut().take();
+                }
+            }
+            glib::Propagation::Proceed
+        });
+        *form_slot.borrow_mut() = Some(form);
+    })
+}
+
+fn transition_error_needs_input(error: &TransitionFailure, transition: &IssueTransition) -> bool {
+    // HTTP status and available Jira field metadata are structured data.
+    // Never infer API semantics by parsing a localized error sentence.
+    error.validation_failed
+        && (!transition.fields.is_empty() || !transition.edit_fields.is_empty())
+}
+
 fn handle_event(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>, event: Event) {
     match event {
         Event::Stored(Ok(Some(account))) => start_refresh(ui, state, sender, account, false),
@@ -1043,7 +1141,7 @@ fn handle_event(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>, eve
                 }
             }
         }
-        Event::TransitionFinished(id, key, to_id, to_name, result) => {
+        Event::TransitionFinished(id, key, transition, result) => {
             if state.borrow().generation != id { return; }
             ui.transition_busy.set(false);
             ui.detail_actions.set_sensitive(true);
@@ -1062,9 +1160,9 @@ fn handle_event(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>, eve
                             .chain(issue_cache.values_mut().flat_map(|items| items.iter_mut()))
                         {
                             if issue.key == key {
-                                issue.status = to_name.clone();
-                                if !to_id.is_empty() {
-                                    issue.status_id = to_id.clone();
+                                issue.status = transition.to_name.clone();
+                                if !transition.to_id.is_empty() {
+                                    issue.status_id = transition.to_id.clone();
                                 }
                             }
                         }
@@ -1087,23 +1185,32 @@ fn handle_event(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>, eve
                         }
                         request_transitions(&ui.detail_actions, &ui.detail_request, &ui.events, account, id, &key);
                     }
-                    ui.toast.add_toast(adw::Toast::new(&format!("Moved to {to_name}")));
+                    ui.toast.add_toast(adw::Toast::new(&format!("Moved to {}", transition.to_name)));
                 }
                 Err(error) => {
+                    if ui.selected_issue.borrow().as_deref() != Some(key.as_str()) {
+                        return;
+                    }
                     let has_form = ui.transition_form.borrow().as_ref()
                         .is_some_and(|form| form.key == key);
                     if has_form {
                         if let Some(form) = ui.transition_form.borrow().as_ref() {
-                            form.show_error(&error);
+                            form.show_error(&error.message, error.worklog_recorded, &error.field_keys);
+                        }
+                    } else if transition_error_needs_input(&error, &transition) {
+                        if let Some(account) = state.borrow().account.as_ref() {
+                            let cloud = account.mode == AuthMode::Cloud;
+                            transition_ui::open_transition_form(
+                                &ui.window, &key, cloud, transition,
+                                transition_submit(ui, state, sender, &key),
+                                transition_form_opened(ui),
+                            );
+                            if let Some(form) = ui.transition_form.borrow().as_ref() {
+                                form.show_error(&error.message, error.worklog_recorded, &error.field_keys);
+                            }
                         }
                     } else {
-                        show_error(ui, &error);
-                        if ui.selected_issue.borrow().as_deref() == Some(key.as_str()) {
-                            request_transitions(
-                                &ui.detail_actions, &ui.detail_request, &ui.events,
-                                state.borrow().account.clone(), id, &key,
-                            );
-                        }
+                        show_error(ui, &error.message);
                     }
                 }
             }
@@ -2210,11 +2317,18 @@ fn visible_board_groups<'a>(
         {
             matches.push(issue);
         } else if let Some((_, matches, _)) = groups.iter_mut()
-            .find(|(title, _, _)| title == "Other")
+            .find(|(_, _, statuses)| statuses.is_empty())
         {
             matches.push(issue);
         } else {
-            groups.push(("Other".into(), vec![issue], Vec::new()));
+            // Keep the fallback separate from a real, user-configured
+            // column named "Other", including its visible label.
+            let name = if groups.iter().any(|(title, _, _)| title == "Other") {
+                "Unmapped"
+            } else {
+                "Other"
+            };
+            groups.push((name.into(), vec![issue], Vec::new()));
         }
     }
 
@@ -2518,12 +2632,10 @@ fn issue_button(issue: &Issue, ui: &Ui, base_url: &str, account: Option<&Credent
     // Reserve room for the pin action overlay, even with a long issue type.
     meta.set_margin_end(28);
     let kind = issue.kind.to_ascii_lowercase();
-    let (kind_icon, kind_class) = if kind.contains("bug") {
-        ("dialog-warning-symbolic", "kind-bug")
-    } else if kind.contains("story") {
-        ("starred-symbolic", "kind-story")
-    } else {
-        ("view-list-symbolic", "kind-task")
+    let (kind_icon, kind_class) = match kind.as_str() {
+        "bug" => ("dialog-warning-symbolic", "kind-bug"),
+        "story" => ("starred-symbolic", "kind-story"),
+        _ => ("view-list-symbolic", "kind-task"),
     };
     // GtkCenterBox centres the glyph within its square background, instead of
     // letting GtkBox position the glyph against the leading edge.
@@ -2547,8 +2659,9 @@ fn issue_button(issue: &Issue, ui: &Ui, base_url: &str, account: Option<&Credent
         kind.add_css_class("ticket-kind");
         meta.append(&kind);
     }
-    let priority = issue.priority.to_ascii_lowercase();
-    if matches!(priority.as_str(), "highest" | "high" | "critical" | "blocker") {
+    // Jira priority names are configurable ("2 - High" is a real example).
+    // Display the server value without assigning severity from English text.
+    if !issue.priority.is_empty() {
         let badge = gtk::Label::new(Some(&issue.priority));
         badge.add_css_class("ticket-priority");
         meta.append(&badge);
@@ -2622,70 +2735,6 @@ fn issue_button(issue: &Issue, ui: &Ui, base_url: &str, account: Option<&Credent
     }
     tile.add_overlay(&pin);
     tile
-}
-
-/// Shared selection and detail behavior for board cards and the compact pinned row.
-fn transition_submit(
-    ui: &Ui,
-    state: &Rc<RefCell<State>>,
-    sender: &Sender<Event>,
-    key: &str,
-) -> transition_ui::TransitionSubmit {
-    let selected_issue = ui.selected_issue.clone();
-    let transition_busy = ui.transition_busy.clone();
-    let detail_actions = ui.detail_actions.downgrade();
-    let state_for_submit = state.clone();
-    let sender = sender.clone();
-    let selected_key = key.to_owned();
-    Rc::new(move |transition, fields| {
-        if transition_busy.get()
-            || selected_issue.borrow().as_deref() != Some(selected_key.as_str())
-        {
-            return false;
-        }
-        let (account, generation) = {
-            let state = state_for_submit.borrow();
-            (state.account.clone(), state.generation)
-        };
-        let Some(account) = account else { return false };
-        transition_busy.set(true);
-        if let Some(actions) = detail_actions.upgrade() {
-            actions.set_sensitive(false);
-        }
-        let key = selected_key.clone();
-        let sender = sender.clone();
-        thread::spawn(move || {
-            let result = (|| -> anyhow::Result<()> {
-                JiraClient::new(account)?.transition_issue(&key, &transition.id, fields)
-            })().map_err(|err| err.to_string());
-            let _ = sender.send(Event::TransitionFinished(
-                generation, key, transition.to_id, transition.to_name, result,
-            ));
-        });
-        true
-    })
-}
-
-fn transition_form_opened(ui: &Ui) -> transition_ui::FormOpened {
-    let form_slot = ui.transition_form.clone();
-    Rc::new(move |form| {
-        let previous = form_slot.borrow_mut().take();
-        if let Some(previous) = previous {
-            previous.close();
-        }
-        let weak_slot = Rc::downgrade(&form_slot);
-        form.window.connect_close_request(move |window| {
-            if let Some(slot) = weak_slot.upgrade() {
-                let is_current = slot.borrow().as_ref()
-                    .is_some_and(|current| current.window == *window);
-                if is_current {
-                    slot.borrow_mut().take();
-                }
-            }
-            glib::Propagation::Proceed
-        });
-        *form_slot.borrow_mut() = Some(form);
-    })
 }
 
 fn show_command_palette(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>) {
@@ -3044,6 +3093,39 @@ fn show_error(ui: &Ui, error: &str) {
 }
 
 #[cfg(test)]
+mod workflow_error_tests {
+    use super::*;
+
+    #[test]
+    fn shows_editor_for_server_validation_only_with_editable_metadata() {
+        let error = TransitionFailure {
+            message: "Please fill impact assessment".into(),
+            worklog_recorded: false,
+            validation_failed: true,
+            field_keys: vec![],
+        };
+        let transition = IssueTransition {
+            id: "121".into(), name: "Review".into(),
+            to_name: "In Review".into(), to_id: "10".into(),
+            fields: vec![], edit_fields: vec![],
+        };
+        assert!(!transition_error_needs_input(&error, &transition));
+        let field = crate::jira::TransitionField {
+            id: "customfield_10135".into(), name: "Impact Assessment".into(),
+            schema_type: "string".into(), item_type: String::new(),
+            custom_type: String::new(), required: false, choices: vec![],
+        };
+        let editable = IssueTransition { fields: vec![field], ..transition };
+        assert!(transition_error_needs_input(&error, &editable));
+        assert!(!transition_error_needs_input(
+            &TransitionFailure { validation_failed: false, ..error },
+            &editable,
+        ));
+    }
+
+}
+
+#[cfg(test)]
 mod scope_tests {
     use super::*;
 
@@ -3096,6 +3178,29 @@ mod scope_tests {
             vec!["Open", "Done"],
         );
         assert_eq!(settings.columns.len(), 3);
+    }
+
+    #[test]
+    fn custom_column_named_other_does_not_absorb_unmapped_tickets() {
+        let mut settings = board_settings();
+        settings.columns.push(preferences::Column {
+            title: "Other".into(),
+            statuses: vec![preferences::StatusRef {
+                project_key: "ART".into(), status_id: "9".into(),
+            }],
+        });
+        let issues = [
+            issue("ART-9", "9", "Explicitly mapped to Other"),
+            issue("ART-404", "404", "Unmapped issue"),
+        ];
+        let groups = visible_board_groups(&settings, &issues, "");
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].0, "Other");
+        assert_eq!(groups[1].0, "Unmapped");
+        assert_eq!(groups[0].1.iter().map(|issue| issue.key.as_str())
+            .collect::<Vec<_>>(), vec!["ART-9"]);
+        assert_eq!(groups[1].1.iter().map(|issue| issue.key.as_str())
+            .collect::<Vec<_>>(), vec!["ART-404"]);
     }
 
     #[test]

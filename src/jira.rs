@@ -1,4 +1,4 @@
-use std::{collections::{HashMap, HashSet}, io::Read, time::Duration};
+use std::{collections::{HashMap, HashSet}, fmt, io::Read, time::Duration};
 
 use anyhow::{Context, Result, bail, ensure};
 use reqwest::blocking::{Client, RequestBuilder};
@@ -95,6 +95,42 @@ impl Attachment {
 }
 
 
+/// A rejected Jira transition with the original HTTP status and structured
+/// field keys. Human-readable error messages must never be reverse-parsed to
+/// determine field identity.
+#[derive(Debug)]
+pub struct JiraTransitionError {
+    pub status: u16,
+    pub message: String,
+    pub field_keys: Vec<String>,
+}
+
+impl JiraTransitionError {
+    fn from_response(status: u16, body: &str) -> Self {
+        let field_keys = serde_json::from_str::<Value>(body).ok()
+            .and_then(|response| response.get("errors").and_then(Value::as_object).cloned())
+            .map(|errors| errors.into_iter().map(|(key, _)| key).collect())
+            .unwrap_or_default();
+        Self {
+            status,
+            message: jira_error_message(body),
+            field_keys,
+        }
+    }
+
+    pub fn is_validation_failure(&self) -> bool {
+        matches!(self.status, 400 | 422)
+    }
+}
+
+impl fmt::Display for JiraTransitionError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Jira HTTP {}: {}", self.status, self.message)
+    }
+}
+
+impl std::error::Error for JiraTransitionError {}
+
 #[derive(Clone, Debug)]
 pub struct TransitionChoice {
     pub label: String,
@@ -108,13 +144,18 @@ pub struct TransitionField {
     pub schema_type: String,
     pub item_type: String,
     pub custom_type: String,
+    pub required: bool,
     pub choices: Vec<TransitionChoice>,
 }
 
 impl TransitionField {
     pub fn is_multiline(&self) -> bool {
-        matches!(self.id.as_str(), "description" | "environment")
+        matches!(self.id.as_str(), "description" | "environment" | "comment")
             || self.custom_type.ends_with(":textarea")
+    }
+
+    pub fn is_worklog(&self) -> bool {
+        self.id == "worklog" || self.schema_type == "worklog"
     }
 
     pub fn uses_structured_input(&self) -> bool {
@@ -135,6 +176,17 @@ impl TransitionField {
     pub fn text_value(&self, raw: &str, cloud: bool) -> Result<Value> {
         let value = raw.trim();
         ensure!(!value.is_empty(), "{} is required", self.name);
+        if self.id == "comment" {
+            return if cloud {
+                Ok(json!({
+                    "type": "doc",
+                    "version": 1,
+                    "content": [{"type": "paragraph", "content": [{"type": "text", "text": value}]}]
+                }))
+            } else {
+                Ok(json!(value))
+            };
+        }
         match self.schema_type.as_str() {
             "number" => {
                 let number = value.parse::<f64>()
@@ -196,7 +248,9 @@ pub struct IssueTransition {
     pub name: String,
     pub to_name: String,
     pub to_id: String,
-    pub required_fields: Vec<TransitionField>,
+    pub fields: Vec<TransitionField>,
+    // Fields editable on the issue but absent from this transition screen.
+    pub edit_fields: Vec<TransitionField>,
 }
 
 #[derive(Clone, Debug)]
@@ -284,42 +338,88 @@ impl JiraClient {
             .query(&[("expand", "transitions.fields")]))?;
         let mut transitions = parse_issue_transitions(&data);
 
-        // The transition screen may mark already-populated fields as required.
-        // Existing values generally satisfy that constraint without re-entering
-        // them. Retrieve the relevant issue fields in one request when possible.
-        let required: HashSet<String> = transitions.iter()
-            .flat_map(|transition| transition.required_fields.iter().map(|field| field.id.clone()))
+        // An issue field may already be populated even when its transition-screen
+        // metadata says "required". Never ask the user to re-enter that value.
+        // Query the current issue after collecting both screen and edit metadata.
+        let edit_path = format!("/rest/api/{version}/issue/{key}/editmeta");
+        if let Ok(editmeta) = self.read_json(self.http.get(self.url(&edit_path)))
+            && let Some(meta_fields) = editmeta.get("fields").and_then(Value::as_object)
+        {
+            let editable = parse_transition_fields(meta_fields);
+            for transition in &mut transitions {
+                transition.edit_fields = editable.iter().filter(|field| {
+                    field.id != "comment" && !transition.fields.iter()
+                        .any(|screen_field| screen_field.id == field.id)
+                }).cloned().collect();
+            }
+        }
+        let field_ids: HashSet<String> = transitions.iter()
+            .flat_map(|transition| transition.fields.iter().chain(&transition.edit_fields))
+            .filter(|field| !field.is_worklog())
+            .map(|field| field.id.clone())
             .collect();
-        if !required.is_empty() {
-            let list = required.into_iter().collect::<Vec<_>>().join(",");
-            let path = format!("/rest/api/{version}/issue/{key}");
-            if let Ok(issue) = self.read_json(self.http.get(self.url(&path))
-                .query(&[("fields", list)]))
-                && let Some(values) = issue.get("fields").and_then(Value::as_object)
-            {
+        if !field_ids.is_empty() {
+            let names = field_ids.into_iter().collect::<Vec<_>>().join(",");
+            let issue_path = format!("/rest/api/{version}/issue/{key}");
+            // If the current issue values cannot be read, fail explicitly.
+            // Guessing that a field is empty would prompt for values that
+            // may already be set and could overwrite valid issue data.
+            let issue = self.read_json(self.http.get(self.url(&issue_path))
+                .query(&[("fields", names)]))
+                .with_context(|| format!("Could not read current fields for {key}"))?;
+            if let Some(values) = issue.get("fields").and_then(Value::as_object) {
                 for transition in &mut transitions {
-                    transition.required_fields.retain(|field| {
-                        !values.get(&field.id).is_some_and(field_has_value)
-                    });
+                    remove_populated_fields(transition, values);
                 }
             }
         }
         Ok(transitions)
     }
 
-    pub fn transition_issue(&self, key: &str, transition_id: &str, fields: serde_json::Map<String, Value>) -> Result<()> {
+    pub fn edit_issue_fields(&self, key: &str, fields: serde_json::Map<String, Value>) -> Result<()> {
+        if fields.is_empty() {
+            return Ok(());
+        }
         let version = if self.account.mode == AuthMode::Cloud { "3" } else { "2" };
-        let path = format!("/rest/api/{version}/issue/{key}/transitions");
-        let response = self.authorize(self.http.post(self.url(&path)).json(&json!({
-            "transition": {"id": transition_id},
-            "fields": fields,
-        })))
+        let path = format!("/rest/api/{version}/issue/{key}");
+        let response = self.authorize(self.http.put(self.url(&path))
+            .json(&json!({"fields": fields})))
             .header(reqwest::header::ACCEPT, "application/json")
             .send().context("Could not connect to Jira")?;
         let status = response.status();
         if !status.is_success() {
             let body = response.text().unwrap_or_default();
             bail!("Jira HTTP {}: {}", status.as_u16(), jira_error_message(&body));
+        }
+        Ok(())
+    }
+
+    pub fn add_worklog(&self, key: &str, worklog: Value) -> Result<()> {
+        let version = if self.account.mode == AuthMode::Cloud { "3" } else { "2" };
+        let path = format!("/rest/api/{version}/issue/{key}/worklog");
+        let response = self.authorize(self.http.post(self.url(&path))
+            .json(&worklog))
+            .header(reqwest::header::ACCEPT, "application/json")
+            .send().context("Could not connect to Jira")?;
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().unwrap_or_default();
+            bail!("Jira HTTP {}: {}", status.as_u16(), jira_error_message(&body));
+        }
+        Ok(())
+    }
+
+    pub fn transition_issue(&self, key: &str, transition_id: &str, fields: serde_json::Map<String, Value>) -> Result<()> {
+        let version = if self.account.mode == AuthMode::Cloud { "3" } else { "2" };
+        let path = format!("/rest/api/{version}/issue/{key}/transitions");
+        let payload = transition_payload(transition_id, fields);
+        let response = self.authorize(self.http.post(self.url(&path)).json(&payload))
+            .header(reqwest::header::ACCEPT, "application/json")
+            .send().context("Could not connect to Jira")?;
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().unwrap_or_default();
+            return Err(JiraTransitionError::from_response(status.as_u16(), &body).into());
         }
         Ok(())
     }
@@ -559,13 +659,7 @@ impl JiraClient {
         }
         let fields = self.read_json(self.http.get(self.url("/rest/api/2/field"))).ok()?;
         fields.as_array()?.iter()
-            .find(|field| {
-                field.get("schema").and_then(|schema| schema.get("custom"))
-                    .and_then(Value::as_str)
-                    .is_some_and(|kind| kind.contains("gh-epic-link"))
-                    || field.get("name").and_then(Value::as_str)
-                        .is_some_and(|name| name.eq_ignore_ascii_case("Epic Link"))
-            })
+            .find(|field| is_legacy_epic_link(field))
             .and_then(|field| field.get("id").and_then(Value::as_str))
             .map(str::to_owned)
     }
@@ -778,6 +872,14 @@ fn parse_issues_with_epic_link(data: &Value, epic_link_field: Option<&str>) -> V
         .collect()
 }
 
+fn is_legacy_epic_link(field: &Value) -> bool {
+    // The display name can be changed, localized, or reused by another field.
+    // GreenHopper's exact custom type identifies the real Epic Link field.
+    field.get("schema").and_then(|schema| schema.get("custom"))
+        .and_then(Value::as_str)
+        == Some("com.pyxis.greenhopper.jira:gh-epic-link")
+}
+
 fn parse_issue(v: &Value, epic_link_field: Option<&str>) -> Option<Issue> {
     let key = v.get("key")?.as_str()?.to_owned();
     let f = v.get("fields")?;
@@ -868,9 +970,93 @@ fn field_has_value(value: &Value) -> bool {
         Value::Null => false,
         Value::String(text) => !text.trim().is_empty(),
         Value::Array(values) => !values.is_empty(),
+        Value::Object(values) if values.get("type").and_then(Value::as_str) == Some("doc") => {
+            values.get("content").and_then(Value::as_array)
+                .is_some_and(|content| content.iter().any(adf_node_has_value))
+        }
         Value::Object(values) => !values.is_empty(),
         _ => true,
     }
+}
+
+fn adf_node_has_value(node: &Value) -> bool {
+    if node.get("text").and_then(Value::as_str)
+        .is_some_and(|text| !text.trim().is_empty())
+    {
+        return true;
+    }
+    // ADF nodes such as images, mentions and cards are content even if
+    // they do not contain a text leaf.
+    if matches!(
+        node.get("type").and_then(Value::as_str),
+        Some("media" | "mediaInline" | "mention" | "emoji" | "inlineCard" | "blockCard")
+    ) {
+        return true;
+    }
+    node.get("content").and_then(Value::as_array)
+        .is_some_and(|content| content.iter().any(adf_node_has_value))
+}
+
+fn remove_populated_fields(
+    transition: &mut IssueTransition,
+    values: &serde_json::Map<String, Value>,
+) {
+    // Worklog is an action, not a value that can be satisfied by a prior log.
+    // Other already-set fields are left unchanged and excluded from the form.
+    transition.fields.retain(|field| {
+        field.is_worklog() || !values.get(&field.id).is_some_and(field_has_value)
+    });
+    transition.edit_fields.retain(|field| {
+        field.is_worklog() || !values.get(&field.id).is_some_and(field_has_value)
+    });
+}
+
+fn parse_transition_fields(metadata_fields: &serde_json::Map<String, Value>) -> Vec<TransitionField> {
+    let mut fields = Vec::new();
+    for (id, metadata) in metadata_fields {
+        let required = metadata.get("required").and_then(Value::as_bool) == Some(true)
+            && metadata.get("hasDefaultValue").and_then(Value::as_bool) != Some(true);
+        let schema = metadata.get("schema");
+        let schema_type = schema.and_then(|s| s.get("type"))
+            .and_then(Value::as_str).unwrap_or("").to_owned();
+        let item_type = schema.and_then(|s| s.get("items"))
+            .and_then(Value::as_str).unwrap_or("").to_owned();
+        let custom_type = schema.and_then(|s| s.get("custom"))
+            .and_then(Value::as_str).unwrap_or("").to_owned();
+        let choices = metadata.get("allowedValues").and_then(Value::as_array)
+            .into_iter().flatten()
+            .filter_map(|value| {
+                let label = value.as_str()
+                    .or_else(|| value.get("name").and_then(Value::as_str))
+                    .or_else(|| value.get("value").and_then(Value::as_str))
+                    .or_else(|| value.get("displayName").and_then(Value::as_str))
+                    .or_else(|| value.get("key").and_then(Value::as_str))?
+                    .to_owned();
+                let payload = if let Some(id) = value.get("id") {
+                    json!({"id": id})
+                } else if let Some(id) = value.get("accountId") {
+                    json!({"accountId": id})
+                } else if let Some(name) = value.get("name") {
+                    json!({"name": name})
+                } else {
+                    value.clone()
+                };
+                Some(TransitionChoice { label, value: payload })
+            }).collect();
+        fields.push(TransitionField {
+            id: id.clone(),
+            name: metadata.get("name").and_then(Value::as_str)
+                .unwrap_or(id).to_owned(),
+            schema_type,
+            item_type,
+            custom_type,
+            required,
+            choices,
+        });
+    }
+    fields.sort_by(|a, b| b.required.cmp(&a.required)
+        .then_with(|| a.name.cmp(&b.name)));
+    fields
 }
 
 fn parse_issue_transitions(response: &Value) -> Vec<IssueTransition> {
@@ -881,54 +1067,23 @@ fn parse_issue_transitions(response: &Value) -> Vec<IssueTransition> {
             let to = transition.get("to")?;
             let to_name = to.get("name").and_then(Value::as_str).unwrap_or(&name).to_owned();
             let to_id = to.get("id").and_then(Value::as_str).unwrap_or("").to_owned();
-            let mut required_fields = Vec::new();
-            if let Some(fields) = transition.get("fields").and_then(Value::as_object) {
-                for (id, metadata) in fields {
-                    if metadata.get("required").and_then(Value::as_bool) != Some(true)
-                        || metadata.get("hasDefaultValue").and_then(Value::as_bool) == Some(true)
-                    {
-                        continue;
-                    }
-                    let schema = metadata.get("schema");
-                    let schema_type = schema.and_then(|s| s.get("type"))
-                        .and_then(Value::as_str).unwrap_or("").to_owned();
-                    let item_type = schema.and_then(|s| s.get("items"))
-                        .and_then(Value::as_str).unwrap_or("").to_owned();
-                    let custom_type = schema.and_then(|s| s.get("custom"))
-                        .and_then(Value::as_str).unwrap_or("").to_owned();
-                    let choices = metadata.get("allowedValues").and_then(Value::as_array)
-                        .into_iter().flatten()
-                        .filter_map(|value| {
-                            let label = value.as_str()
-                                .or_else(|| value.get("name").and_then(Value::as_str))
-                                .or_else(|| value.get("value").and_then(Value::as_str))
-                                .or_else(|| value.get("displayName").and_then(Value::as_str))
-                                .or_else(|| value.get("key").and_then(Value::as_str))?
-                                .to_owned();
-                            let payload = if let Some(id) = value.get("id") {
-                                json!({"id": id})
-                            } else if let Some(id) = value.get("accountId") {
-                                json!({"accountId": id})
-                            } else if let Some(name) = value.get("name") {
-                                json!({"name": name})
-                            } else {
-                                value.clone()
-                            };
-                            Some(TransitionChoice { label, value: payload })
-                        }).collect();
-                    required_fields.push(TransitionField {
-                        id: id.clone(),
-                        name: metadata.get("name").and_then(Value::as_str)
-                            .unwrap_or(id).to_owned(),
-                        schema_type,
-                        item_type,
-                        custom_type,
-                        choices,
-                    });
-                }
-            }
-            Some(IssueTransition { id, name, to_name, to_id, required_fields })
+            let fields = transition.get("fields").and_then(Value::as_object)
+                .map(parse_transition_fields).unwrap_or_default();
+            Some(IssueTransition {
+                id, name, to_name, to_id, fields,
+                edit_fields: Vec::new(),
+            })
         }).collect()
+}
+
+fn transition_payload(transition_id: &str, mut fields: serde_json::Map<String, Value>) -> Value {
+    let comment = fields.remove("comment");
+    let mut payload = json!({"transition": {"id": transition_id}, "fields": fields});
+    // Jira handles comments through update operations, not the issue's fields.
+    if let Some(body) = comment {
+        payload["update"] = json!({"comment": [{"add": {"body": body}}]});
+    }
+    payload
 }
 
 fn jira_error_message(body: &str) -> String {
@@ -1162,7 +1317,7 @@ mod transition_tests {
     use super::*;
 
     #[test]
-    fn parses_required_fields_and_choices_from_transition_metadata() {
+    fn parses_all_screen_fields_and_required_flags_from_transition_metadata() {
         let data = json!({"transitions": [{
             "id": "31", "name": "Close", "to": {"id": "10002", "name": "Done"},
             "fields": {
@@ -1179,9 +1334,92 @@ mod transition_tests {
         assert_eq!(transitions.len(), 1);
         let transition = &transitions[0];
         assert_eq!(transition.to_name, "Done");
-        assert_eq!(transition.required_fields.len(), 1);
-        assert_eq!(transition.required_fields[0].id, "resolution");
-        assert_eq!(transition.required_fields[0].choices[0].value, json!({"id": "1"}));
+        assert_eq!(transition.fields.len(), 3);
+        let resolution = transition.fields.iter().find(|field| field.id == "resolution").unwrap();
+        assert!(resolution.required);
+        assert_eq!(resolution.choices[0].value, json!({"id": "1"}));
+        let comment = transition.fields.iter().find(|field| field.id == "comment").unwrap();
+        assert!(!comment.required);
+        let defaulted = transition.fields.iter().find(|field| field.id == "customfield_42").unwrap();
+        assert!(!defaulted.required);
+    }
+
+    #[test]
+    fn existing_fix_and_affects_versions_are_not_requested_again() {
+        let mut transition = IssueTransition {
+            id: "31".into(), name: "Review".into(),
+            to_name: "Review".into(), to_id: "3".into(),
+            fields: vec![
+                TransitionField { id: "fixVersions".into(), name: "Fix versions".into(),
+                    schema_type: "array".into(), item_type: "version".into(),
+                    custom_type: String::new(), required: true, choices: vec![] },
+                TransitionField { id: "versions".into(), name: "Affects versions".into(),
+                    schema_type: "array".into(), item_type: "version".into(),
+                    custom_type: String::new(), required: true, choices: vec![] },
+                TransitionField { id: "customfield_123".into(), name: "Impact assessment".into(),
+                    schema_type: "string".into(), item_type: String::new(),
+                    custom_type: String::new(), required: false, choices: vec![] },
+            ],
+            edit_fields: vec![],
+        };
+        let values = json!({
+            "fixVersions": [{"id":"14070","name":"19.2 Bugfix 2"}],
+            "versions": [{"id":"10000","name":"15.0.0"}],
+            "customfield_123": null
+        });
+        remove_populated_fields(&mut transition, values.as_object().unwrap());
+        assert_eq!(transition.fields.len(), 1);
+        assert_eq!(transition.fields[0].id, "customfield_123");
+    }
+
+    #[test]
+    fn log_work_is_not_satisfied_by_an_older_worklog() {
+        let mut transition = IssueTransition {
+            id: "31".into(), name: "Review".into(),
+            to_name: "Review".into(), to_id: "3".into(),
+            fields: vec![TransitionField {
+                id: "worklog".into(), name: "Log work".into(), required: true,
+                schema_type: "array".into(), item_type: "worklog".into(),
+                custom_type: String::new(), choices: vec![],
+            }],
+            edit_fields: vec![],
+        };
+        remove_populated_fields(&mut transition,
+            json!({"worklog": [{"id":"99"}]}).as_object().unwrap());
+        assert_eq!(transition.fields.len(), 1);
+    }
+
+    #[test]
+    fn legacy_epic_link_requires_exact_custom_field_type() {
+        assert!(is_legacy_epic_link(&json!({
+            "name": "Different localized name",
+            "schema": {"custom":"com.pyxis.greenhopper.jira:gh-epic-link"}
+        })));
+        assert!(!is_legacy_epic_link(&json!({
+            "name": "Epic Link",
+            "schema": {"custom":"vendor.example:some-other-field"}
+        })));
+        assert!(!is_legacy_epic_link(&json!({
+            "name": "Epic Link",
+            "schema": {"type":"string"}
+        })));
+    }
+
+    #[test]
+    fn empty_adf_document_does_not_count_as_a_filled_required_field() {
+        assert!(!field_has_value(&json!({"type":"doc","version":1,"content":[]})));
+        assert!(!field_has_value(&json!({
+            "type":"doc", "version":1,
+            "content":[{"type":"paragraph","content":[]}]
+        })));
+        assert!(field_has_value(&json!({
+            "type":"doc", "version":1,
+            "content":[{"type":"paragraph","content":[{"type":"text","text":"Impact"}]}]
+        })));
+        assert!(field_has_value(&json!({
+            "type":"doc", "version":1,
+            "content":[{"type":"mediaSingle","content":[{"type":"media","attrs":{"id":"123"}}]}]
+        })));
     }
 
     #[test]
@@ -1199,7 +1437,7 @@ mod transition_tests {
         let text = TransitionField {
             id: "description".into(), name: "Description".into(),
             schema_type: "string".into(), item_type: String::new(),
-            custom_type: String::new(), choices: vec![],
+            custom_type: String::new(), required: true, choices: vec![],
         };
         assert_eq!(text.text_value("Hello", false).unwrap(), json!("Hello"));
         assert_eq!(text.text_value("Hello", true).unwrap()["type"], "doc");
@@ -1213,6 +1451,69 @@ mod transition_tests {
         };
         assert_eq!(number.text_value("2.5", false).unwrap(), json!(2.5));
         assert!(number.text_value("invalid", false).is_err());
+    }
+
+    #[test]
+    fn finds_editable_fields_missing_from_transition_screen() {
+        let transitions = parse_issue_transitions(&json!({"transitions":[
+            {"id":"3","name":"Done","to":{"name":"Done"},
+             "fields":{"resolution":{"name":"Resolution","required":false,
+                 "schema":{"type":"resolution"}}}}
+        ]}));
+        let edit = parse_transition_fields(json!({
+            "customfield_42": {
+                "name":"Business justification", "required":false,
+                "schema":{"type":"string"}
+            },
+            "resolution": {
+                "name":"Resolution", "required":false,
+                "schema":{"type":"resolution"}
+            }
+        }).as_object().unwrap());
+        let available: Vec<_> = edit.iter().filter(|field| {
+            !transitions[0].fields.iter().any(|screen_field| screen_field.id == field.id)
+        }).collect();
+        assert_eq!(available.len(), 1);
+        assert_eq!(available[0].id, "customfield_42");
+    }
+
+    #[test]
+    fn transition_comment_is_sent_as_an_update_operation() {
+        let mut fields = serde_json::Map::new();
+        fields.insert("comment".into(), json!("Done"));
+        fields.insert("resolution".into(), json!({"id":"1"}));
+        let body = transition_payload("31", fields);
+        assert_eq!(body["transition"]["id"], "31");
+        assert_eq!(body["fields"]["resolution"]["id"], "1");
+        assert!(body["fields"].get("comment").is_none());
+        assert_eq!(body["update"]["comment"][0]["add"]["body"], "Done");
+    }
+
+    #[test]
+    fn parses_transition_with_no_fields_for_confirmation_dialog() {
+        let data = json!({"transitions": [{
+            "id":"2", "name":"In Progress", "to":{"name":"In Progress", "id":"10"}
+        }]});
+        let transitions = parse_issue_transitions(&data);
+        assert_eq!(transitions.len(), 1);
+        assert!(transitions[0].fields.is_empty());
+    }
+
+    #[test]
+    fn uses_machine_field_keys_instead_of_error_message_guesses() {
+        let structured = JiraTransitionError::from_response(
+            400,
+            r#"{"errorMessages":["Please fill impact assessment and fix versions"],"errors":{"customfield_10135":"Required","fixVersions":"Required"}}"#,
+        );
+        assert_eq!(structured.field_keys, vec!["customfield_10135", "fixVersions"]);
+        assert!(structured.is_validation_failure());
+
+        let unstructured = JiraTransitionError::from_response(
+            400, r#"{"errorMessages":["Please fill impact assessment and fix versions"]}"#,
+        );
+        assert!(unstructured.field_keys.is_empty());
+        assert!(unstructured.is_validation_failure());
+        assert!(!JiraTransitionError::from_response(403, "Forbidden").is_validation_failure());
     }
 
     #[test]
@@ -1232,7 +1533,7 @@ mod advanced_transition_tests {
         TransitionField {
             id: "customfield_123".into(), name: "Example".into(),
             schema_type: schema_type.into(), item_type: item_type.into(),
-            custom_type: String::new(), choices: vec![],
+            custom_type: String::new(), required: true, choices: vec![],
         }
     }
 
