@@ -1136,8 +1136,11 @@ fn handle_event(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>, eve
                 Ok(issues) => {
                     if let Some(issue) = issues.into_iter().find(|issue| issue.key == key) {
                         open_issue(ui, &issue, None);
-                        // Rebuild the selected card highlight after restoring.
-                        render_board(ui, &state.borrow());
+                        // Rebuild the card highlight only after the board has
+                        // loaded; don't replace its loading indicator prematurely.
+                        if !state.borrow().busy {
+                            render_board(ui, &state.borrow());
+                        }
                     } else {
                         eprintln!("Could not restore {key}: Jira did not return the issue");
                     }
