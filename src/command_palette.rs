@@ -470,11 +470,52 @@ pub(crate) fn open(
 
 #[cfg(test)]
 mod tests {
-    use super::make_search_jql;
+    use super::{PaletteCommand, make_search_jql, transition_items};
+    use crate::jira::{IssueTransition, TransitionField};
 
     #[test]
     fn searches_exact_jira_keys() {
         assert_eq!(make_search_jql("art-123"), Some("key = ART-123 ORDER BY updated DESC".to_owned()));
+    }
+
+    #[test]
+    fn transition_palette_keeps_real_workflow_ids_and_required_fields() {
+        let first = IssueTransition {
+            id: "21".to_owned(),
+            name: "Start progress".to_owned(),
+            to_name: "In Progress".to_owned(),
+            to_id: "3".to_owned(),
+            required_fields: vec![],
+        };
+        let second = IssueTransition {
+            id: "42".to_owned(),
+            name: "Resolve".to_owned(),
+            to_name: "Done".to_owned(),
+            to_id: "10001".to_owned(),
+            required_fields: vec![TransitionField {
+                id: "resolution".to_owned(),
+                name: "Resolution".to_owned(),
+                schema_type: "resolution".to_owned(),
+                item_type: String::new(),
+                custom_type: String::new(),
+                choices: vec![],
+            }],
+        };
+        let items = transition_items("ART-123", vec![first, second]);
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].title, "Start progress");
+        assert_eq!(items[1].title, "Resolve…");
+        assert_eq!(items[1].subtitle, "ART-123 · Move to Done");
+        assert!(items[1].matches("resolve"));
+        assert!(items[1].matches("transition"));
+        match &items[1].command {
+            PaletteCommand::Transition { issue_key, transition } => {
+                assert_eq!(issue_key, "ART-123");
+                assert_eq!(transition.id, "42");
+                assert_eq!(transition.required_fields.len(), 1);
+            }
+            _ => panic!("Transition mapped to an unrelated palette command"),
+        }
     }
 
     #[test]
