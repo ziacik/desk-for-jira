@@ -58,6 +58,9 @@ struct Ui {
     transition_form: Rc<RefCell<Option<transition_ui::TransitionForm>>>,
     detail_panel: gtk::Box,
     detail_heading: gtk::Label,
+    history_back: gtk::Button,
+    history_forward: gtk::Button,
+    issue_history: Rc<RefCell<IssueHistory>>,
     open_in_jira: gtk::Button,
     copy_branch: gtk::Button,
     pin_detail: gtk::Button,
@@ -78,6 +81,64 @@ struct Ui {
     all_filter: gtk::ToggleButton,
     sprint_filter: gtk::CheckButton,
     restoring_view: Rc<Cell<bool>>,
+}
+
+const ISSUE_HISTORY_LIMIT: usize = 100;
+
+/// Per-window navigation, independent of the board's scope and short recent-issue cache.
+#[derive(Default)]
+struct IssueHistory {
+    entries: Vec<Issue>,
+    cursor: Option<usize>,
+}
+
+impl IssueHistory {
+    fn visit(&mut self, issue: &Issue) {
+        if let Some(cursor) = self.cursor {
+            if self.entries[cursor].key == issue.key {
+                // Reopening the current issue refreshes its cached data, not the history.
+                self.entries[cursor] = issue.clone();
+                return;
+            }
+            // Opening a different issue after Back discards the forward branch.
+            self.entries.truncate(cursor + 1);
+        }
+        self.entries.push(issue.clone());
+        if self.entries.len() > ISSUE_HISTORY_LIMIT {
+            self.entries.remove(0);
+        }
+        self.cursor = Some(self.entries.len() - 1);
+    }
+
+    fn can_go_back(&self) -> bool {
+        self.cursor.is_some_and(|cursor| cursor > 0)
+    }
+
+    fn can_go_forward(&self) -> bool {
+        self.cursor.is_some_and(|cursor| cursor + 1 < self.entries.len())
+    }
+
+    fn back(&mut self) -> Option<Issue> {
+        let cursor = self.cursor?.checked_sub(1)?;
+        self.cursor = Some(cursor);
+        self.entries.get(cursor).cloned()
+    }
+
+    fn forward(&mut self) -> Option<Issue> {
+        let cursor = self.cursor? + 1;
+        let issue = self.entries.get(cursor)?.clone();
+        self.cursor = Some(cursor);
+        Some(issue)
+    }
+
+    fn update_status(&mut self, key: &str, status: &str, status_id: &str) {
+        for issue in self.entries.iter_mut().filter(|issue| issue.key == key) {
+            issue.status = status.to_owned();
+            if !status_id.is_empty() {
+                issue.status_id = status_id.to_owned();
+            }
+        }
+    }
 }
 
 impl IssueScope {
@@ -425,10 +486,25 @@ fn build_ui(app: &adw::Application) {
     pin_detail.set_tooltip_text(Some("Pin issue"));
     pin_detail.set_visible(false);
     detail_header.pack_end(&pin_detail);
-    let close_detail = gtk::Button::from_icon_name("go-next-symbolic");
+    let close_detail = gtk::Button::from_icon_name("window-close-symbolic");
     close_detail.add_css_class("flat");
     close_detail.set_tooltip_text(Some("Close issue details (Esc)"));
     detail_header.pack_start(&close_detail);
+    let history_nav = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    history_nav.add_css_class("linked");
+    let history_back = gtk::Button::from_icon_name("go-previous-symbolic");
+    history_back.add_css_class("flat");
+    history_back.add_css_class("detail-header-action");
+    history_back.set_tooltip_text(Some("Previous issue (Alt+Left)"));
+    history_back.set_sensitive(false);
+    history_nav.append(&history_back);
+    let history_forward = gtk::Button::from_icon_name("go-next-symbolic");
+    history_forward.add_css_class("flat");
+    history_forward.add_css_class("detail-header-action");
+    history_forward.set_tooltip_text(Some("Next issue (Alt+Right)"));
+    history_forward.set_sensitive(false);
+    history_nav.append(&history_forward);
+    detail_header.pack_start(&history_nav);
     let detail_box = gtk::Box::new(gtk::Orientation::Vertical, 18);
     detail_box.set_margin_top(20);
     detail_box.set_margin_start(22);
@@ -609,7 +685,9 @@ fn build_ui(app: &adw::Application) {
         comments_request: Rc::new(Cell::new(0)),
         children_box: Rc::new(RefCell::new(gtk::Box::new(gtk::Orientation::Vertical, 9))),
         children_request: Rc::new(Cell::new(0)),
-        detail_actions, detail_panel, detail_heading, open_in_jira, copy_branch, pin_detail, inner_split,
+        detail_actions, detail_panel, detail_heading, history_back, history_forward,
+        issue_history: Rc::new(RefCell::new(IssueHistory::default())),
+        open_in_jira, copy_branch, pin_detail, inner_split,
         state: state.clone(),
         detail_request: Rc::new(Cell::new(0)),
         transition_busy: Rc::new(Cell::new(false)),
@@ -626,6 +704,10 @@ fn build_ui(app: &adw::Application) {
         collapsed_columns: Rc::new(RefCell::new(HashSet::new())),
     };
     watch_detail_resize(&ui);
+    for (button, back) in [(ui.history_back.clone(), true), (ui.history_forward.clone(), false)] {
+        let ui = ui.clone();
+        button.connect_clicked(move |_| navigate_issue_history(&ui, back));
+    }
     {
         // The action always opens the currently selected issue, not the
         // issue whose details happened to be rendered when it was created.
@@ -700,6 +782,23 @@ fn build_ui(app: &adw::Application) {
             {
                 show_command_palette(&command_ui, &command_state, &command_sender);
                 return glib::Propagation::Stop;
+            }
+            if close_ui.detail_panel.is_visible()
+                && modifiers.contains(gtk::gdk::ModifierType::ALT_MASK)
+                && !modifiers.intersects(
+                    gtk::gdk::ModifierType::CONTROL_MASK
+                        | gtk::gdk::ModifierType::SHIFT_MASK
+                        | gtk::gdk::ModifierType::SUPER_MASK,
+                )
+            {
+                if matches!(key, gtk::gdk::Key::Left | gtk::gdk::Key::KP_Left) {
+                    navigate_issue_history(&close_ui, true);
+                    return glib::Propagation::Stop;
+                }
+                if matches!(key, gtk::gdk::Key::Right | gtk::gdk::Key::KP_Right) {
+                    navigate_issue_history(&close_ui, false);
+                    return glib::Propagation::Stop;
+                }
             }
             let Some(search) = search.upgrade() else { return glib::Propagation::Proceed };
             if key == gtk::gdk::Key::Escape && close_ui.detail_panel.is_visible() && !search.has_focus() {
@@ -909,6 +1008,7 @@ fn wire_actions(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>) {
             ui.sprint_filter.set_active(false);
             ui.restoring_view.set(false);
             ui.pinned_section.set_visible(false);
+            clear_issue_history(&ui);
             show_empty(&ui.board_box, "Not connected", "Connect to Jira to view issues.");
             close_issue_details(&ui);
             let sender = sender.clone();
@@ -1066,6 +1166,7 @@ fn handle_event(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>, eve
                     update_project_label(ui, state);
                     ui.restoring_view.set(false);
                     close_issue_details(ui);
+                    clear_issue_history(ui);
                     if let Some(error) = project_error {
                         show_error(ui, &format!("Could not list projects: {error}"));
                     }
@@ -1275,6 +1376,9 @@ fn handle_event(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>, eve
                             }
                         }
                     }
+                    ui.issue_history.borrow_mut().update_status(
+                        &key, &transition.to_name, &transition.to_id,
+                    );
                     render_board(ui, &state.borrow());
                     if ui.selected_issue.borrow().as_deref() == Some(key.as_str()) {
                         let issue = {
@@ -2442,6 +2546,31 @@ fn visible_board_groups<'a>(
 }
 
 
+fn update_history_buttons(ui: &Ui) {
+    let history = ui.issue_history.borrow();
+    ui.history_back.set_sensitive(history.can_go_back());
+    ui.history_forward.set_sensitive(history.can_go_forward());
+}
+
+fn clear_issue_history(ui: &Ui) {
+    *ui.issue_history.borrow_mut() = IssueHistory::default();
+    update_history_buttons(ui);
+}
+
+fn navigate_issue_history(ui: &Ui, back: bool) {
+    let issue = {
+        let mut history = ui.issue_history.borrow_mut();
+        if back { history.back() } else { history.forward() }
+    };
+    if let Some(issue) = issue {
+        // This is already the history's current entry; visit() won't append it.
+        open_issue(ui, &issue, None);
+        if !ui.state.borrow().busy {
+            render_board(ui, &ui.state.borrow());
+        }
+    }
+}
+
 fn dismiss_issue_details(ui: &Ui) {
     close_issue_details(ui);
     *ui.remembered_issue.borrow_mut() = None;
@@ -3167,6 +3296,8 @@ fn open_issue(ui: &Ui, issue: &Issue, source_button: Option<&gtk::Button>) {
         *ui.selected_button.borrow_mut() = Some(button.clone());
     }
     *ui.selected_issue.borrow_mut() = Some(issue.key.clone());
+    ui.issue_history.borrow_mut().visit(issue);
+    update_history_buttons(ui);
     *ui.remembered_issue.borrow_mut() = Some(issue.key.clone());
     save_view(ui, &ui.state.borrow());
 
@@ -3795,6 +3926,62 @@ mod scope_tests {
         assert_eq!(detail_split_position(900, 6, 1180), Some(300));
         // Never restore from a zero/unallocated GTK widget.
         assert_eq!(detail_split_position(0, 6, 540), None);
+    }
+
+    #[test]
+    fn issue_history_moves_back_forward_without_extra_entries() {
+        let mut history = IssueHistory::default();
+        assert!(!history.can_go_back());
+        assert!(!history.can_go_forward());
+        history.visit(&issue("ART-1", "1", "First"));
+        history.visit(&issue("AFB-2", "2", "Second"));
+        history.visit(&issue("ART-3", "3", "Third"));
+        assert_eq!(history.back().unwrap().key, "AFB-2");
+        assert_eq!(history.back().unwrap().key, "ART-1");
+        assert!(!history.can_go_back());
+        assert_eq!(history.forward().unwrap().key, "AFB-2");
+        history.visit(&issue("AFB-2", "2", "Updated"));
+        assert_eq!(history.entries.len(), 3);
+        assert_eq!(history.forward().unwrap().key, "ART-3");
+        assert!(!history.can_go_forward());
+    }
+
+    #[test]
+    fn opening_after_back_discards_forward_history() {
+        let mut history = IssueHistory::default();
+        history.visit(&issue("ART-1", "1", "First"));
+        history.visit(&issue("ART-2", "1", "Second"));
+        history.visit(&issue("ART-3", "1", "Third"));
+        assert_eq!(history.back().unwrap().key, "ART-2");
+        history.visit(&issue("ART-4", "1", "Fourth"));
+        assert_eq!(history.entries.iter().map(|issue| issue.key.as_str()).collect::<Vec<_>>(),
+            vec!["ART-1", "ART-2", "ART-4"]);
+        assert!(!history.can_go_forward());
+        assert_eq!(history.back().unwrap().key, "ART-2");
+        assert_eq!(history.forward().unwrap().key, "ART-4");
+    }
+
+    #[test]
+    fn history_keeps_full_issues_and_updates_transition_status() {
+        let mut history = IssueHistory::default();
+        history.visit(&issue("ART-1", "1", "Older"));
+        history.visit(&issue("ART-2", "2", "Later"));
+        history.update_status("ART-1", "Done", "3");
+        let restored = history.back().unwrap();
+        assert_eq!(restored.summary, "Older");
+        assert_eq!(restored.status, "Done");
+        assert_eq!(restored.status_id, "3");
+    }
+
+    #[test]
+    fn history_limit_retains_recent_navigation() {
+        let mut history = IssueHistory::default();
+        for id in 0..ISSUE_HISTORY_LIMIT + 1 {
+            history.visit(&issue(&format!("ART-{id}"), "1", ""));
+        }
+        assert_eq!(history.entries.len(), ISSUE_HISTORY_LIMIT);
+        assert_eq!(history.entries.first().unwrap().key, "ART-1");
+        assert!(!history.can_go_forward());
     }
 
     #[test]
