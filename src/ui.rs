@@ -2920,7 +2920,8 @@ fn remember_visible_detail_width(ui: &Ui) {
 fn capture_detail_width_after_layout(ui: &Ui) {
     let ui = ui.clone();
     let frames = Rc::new(Cell::new(0_u8));
-    ui.inner_split.add_tick_callback(move |_, _| {
+    let paned = ui.inner_split.clone();
+    paned.add_tick_callback(move |_, _| {
         frames.set(frames.get() + 1);
         if frames.get() < 2 {
             glib::ControlFlow::Continue
