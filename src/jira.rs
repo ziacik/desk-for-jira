@@ -109,7 +109,7 @@ impl JiraTransitionError {
     fn from_response(status: u16, body: &str) -> Self {
         let field_keys = serde_json::from_str::<Value>(body).ok()
             .and_then(|response| response.get("errors").and_then(Value::as_object).cloned())
-            .map(|errors| errors.into_keys().collect())
+            .map(|errors| errors.into_iter().map(|(key, _)| key).collect())
             .unwrap_or_default();
         Self {
             status,
