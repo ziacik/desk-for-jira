@@ -118,17 +118,19 @@ button.collapsed-expand:hover {
   color: alpha(@window_fg_color, 0.78);
 }
 
-/* The inspector has one accented hero; the content below stays calm and flat. */
+/* The issue header has its own subtle surface, not a full-width warning banner. */
 .detail-panel {
   color: @window_fg_color;
   background-color: @window_bg_color;
   border-left: 1px solid alpha(@window_fg_color, 0.10);
 }
 .detail-hero {
-  padding: 19px 20px 17px;
-  border-radius: 15px;
-  background-color: alpha(@accent_bg_color, 0.055);
-  border: 1px solid alpha(@accent_color, 0.13);
+  padding: 16px 18px 15px;
+  border-radius: 14px;
+  background-color: @card_bg_color;
+  border: 1px solid alpha(@window_fg_color, 0.095);
+  border-left: 3px solid #557cdb;
+  box-shadow: 0 1px 3px alpha(@window_fg_color, 0.045);
 }
 .detail-eyebrow {
   color: alpha(@window_fg_color, 0.7);
@@ -166,14 +168,14 @@ button.collapsed-expand:hover {
 .detail-title {
   color: @window_fg_color;
   font-weight: 780;
-  font-size: 1.55em;
+  font-size: 1.62em;
 }
 .detail-status-pill {
-  color: @accent_color;
-  background-color: alpha(@accent_bg_color, 0.16);
-  border: 1px solid alpha(@accent_color, 0.17);
+  color: @window_fg_color;
+  background-color: alpha(#4679eb, 0.12);
+  border: 1px solid alpha(#4679eb, 0.17);
   border-radius: 999px;
-  padding: 5px 10px;
+  padding: 4px 10px;
   font-size: 0.85em;
   font-weight: 720;
 }
@@ -202,12 +204,12 @@ button.detail-file-link {
   box-shadow: none;
 }
 .detail-metadata {
-  padding: 4px 2px 20px;
-  border-bottom: 1px solid alpha(@window_fg_color, 0.11);
+  padding: 2px 2px 16px;
+  border-bottom: 1px solid alpha(@window_fg_color, 0.10);
 }
 .detail-field-label {
-  color: alpha(@window_fg_color, 0.59);
-  font-size: 0.85em;
+  color: alpha(@window_fg_color, 0.63);
+  font-size: 0.87em;
 }
 .detail-field-value {
   color: @window_fg_color;
@@ -235,12 +237,12 @@ button.detail-header-action:hover {
   border-bottom: 1px solid alpha(@window_fg_color, 0.085);
 }
 .detail-section-icon {
-  color: @accent_color;
+  color: #4679eb;
   -gtk-icon-size: 16px;
 }
 .detail-section-title {
   color: @window_fg_color;
-  font-size: 1.08em;
+  font-size: 1.13em;
   font-weight: 760;
 }
 .detail-section-count {
@@ -254,6 +256,7 @@ button.detail-header-action:hover {
 .detail-body,
 .issue-prose {
   color: @window_fg_color;
+  font-size: 1.04em;
 }
 .issue-comment {
   padding: 12px 0 15px;
