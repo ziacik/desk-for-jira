@@ -118,18 +118,19 @@ button.collapsed-expand:hover {
   color: alpha(@window_fg_color, 0.78);
 }
 
-/* The issue header has its own subtle surface, not a full-width warning banner. */
+/* The issue header is an edge-to-edge paper surface, not a floating card. */
 .detail-panel {
   color: @window_fg_color;
   background-color: @window_bg_color;
   border-left: 1px solid alpha(@window_fg_color, 0.10);
 }
 .detail-hero {
-  padding: 16px 18px 15px;
-  border-radius: 14px;
+  padding: 20px 22px 18px;
   background-color: @card_bg_color;
-  border: 1px solid alpha(@window_fg_color, 0.095);
-  box-shadow: 0 1px 3px alpha(@window_fg_color, 0.045);
+  border-bottom: 1px solid alpha(@window_fg_color, 0.095);
+}
+.detail-page-content {
+  padding: 20px 22px 28px;
 }
 .detail-eyebrow {
   color: alpha(@window_fg_color, 0.7);
@@ -429,9 +430,11 @@ button.issue-image-preview:focus-visible {
 .sidebar-pane-header {
   background-color: @sidebar_bg_color;
 }
-.board-pane-header,
-.detail-pane-header {
+.board-pane-header {
   background-color: @window_bg_color;
+}
+.detail-pane-header {
+  background-color: @card_bg_color;
 }
 .sidebar-eyebrow {
   font-weight: 750;

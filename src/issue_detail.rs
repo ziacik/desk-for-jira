@@ -285,6 +285,12 @@ pub fn render(
     header.append(actions);
     container.append(&header);
 
+    // Page content is inset independently so the white header reaches the
+    // inspector edges without turning the rest of the detail into a card.
+    let content = gtk::Box::new(gtk::Orientation::Vertical, 18);
+    content.add_css_class("detail-page-content");
+    container.append(&content);
+
     // Let properties occupy the available width rather than leaving two huge,
     // half-empty columns in wide inspectors. FlowBox automatically wraps at
     // narrower panel widths without hiding any Jira fields.
@@ -321,12 +327,12 @@ pub fn render(
         cell.append(&value);
         metadata.insert(&cell, -1);
     }
-    container.append(&metadata);
+    content.append(&metadata);
 
     let children = gtk::Box::new(gtk::Orientation::Vertical, 9);
     children.add_css_class("detail-section");
     children.set_visible(false);
-    container.append(&children);
+    content.append(&children);
 
     let section = gtk::Box::new(gtk::Orientation::Vertical, 12);
     section.add_css_class("detail-section");
@@ -347,7 +353,7 @@ pub fn render(
         add_text(&body, "No description yet.", "detail-empty");
     }
     section.append(&body);
-    container.append(&section);
+    content.append(&section);
 
     let remaining: Vec<_> = issue.attachments.iter()
         .filter(|a| !used_images.contains(&a.id))
@@ -379,7 +385,7 @@ pub fn render(
                 attachments.append(&file);
             }
         }
-        container.append(&attachments);
+        content.append(&attachments);
     }
 
     let comments_section = gtk::Box::new(gtk::Orientation::Vertical, 12);
@@ -388,7 +394,7 @@ pub fn render(
     let comments = gtk::Box::new(gtk::Orientation::Vertical, 0);
     show_comments_loading(&comments);
     comments_section.append(&comments);
-    container.append(&comments_section);
+    content.append(&comments_section);
 
     DetailRender { images: slots, comments, children }
 }
