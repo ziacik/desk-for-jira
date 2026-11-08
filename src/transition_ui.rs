@@ -119,21 +119,32 @@ pub fn render_actions(
         let submit = submit.clone();
         let on_open = on_open.clone();
         button.connect_clicked(move |_| {
-            if transition_needs_form(&transition) {
-                if let Some(parent) = parent.upgrade() {
-                    open_transition_form(
-                        &parent, &key, cloud, transition.clone(), submit.clone(), on_open.clone(),
-                    );
-                }
-            } else {
-                // No required fields exposed by Jira: keep the one-click action.
-                // If a workflow validator rejects it, the caller opens this form.
-                submit(transition.clone(), Map::new(), Map::new());
+            if let Some(parent) = parent.upgrade() {
+                activate_transition(
+                    &parent, &key, cloud, transition.clone(), submit.clone(), on_open.clone(),
+                );
             }
         });
         actions.insert(&button, -1);
     }
     container.append(&actions);
+}
+
+/// Execute a workflow action from either the inspector or the command palette.
+/// Transitions with required fields use the same validation dialog in both places.
+pub fn activate_transition(
+    parent: &adw::ApplicationWindow,
+    issue_key: &str,
+    cloud: bool,
+    transition: IssueTransition,
+    submit: TransitionSubmit,
+    on_open: FormOpened,
+) {
+    if transition_needs_form(&transition) {
+        open_transition_form(parent, issue_key, cloud, transition, submit, on_open);
+    } else {
+        submit(transition, Map::new(), Map::new());
+    }
 }
 
 fn transition_needs_form(transition: &IssueTransition) -> bool {

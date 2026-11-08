@@ -1,3 +1,4 @@
+mod command_palette;
 mod issue_detail;
 mod jira;
 mod preferences;

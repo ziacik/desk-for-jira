@@ -384,6 +384,22 @@ impl JiraClient {
         self.search_issues_with_epic_link(jql, None)
     }
 
+    /// A single page is enough for the command palette. Avoid fetching the
+    /// hundreds of results used for full project-board loading.
+    pub fn quick_search_issues(&self, jql: &str) -> Result<Vec<Issue>> {
+        let data = match self.account.mode {
+            AuthMode::Cloud => self.read_json(
+                self.http.post(self.url("/rest/api/3/search/jql"))
+                    .json(&json!({"jql": jql, "maxResults": 30, "fields": FIELDS}))
+            )?,
+            AuthMode::Server => self.read_json(
+                self.http.post(self.url("/rest/api/2/search"))
+                    .json(&json!({"jql": jql, "maxResults": 30, "fields": FIELDS}))
+            )?,
+        };
+        Ok(parse_issues(&data))
+    }
+
     fn search_issues_with_epic_link(&self, jql: &str, epic_link_field: Option<&str>) -> Result<Vec<Issue>> {
         let mut fields = FIELDS.to_vec();
         if let Some(field) = epic_link_field {
