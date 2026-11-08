@@ -119,10 +119,6 @@ pub fn render_actions(
 ) {
     clear(container);
     container.set_visible(true);
-    let heading = gtk::Label::new(Some("TRANSITIONS"));
-    heading.add_css_class("detail-actions-heading");
-    heading.set_xalign(0.0);
-    container.append(&heading);
 
     if transitions.is_empty() {
         let message = gtk::Label::new(Some("No available workflow actions"));
