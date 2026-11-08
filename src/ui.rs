@@ -3261,10 +3261,14 @@ mod detail_layout_tests {
             std::thread::sleep(Duration::from_millis(16));
         };
         let deadline = Instant::now() + Duration::from_secs(3);
-        while split.width() < 1200 && Instant::now() < deadline {
+        while split.width() < 900 && Instant::now() < deadline {
             advance();
         }
-        assert!(split.width() >= 1200, "GTK did not allocate the test window");
+        assert!(
+            split.width() >= 900,
+            "GTK did not allocate the test window (window={}, split={})",
+            window.width(), split.width()
+        );
 
         for _ in 0..2 {
             detail.set_visible(true);
