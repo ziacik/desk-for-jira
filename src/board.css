@@ -686,3 +686,89 @@ button.detail-header-action.pin-active {
   color: @accent_color;
   background-color: alpha(@accent_bg_color, 0.10);
 }
+
+
+/* Global command palette: compact, keyboard-first, and theme-aware. */
+window.command-palette {
+  color: @window_fg_color;
+  background-color: @window_bg_color;
+  border-radius: 16px;
+}
+.command-palette-surface {
+  color: @window_fg_color;
+  background-color: @window_bg_color;
+  border: 1px solid alpha(@window_fg_color, 0.12);
+  border-radius: 16px;
+}
+.command-search-row {
+  padding: 12px 15px;
+  border-bottom: 1px solid alpha(@window_fg_color, 0.09);
+}
+.command-search-icon {
+  color: alpha(@window_fg_color, 0.58);
+  -gtk-icon-size: 20px;
+}
+entry.command-search {
+  color: @window_fg_color;
+  background: transparent;
+  border: none;
+  outline: none;
+  box-shadow: none;
+  min-height: 34px;
+  font-size: 1.05em;
+}
+.command-shortcut {
+  color: alpha(@window_fg_color, 0.60);
+  background: alpha(@window_fg_color, 0.06);
+  border-radius: 5px;
+  padding: 3px 7px;
+  font-size: 0.75em;
+  font-weight: 700;
+}
+list.command-results {
+  padding: 8px;
+  background: transparent;
+}
+.command-results row.command-row {
+  color: @window_fg_color;
+  background: transparent;
+  border-radius: 10px;
+}
+.command-results row.command-row:hover {
+  background: alpha(@window_fg_color, 0.055);
+}
+.command-results row.command-row:selected {
+  color: @window_fg_color;
+  background: alpha(@accent_bg_color, 0.14);
+}
+.command-row-icon {
+  min-width: 32px;
+  min-height: 32px;
+  color: alpha(@window_fg_color, 0.72);
+  background: alpha(@window_fg_color, 0.055);
+  border-radius: 8px;
+  -gtk-icon-size: 17px;
+}
+.command-row-title {
+  color: @window_fg_color;
+  font-size: 0.98em;
+  font-weight: 650;
+}
+.command-row-subtitle {
+  color: alpha(@window_fg_color, 0.64);
+  font-size: 0.84em;
+}
+.command-row-category {
+  color: alpha(@window_fg_color, 0.57);
+  font-size: 0.77em;
+  font-weight: 600;
+}
+.command-footer {
+  padding: 10px 15px;
+  border-top: 1px solid alpha(@window_fg_color, 0.09);
+  color: alpha(@window_fg_color, 0.64);
+  font-size: 0.81em;
+}
+.command-navigation {
+  color: alpha(@window_fg_color, 0.53);
+}
