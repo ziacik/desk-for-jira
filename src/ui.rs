@@ -2805,7 +2805,8 @@ fn show_command_palette(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Eve
 }
 
 fn open_issue(ui: &Ui, issue: &Issue, source_button: Option<&gtk::Button>) {
-    if let Some(form) = ui.transition_form.borrow_mut().take() {
+    let previous_form = ui.transition_form.borrow_mut().take();
+    if let Some(form) = previous_form {
         form.close();
     }
     if let Some(previous) = ui.selected_button.borrow_mut().take() {
