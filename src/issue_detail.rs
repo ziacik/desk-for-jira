@@ -748,7 +748,12 @@ fn inline_markup(node: &Value, base_url: &str) -> String {
                     if let Some(url) = mark.get("attrs").and_then(|a| a.get("href"))
                         .and_then(Value::as_str).filter(|url| safe_url(url))
                     {
-                        markup = format!("<a href=\"{}\">{markup}</a>",
+                        let content = if issue_links::key_from_url(url, base_url).is_some() {
+                            format!("<b>{markup}</b>")
+                        } else {
+                            markup
+                        };
+                        markup = format!("<a href=\"{}\">{content}</a>",
                             glib::markup_escape_text(url));
                     }
                 }
@@ -915,6 +920,25 @@ mod tests {
         assert!(markup.contains("<b>A &lt; B &amp; C</b>"));
         assert!(markup.contains("<a href=\"https://example.com/?a=1&amp;b=2\"> click</a>"));
         assert!(!markup.contains("javascript:"));
+    }
+
+    #[test]
+    fn adf_issue_references_are_readable_and_clickable() {
+        let site = "https://jira.example.com";
+        let paragraph = json!({"type":"paragraph","content":[
+            {"type":"text","text":"See ART-2272, "},
+            {"type":"text","text":"https://jira.example.com/browse/AFB-42",
+             "marks":[{"type":"link","attrs":{"href":"https://jira.example.com/browse/AFB-42"}}]},
+            {"type":"text","text":" or this task",
+             "marks":[{"type":"link","attrs":{"href":"https://jira.example.com/browse/ART-8"}}]},
+            {"type":"inlineCard","attrs":{"url":"https://jira.example.com/browse/ART-9"}}
+        ]});
+        let markup = inline_children(&paragraph, site);
+        assert!(markup.contains("<b>ART-2272</b>"));
+        assert!(markup.contains("<b>AFB-42</b>"));
+        assert!(!markup.contains(">https://jira.example.com/browse/AFB-42</a>"));
+        assert!(markup.contains("<b> or this task</b>"));
+        assert!(markup.contains("<b>ART-9</b>"));
     }
 
     #[test]
