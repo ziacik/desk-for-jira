@@ -1102,16 +1102,27 @@ fn handle_event(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>, eve
                     }
                     {
                         let mut s = state.borrow_mut();
-                        if let Some(issue) = s.issues.iter_mut().find(|issue| issue.key == key) {
-                            issue.status = to_name.clone();
-                            if !to_id.is_empty() {
-                                issue.status_id = to_id;
+                        let State { issues, pinned_issues, recent_issues, issue_cache, .. } = &mut *s;
+                        for issue in issues.iter_mut()
+                            .chain(pinned_issues.iter_mut())
+                            .chain(recent_issues.iter_mut())
+                            .chain(issue_cache.values_mut().flat_map(|items| items.iter_mut()))
+                        {
+                            if issue.key == key {
+                                issue.status = to_name.clone();
+                                if !to_id.is_empty() {
+                                    issue.status_id = to_id.clone();
+                                }
                             }
                         }
                     }
                     render_board(ui, &state.borrow());
                     if ui.selected_issue.borrow().as_deref() == Some(key.as_str()) {
-                        let issue = state.borrow().issues.iter().find(|issue| issue.key == key).cloned();
+                        let issue = {
+                            let s = state.borrow();
+                            s.issues.iter().chain(s.pinned_issues.iter()).chain(s.recent_issues.iter())
+                                .find(|issue| issue.key == key).cloned()
+                        };
                         let account = state.borrow().account.clone();
                         if let Some(issue) = issue {
                             let base_url = account.as_ref().map(|a| a.base_url.as_str()).unwrap_or("");
@@ -2781,10 +2792,11 @@ fn show_command_palette(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Eve
     let palette = command_palette::open(&ui.window, items, account, on_activate);
     let weak_slot = Rc::downgrade(&ui.palette_window);
     palette.connect_close_request(move |window| {
-        if let Some(slot) = weak_slot.upgrade()
-            && slot.borrow().as_ref().is_some_and(|current| current == window)
-        {
-            slot.borrow_mut().take();
+        if let Some(slot) = weak_slot.upgrade() {
+            let current = slot.borrow().as_ref().is_some_and(|existing| existing == window);
+            if current {
+                slot.borrow_mut().take();
+            }
         }
         glib::Propagation::Proceed
     });
