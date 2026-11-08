@@ -236,7 +236,8 @@ pub fn render(
     eyebrow.append(&type_mark);
     let key = gtk::Label::new(Some(&issue.key));
     key.add_css_class("detail-key");
-    key.set_selectable(true);
+    // Static key badges should not become the selection target when link navigation
+    // replaces the currently focused detail content.
     eyebrow.append(&key);
     let kind_label = if issue.kind.is_empty() { "Ticket" } else { &issue.kind };
     let kind_badge = gtk::Label::new(Some(kind_label));
