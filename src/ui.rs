@@ -59,6 +59,8 @@ struct Ui {
     state: Rc<RefCell<State>>,
     saved_detail_width: Rc<Cell<i32>>,
     restoring_detail_width: Rc<Cell<bool>>,
+    layout: Rc<RefCell<UiLayout>>,
+    layout_save_timer: Rc<RefCell<Option<glib::SourceId>>>,
     inner_split: gtk::Paned,
     image_slots: Rc<RefCell<issue_detail::ImageSlots>>,
     events: Sender<Event>,
@@ -582,33 +584,6 @@ fn build_ui(app: &adw::Application) {
     inner_split.set_shrink_end_child(true);
     inner_split.set_hexpand(true);
     workspace_split.set_end_child(Some(&inner_split));
-    inner_split.connect_position_notify({
-        let detail_panel = detail_panel.downgrade();
-        let saved_detail_width = saved_detail_width.clone();
-        let restoring_detail_width = restoring_detail_width.clone();
-        let layout = layout.clone();
-        let layout_save_timer = layout_save_timer.clone();
-        move |paned| {
-            // Showing a hidden pane can reposition the splitter before GTK allocates it.
-            // Only a real visible resize should replace the remembered width.
-            if restoring_detail_width.get()
-                || detail_panel.upgrade().is_none_or(|panel| !panel.is_visible())
-                || paned.width() < 650
-            {
-                return;
-            }
-            let width = paned.width() - paned.position();
-            if !(320..=1000).contains(&width) || width >= paned.width() - 300 {
-                return;
-            }
-            saved_detail_width.set(width);
-            let changed = layout.borrow().detail_width != width;
-            if changed {
-                layout.borrow_mut().detail_width = width;
-                queue_layout_save(&layout, &layout_save_timer);
-            }
-        }
-    });
     let toast = adw::ToastOverlay::new();
     toast.set_child(Some(&workspace_split));
     window.set_content(Some(&toast));
@@ -627,6 +602,7 @@ fn build_ui(app: &adw::Application) {
         transition_busy: Rc::new(Cell::new(false)),
         transition_form: Rc::new(RefCell::new(None)),
         saved_detail_width, restoring_detail_width,
+        layout: layout.clone(), layout_save_timer: layout_save_timer.clone(),
         mine_filter, unassigned_filter, all_filter, sprint_filter,
         restoring_view: Rc::new(Cell::new(false)),
         image_slots: Rc::new(RefCell::new(issue_detail::ImageSlots::new())),
@@ -636,6 +612,7 @@ fn build_ui(app: &adw::Application) {
         selected_button: Rc::new(RefCell::new(None)),
         collapsed_columns: Rc::new(RefCell::new(HashSet::new())),
     };
+    watch_detail_resize(&ui);
     {
         // The action always opens the currently selected issue, not the
         // issue whose details happened to be rendered when it was created.
@@ -732,8 +709,10 @@ fn build_ui(app: &adw::Application) {
         let layout_save_timer = layout_save_timer.clone();
         let sidebar = sidebar.downgrade();
         let workspace_split = workspace_split.downgrade();
+        let close_ui = ui.clone();
         let saved_detail_width = ui.saved_detail_width.clone();
         move |window| {
+            remember_visible_detail_width(&close_ui);
             let mut settings = layout.borrow_mut();
             if window.width() >= 960 && window.height() >= 580 {
                 settings.window_width = window.width();
@@ -2374,6 +2353,7 @@ fn dismiss_issue_details(ui: &Ui) {
 }
 
 fn close_issue_details(ui: &Ui) {
+    remember_visible_detail_width(ui);
     let previous_form = ui.transition_form.borrow_mut().take();
     if let Some(form) = previous_form {
         form.close();
