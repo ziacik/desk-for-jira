@@ -998,7 +998,7 @@ fn handle_event(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>, eve
                     let state_for_submit = state.clone();
                     let sender_for_submit = sender.clone();
                     let selected_key = key.clone();
-                    let submit: transition_ui::TransitionSubmit = Rc::new(move |transition, fields| {
+                    let submit: transition_ui::TransitionSubmit = Rc::new(move |transition, fields, issue_edits| {
                         if transition_busy.get()
                             || selected_issue.borrow().as_deref() != Some(selected_key.as_str())
                         {
@@ -1014,7 +1014,21 @@ fn handle_event(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>, eve
                         let sender = sender_for_submit.clone();
                         thread::spawn(move || {
                             let result = (|| -> anyhow::Result<()> {
-                                JiraClient::new(account)?.transition_issue(&key, &transition.id, fields)
+                                let client = JiraClient::new(account)?;
+                                let has_edits = !issue_edits.is_empty();
+                                if has_edits {
+                                    client.edit_issue_fields(&key, issue_edits)?;
+                                }
+                                client.transition_issue(&key, &transition.id, fields)
+                                    .map_err(|error| {
+                                        if has_edits {
+                                            anyhow::anyhow!(
+                                                "Issue fields were saved, but the status change failed: {error}"
+                                            )
+                                        } else {
+                                            error
+                                        }
+                                    })
                             })().map_err(|err| err.to_string());
                             let _ = sender.send(Event::TransitionFinished(
                                 id, key, transition.to_id, transition.to_name, result
