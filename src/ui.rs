@@ -2891,11 +2891,95 @@ fn show_command_palette(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Eve
     *ui.palette_window.borrow_mut() = Some(palette);
 }
 
-fn restore_detail_width(paned: &gtk::Paned, preferred_width: i32) {
+/// The pointer must start on the splitter, not on any widget inside the panel.
+fn pointer_on_detail_splitter(x: f64, position: i32) -> bool {
+    (x - f64::from(position)).abs() <= 16.0
+}
+
+/// Only save the width of a fully allocated, visible inspector. GtkPaned
+/// changes its position automatically when the window or its children resize;
+/// those notifications are not user-initiated splitter movements.
+fn remember_visible_detail_width(ui: &Ui) {
+    if !ui.detail_panel.is_visible() || ui.restoring_detail_width.get() {
+        return;
+    }
+    let width = ui.detail_panel.width();
+    let available = ui.inner_split.width();
+    if available < 640 || !(320..=2048).contains(&width) || width > available {
+        return;
+    }
+    ui.saved_detail_width.set(width);
+    if ui.layout.borrow().detail_width != width {
+        ui.layout.borrow_mut().detail_width = width;
+        queue_layout_save(&ui.layout, &ui.layout_save_timer);
+    }
+}
+
+/// GtkPaned has no user-resize signal: notify::position also fires during
+/// automatic allocation. Observe raw pointer events without claiming GTK's
+/// own drag gesture, and save the final allocated child width on release.
+fn watch_detail_resize(ui: &Ui) {
+    let drag_started_on_handle = Rc::new(Cell::new(false));
+    let observer = gtk::EventControllerLegacy::new();
+    observer.set_propagation_phase(gtk::PropagationPhase::Capture);
+    let ui_events = ui.clone();
+    observer.connect_event(move |_, event| {
+        match event.event_type() {
+            gtk::gdk::EventType::ButtonPress | gtk::gdk::EventType::TouchBegin => {
+                let on_handle = event.position().and_then(|(x, y)| {
+                    ui_events.window.compute_point(
+                        &ui_events.inner_split,
+                        &gtk::graphene::Point::new(x as f32, y as f32),
+                    )
+                }).is_some_and(|point| {
+                    ui_events.detail_panel.is_visible()
+                        && pointer_on_detail_splitter(
+                            f64::from(point.x()), ui_events.inner_split.position(),
+                        )
+                });
+                drag_started_on_handle.set(on_handle);
+            }
+            gtk::gdk::EventType::ButtonRelease | gtk::gdk::EventType::TouchEnd => {
+                if drag_started_on_handle.replace(false) {
+                    let ui = ui_events.clone();
+                    // Allow GTK's own drag callback and the layout allocation to finish.
+                    glib::idle_add_local_once(move || remember_visible_detail_width(&ui));
+                }
+            }
+            gtk::gdk::EventType::TouchCancel => drag_started_on_handle.set(false),
+            _ => {}
+        }
+        glib::Propagation::Proceed
+    });
+    ui.inner_split.add_controller(observer);
+
+    // GtkPaned also supports resizing its handle with the keyboard.
+    let keys = gtk::EventControllerKey::new();
+    keys.set_propagation_phase(gtk::PropagationPhase::Capture);
+    let ui_keys = ui.clone();
+    keys.connect_key_released(move |_, key, _, _| {
+        if ui_keys.inner_split.has_focus()
+            && matches!(
+                key,
+                gtk::gdk::Key::Left | gtk::gdk::Key::Right |
+                gtk::gdk::Key::KP_Left | gtk::gdk::Key::KP_Right |
+                gtk::gdk::Key::Home | gtk::gdk::Key::End
+            )
+        {
+            let ui = ui_keys.clone();
+            glib::idle_add_local_once(move || remember_visible_detail_width(&ui));
+        }
+    });
+    ui.inner_split.add_controller(keys);
+}
+
+fn restore_detail_width(paned: &gtk::Paned, panel: &gtk::Box, preferred_width: i32) {
     let available = paned.width();
     if available >= 640 {
-        let width = preferred_width.min(available - 300).max(320);
-        paned.set_position(available - width);
+        // Account for the separator: end-child width is NOT width - position.
+        let separator = (available - paned.position() - panel.width()).clamp(0, 24);
+        let width = preferred_width.min(available - separator - 300).max(320);
+        paned.set_position(available - separator - width);
     }
 }
 
@@ -2935,13 +3019,22 @@ fn open_issue(ui: &Ui, issue: &Issue, source_button: Option<&gtk::Button>) {
         // position notifications must not overwrite the saved user preference.
         ui.restoring_detail_width.set(true);
         ui.detail_panel.set_visible(true);
-        restore_detail_width(&ui.inner_split, ui.saved_detail_width.get());
+        restore_detail_width(&ui.inner_split, &ui.detail_panel, ui.saved_detail_width.get());
         let width = ui.saved_detail_width.clone();
+        let panel = ui.detail_panel.downgrade();
         let restoring = ui.restoring_detail_width.clone();
+        let frames = Rc::new(Cell::new(0_u8));
         ui.inner_split.add_tick_callback(move |paned, _| {
-            restore_detail_width(paned, width.get());
-            restoring.set(false);
-            glib::ControlFlow::Break
+            if let Some(panel) = panel.upgrade() {
+                restore_detail_width(paned, &panel, width.get());
+            }
+            frames.set(frames.get() + 1);
+            if frames.get() < 2 {
+                glib::ControlFlow::Continue
+            } else {
+                restoring.set(false);
+                glib::ControlFlow::Break
+            }
         });
     }
     request_transitions(&ui.detail_actions, &ui.detail_request, &ui.events,
