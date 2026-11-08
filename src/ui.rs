@@ -58,10 +58,12 @@ struct Ui {
     pin_detail: gtk::Button,
     state: Rc<RefCell<State>>,
     saved_detail_width: Rc<Cell<i32>>,
+    restoring_detail_width: Rc<Cell<bool>>,
     inner_split: gtk::Paned,
     image_slots: Rc<RefCell<issue_detail::ImageSlots>>,
     events: Sender<Event>,
     selected_issue: Rc<RefCell<Option<String>>>,
+    remembered_issue: Rc<RefCell<Option<String>>>,
     selected_button: Rc<RefCell<Option<gtk::Button>>>,
     collapsed_columns: Rc<RefCell<HashSet<String>>>,
     mine_filter: gtk::ToggleButton,
@@ -566,6 +568,8 @@ fn build_ui(app: &adw::Application) {
     let center_toolbar = adw::ToolbarView::new();
     center_toolbar.add_top_bar(&header);
     center_toolbar.set_content(Some(&center));
+    let saved_detail_width = Rc::new(Cell::new(initial_layout.detail_width));
+    let restoring_detail_width = Rc::new(Cell::new(false));
     let inner_split = gtk::Paned::new(gtk::Orientation::Horizontal);
     inner_split.set_start_child(Some(&center_toolbar));
     inner_split.set_end_child(Some(&detail_panel));
@@ -579,10 +583,15 @@ fn build_ui(app: &adw::Application) {
     workspace_split.set_end_child(Some(&inner_split));
     inner_split.connect_position_notify({
         let detail_panel = detail_panel.downgrade();
+        let saved_detail_width = saved_detail_width.clone();
+        let restoring_detail_width = restoring_detail_width.clone();
         let layout = layout.clone();
         let layout_save_timer = layout_save_timer.clone();
         move |paned| {
-            if detail_panel.upgrade().is_none_or(|panel| !panel.is_visible())
+            // Showing a hidden pane can reposition the splitter before GTK allocates it.
+            // Only a real visible resize should replace the remembered width.
+            if restoring_detail_width.get()
+                || detail_panel.upgrade().is_none_or(|panel| !panel.is_visible())
                 || paned.width() < 650
             {
                 return;
@@ -591,6 +600,7 @@ fn build_ui(app: &adw::Application) {
             if !(320..=1000).contains(&width) || width >= paned.width() - 300 {
                 return;
             }
+            saved_detail_width.set(width);
             let changed = layout.borrow().detail_width != width;
             if changed {
                 layout.borrow_mut().detail_width = width;
@@ -615,12 +625,13 @@ fn build_ui(app: &adw::Application) {
         detail_request: Rc::new(Cell::new(0)),
         transition_busy: Rc::new(Cell::new(false)),
         transition_form: Rc::new(RefCell::new(None)),
-        saved_detail_width: Rc::new(Cell::new(initial_layout.detail_width)),
+        saved_detail_width, restoring_detail_width,
         mine_filter, unassigned_filter, all_filter, sprint_filter,
         restoring_view: Rc::new(Cell::new(false)),
         image_slots: Rc::new(RefCell::new(issue_detail::ImageSlots::new())),
         events: sender.clone(),
         selected_issue: Rc::new(RefCell::new(None)),
+        remembered_issue: Rc::new(RefCell::new(None)),
         selected_button: Rc::new(RefCell::new(None)),
         collapsed_columns: Rc::new(RefCell::new(HashSet::new())),
     };
@@ -681,23 +692,13 @@ fn build_ui(app: &adw::Application) {
         });
     }
     {
-        let panel = ui.detail_panel.downgrade();
-        let saved_width = ui.saved_detail_width.clone();
-        let selected_issue = ui.selected_issue.clone();
-        let selected_button = ui.selected_button.clone();
-        close_detail.connect_clicked(move |_| {
-            if let Some(panel) = panel.upgrade() {
-                close_issue_pane(&panel, &saved_width, &selected_issue, &selected_button);
-            }
-        });
+        let ui = ui.clone();
+        close_detail.connect_clicked(move |_| dismiss_issue_details(&ui));
     }
     {
-        let panel = ui.detail_panel.downgrade();
         let search = ui.search.downgrade();
-        let saved_width = ui.saved_detail_width.clone();
-        let selected_issue = ui.selected_issue.clone();
-        let selected_button = ui.selected_button.clone();
         let command_ui = ui.clone();
+        let close_ui = ui.clone();
         let command_state = state.clone();
         let command_sender = sender.clone();
         let keys = gtk::EventControllerKey::new();
@@ -709,10 +710,9 @@ fn build_ui(app: &adw::Application) {
                 show_command_palette(&command_ui, &command_state, &command_sender);
                 return glib::Propagation::Stop;
             }
-            let (Some(panel), Some(search)) = (panel.upgrade(), search.upgrade())
-                else { return glib::Propagation::Proceed };
-            if key == gtk::gdk::Key::Escape && panel.is_visible() && !search.has_focus() {
-                close_issue_pane(&panel, &saved_width, &selected_issue, &selected_button);
+            let Some(search) = search.upgrade() else { return glib::Propagation::Proceed };
+            if key == gtk::gdk::Key::Escape && close_ui.detail_panel.is_visible() && !search.has_focus() {
+                dismiss_issue_details(&close_ui);
                 return glib::Propagation::Stop;
             }
             if key == gtk::gdk::Key::slash
@@ -731,7 +731,6 @@ fn build_ui(app: &adw::Application) {
         let layout_save_timer = layout_save_timer.clone();
         let sidebar = sidebar.downgrade();
         let workspace_split = workspace_split.downgrade();
-        let detail_panel = ui.detail_panel.downgrade();
         let saved_detail_width = ui.saved_detail_width.clone();
         move |window| {
             let mut settings = layout.borrow_mut();
@@ -744,13 +743,8 @@ fn build_ui(app: &adw::Application) {
             {
                 settings.sidebar_width = paned.position();
             }
-            if let Some(detail_panel) = detail_panel.upgrade()
-                && detail_panel.is_visible() && detail_panel.width() >= 320
-            {
-                settings.detail_width = detail_panel.width();
-            } else {
-                settings.detail_width = saved_detail_width.get();
-            }
+            // The hidden pane's allocated width is not the user's last chosen width.
+            settings.detail_width = saved_detail_width.get();
             if let Some(source) = layout_save_timer.borrow_mut().take() {
                 source.remove();
             }
@@ -2340,29 +2334,25 @@ fn visible_board_groups<'a>(
 }
 
 
+fn dismiss_issue_details(ui: &Ui) {
+    close_issue_details(ui);
+    *ui.remembered_issue.borrow_mut() = None;
+    save_view(ui, &ui.state.borrow());
+}
+
 fn close_issue_details(ui: &Ui) {
     let previous_form = ui.transition_form.borrow_mut().take();
     if let Some(form) = previous_form {
         form.close();
     }
-    close_issue_pane(
-        &ui.detail_panel,
-        &ui.saved_detail_width,
-        &ui.selected_issue,
-        &ui.selected_button,
-    );
+    close_issue_pane(&ui.detail_panel, &ui.selected_issue, &ui.selected_button);
 }
 
 fn close_issue_pane(
     panel: &gtk::Box,
-    saved_width: &Cell<i32>,
     selected_issue: &Rc<RefCell<Option<String>>>,
     selected_button: &Rc<RefCell<Option<gtk::Button>>>,
 ) {
-    // GTK resets hidden Paned children; preserve the actual user-resized width first.
-    if panel.is_visible() && panel.width() >= 320 {
-        saved_width.set(panel.width());
-    }
     panel.set_visible(false);
     *selected_issue.borrow_mut() = None;
     if let Some(button) = selected_button.borrow_mut().take() {
@@ -2892,6 +2882,14 @@ fn show_command_palette(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Eve
     *ui.palette_window.borrow_mut() = Some(palette);
 }
 
+fn restore_detail_width(paned: &gtk::Paned, preferred_width: i32) {
+    let available = paned.width();
+    if available >= 640 {
+        let width = preferred_width.min(available - 300).max(320);
+        paned.set_position(available - width);
+    }
+}
+
 fn open_issue(ui: &Ui, issue: &Issue, source_button: Option<&gtk::Button>) {
     let previous_form = ui.transition_form.borrow_mut().take();
     if let Some(form) = previous_form {
@@ -2922,12 +2920,18 @@ fn open_issue(ui: &Ui, issue: &Issue, source_button: Option<&gtk::Button>) {
         ui.state.borrow().settings.pinned_issues.iter().any(|key| key == &issue.key));
     *ui.image_slots.borrow_mut() = issue_detail::render(&ui.detail_box, issue, base_url);
     if !ui.detail_panel.is_visible() {
+        // Restore after GTK has allocated the newly visible pane. Until then,
+        // position notifications must not overwrite the saved user preference.
+        ui.restoring_detail_width.set(true);
         ui.detail_panel.set_visible(true);
-        let available = ui.inner_split.width();
-        if available >= 640 {
-            let width = ui.saved_detail_width.get().min(available - 300).max(320);
-            ui.inner_split.set_position(available - width);
-        }
+        restore_detail_width(&ui.inner_split, ui.saved_detail_width.get());
+        let width = ui.saved_detail_width.clone();
+        let restoring = ui.restoring_detail_width.clone();
+        ui.inner_split.add_tick_callback(move |paned, _| {
+            restore_detail_width(paned, width.get());
+            restoring.set(false);
+            glib::ControlFlow::Break
+        });
     }
     request_transitions(&ui.detail_actions, &ui.detail_request, &ui.events,
         account.clone(), generation, &issue.key);
