@@ -118,7 +118,7 @@ pub fn render(
     let mut slots = ImageSlots::new();
     let mut used_images = HashSet::new();
 
-    let header = gtk::Box::new(gtk::Orientation::Vertical, 12);
+    let header = gtk::Box::new(gtk::Orientation::Vertical, 10);
     header.add_css_class("detail-hero");
 
     let eyebrow = gtk::Box::new(gtk::Orientation::Horizontal, 9);
@@ -190,19 +190,29 @@ pub fn render(
     header.append(actions);
     container.append(&header);
 
-    let metadata = gtk::Grid::new();
+    // Let properties occupy the available width rather than leaving two huge,
+    // half-empty columns in wide inspectors. FlowBox automatically wraps at
+    // narrower panel widths without hiding any Jira fields.
+    let metadata = gtk::FlowBox::new();
     metadata.add_css_class("detail-metadata");
-    metadata.set_row_spacing(17);
-    metadata.set_column_spacing(24);
+    metadata.set_selection_mode(gtk::SelectionMode::None);
+    metadata.set_homogeneous(true);
+    metadata.set_halign(gtk::Align::Fill);
+    metadata.set_hexpand(true);
+    metadata.set_min_children_per_line(1);
+    metadata.set_max_children_per_line(4);
+    metadata.set_row_spacing(15);
+    metadata.set_column_spacing(16);
     let fix_versions = issue.fix_versions.join(", ");
     let affects_versions = issue.affects_versions.join(", ");
-    for (index, (title, value)) in [
+    for (title, value) in [
         ("Assignee", issue.assignee.as_str()),
         ("Updated", issue.updated.as_str()),
         ("Fix Version/s", fix_versions.as_str()),
         ("Affects Version/s", affects_versions.as_str()),
     ].into_iter().enumerate() {
         let cell = gtk::Box::new(gtk::Orientation::Vertical, 5);
+        cell.set_size_request(148, -1);
         cell.set_hexpand(true);
         let caption = gtk::Label::new(Some(title));
         caption.add_css_class("detail-field-label");
@@ -214,7 +224,7 @@ pub fn render(
         value.set_xalign(0.0);
         value.set_selectable(true);
         cell.append(&value);
-        metadata.attach(&cell, (index % 2) as i32, (index / 2) as i32, 1, 1);
+        metadata.insert(&cell, -1);
     }
     container.append(&metadata);
 
