@@ -119,7 +119,7 @@ pub fn render_actions(
         let submit = submit.clone();
         let on_open = on_open.clone();
         button.connect_clicked(move |_| {
-            if transition.fields.iter().any(|field| field.required) {
+            if transition_needs_form(&transition) {
                 if let Some(parent) = parent.upgrade() {
                     open_transition_form(
                         &parent, &key, cloud, transition.clone(), submit.clone(), on_open.clone(),
@@ -134,6 +134,10 @@ pub fn render_actions(
         actions.insert(&button, -1);
     }
     container.append(&actions);
+}
+
+fn transition_needs_form(transition: &IssueTransition) -> bool {
+    transition.fields.iter().any(|field| field.required)
 }
 
 pub fn open_transition_form(
@@ -461,6 +465,25 @@ fn text_value_or_none(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn opens_dialog_only_when_transition_metadata_requires_input() {
+        let required = TransitionField {
+            id: "resolution".into(), name: "Resolution".into(),
+            schema_type: "resolution".into(), item_type: String::new(),
+            custom_type: String::new(), required: true, choices: Vec::new(),
+        };
+        let transition = IssueTransition {
+            id: "31".into(), name: "Done".into(), to_name: "Done".into(),
+            to_id: "3".into(), fields: vec![], edit_fields: vec![],
+        };
+        assert!(!transition_needs_form(&transition));
+        let optional = TransitionField { required: false, ..required.clone() };
+        let with_optional = IssueTransition { fields: vec![optional], ..transition.clone() };
+        assert!(!transition_needs_form(&with_optional));
+        let with_required = IssueTransition { fields: vec![required], ..transition };
+        assert!(transition_needs_form(&with_required));
+    }
 
     #[test]
     fn recognizes_validator_fields_by_id_and_name() {
