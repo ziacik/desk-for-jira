@@ -210,7 +210,7 @@ pub fn render(
         ("Updated", issue.updated.as_str()),
         ("Fix Version/s", fix_versions.as_str()),
         ("Affects Version/s", affects_versions.as_str()),
-    ].into_iter().enumerate() {
+    ] {
         let cell = gtk::Box::new(gtk::Orientation::Vertical, 5);
         cell.set_size_request(148, -1);
         cell.set_hexpand(true);
