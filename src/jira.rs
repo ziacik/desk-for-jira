@@ -62,6 +62,12 @@ pub struct Epic {
     pub summary: String,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IssueParent {
+    pub key: String,
+    pub summary: String,
+}
+
 #[derive(Clone, Debug)]
 pub struct Issue {
     pub key: String,
@@ -80,6 +86,7 @@ pub struct Issue {
     pub attachments: Vec<Attachment>,
     pub is_epic: bool,
     pub epic: Option<Epic>,
+    pub parent: Option<IssueParent>,
 }
 
 #[derive(Clone, Debug)]
@@ -483,6 +490,12 @@ impl JiraClient {
         parse_issue(&data, None).context("Jira returned an invalid issue response")
     }
 
+    /// Direct children are requested independently of board filters and assignee.
+    /// Jira's parent JQL works for subtasks and modern issue hierarchies.
+    pub fn child_issues(&self, parent_key: &str) -> Result<Vec<Issue>> {
+        self.search_issues(&child_issues_jql(parent_key)?)
+    }
+
     fn search_issues_with_epic_link(&self, jql: &str, epic_link_field: Option<&str>) -> Result<Vec<Issue>> {
         let mut fields = FIELDS.to_vec();
         if let Some(field) = epic_link_field {
@@ -776,6 +789,16 @@ impl JiraClient {
 
 }
 
+fn child_issues_jql(key: &str) -> Result<String> {
+    let (project, number) = key.split_once('-').context("Invalid parent issue key")?;
+    validate_project_key(project)?;
+    ensure!(
+        !number.is_empty() && number.bytes().all(|byte| byte.is_ascii_digit()),
+        "Invalid parent issue key"
+    );
+    Ok(format!("parent = {key} ORDER BY updated DESC"))
+}
+
 fn pinned_issues_jql(keys: &[String]) -> Result<String> {
     for key in keys {
         let (project, number) = key.rsplit_once('-')
@@ -947,6 +970,11 @@ fn parse_issue(v: &Value, epic_link_field: Option<&str>) -> Option<Issue> {
     let is_epic = kind.eq_ignore_ascii_case("epic")
         || f.get("issuetype").and_then(|kind| kind.get("hierarchyLevel"))
             .and_then(Value::as_i64) == Some(1);
+    let parent = f.get("parent").and_then(|parent| Some(IssueParent {
+        key: parent.get("key")?.as_str()?.to_owned(),
+        summary: parent.get("fields").and_then(|fields| fields.get("summary"))
+            .and_then(Value::as_str).unwrap_or("").to_owned(),
+    }));
     let epic = f.get("parent")
         .filter(|parent| {
             let kind = parent.get("fields").and_then(|fields| fields.get("issuetype"));
@@ -996,6 +1024,7 @@ fn parse_issue(v: &Value, epic_link_field: Option<&str>) -> Option<Issue> {
             })).collect(),
         is_epic,
         epic,
+        parent,
     })
 }
 
@@ -1329,6 +1358,20 @@ mod tests {
             key: "ART-1".into(), summary: "An Epic".into()
         }));
         assert!(issues[2].epic.is_none());
+        assert_eq!(issues[1].parent, Some(IssueParent {
+            key: "ART-1".into(), summary: "An Epic".into()
+        }));
+        assert_eq!(issues[2].parent, Some(IssueParent {
+            key: "ART-2".into(), summary: "Story".into()
+        }));
+    }
+
+    #[test]
+    fn child_query_is_scoped_only_by_the_parent_issue() {
+        assert_eq!(child_issues_jql("ART-2272").unwrap(),
+            "parent = ART-2272 ORDER BY updated DESC");
+        assert!(child_issues_jql("ART-1 OR assignee = currentUser()").is_err());
+        assert!(child_issues_jql("ART-ab").is_err());
     }
 
     #[test]
