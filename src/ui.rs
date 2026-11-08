@@ -3223,6 +3223,69 @@ fn show_error(ui: &Ui, error: &str) {
 }
 
 #[cfg(test)]
+mod detail_layout_tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    // Exercise GTK's real size allocation, including the hidden pane and
+    // separator. Pure math tests cannot catch GTK's position adjustments.
+    #[test]
+    fn inspector_width_survives_hiding_and_reopening() {
+        gtk::init().expect("A display is required for this GUI test");
+        let window = gtk::Window::new();
+        window.set_default_size(1440, 750);
+        let split = gtk::Paned::new(gtk::Orientation::Horizontal);
+        split.set_resize_start_child(true);
+        split.set_resize_end_child(false);
+        split.set_shrink_start_child(true);
+        split.set_shrink_end_child(true);
+        let board = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        board.set_width_request(300);
+        let detail = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        detail.set_width_request(390);
+        detail.set_visible(false);
+        split.set_start_child(Some(&board));
+        split.set_end_child(Some(&detail));
+        window.set_child(Some(&split));
+        window.present();
+
+        let context = glib::MainContext::default();
+        let mut advance = || {
+            while context.pending() {
+                context.iteration(false);
+            }
+            std::thread::sleep(Duration::from_millis(16));
+        };
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while split.width() < 1200 && Instant::now() < deadline {
+            advance();
+        }
+        assert!(split.width() >= 1200, "GTK did not allocate the test window");
+
+        for _ in 0..2 {
+            detail.set_visible(true);
+            let deadline = Instant::now() + Duration::from_secs(3);
+            while Instant::now() < deadline {
+                restore_detail_width(&split, &detail, 620);
+                advance();
+                if (detail.width() - 620).abs() <= 2 {
+                    break;
+                }
+            }
+            assert!(
+                (detail.width() - 620).abs() <= 2,
+                "GTK inspector should be 620 px, got {}",
+                detail.width()
+            );
+            detail.set_visible(false);
+            advance();
+            advance();
+        }
+        window.close();
+    }
+}
+
+#[cfg(test)]
 mod workflow_error_tests {
     use super::*;
 
