@@ -15,6 +15,7 @@ use crate::jira::{Credentials, Issue, IssueTransition, JiraClient};
 #[derive(Clone)]
 pub(crate) enum PaletteCommand {
     OpenIssue(Issue),
+    OpenIssueByKey(String),
     Transition { issue_key: String, transition: IssueTransition },
     FilterProject(Option<String>),
     ChooseProjects,
@@ -124,11 +125,37 @@ fn make_search_jql(raw: &str) -> Option<String> {
     Some(format!("{} ORDER BY updated DESC", clauses.join(" AND ")))
 }
 
+/// Offer a direct lookup when a number did not match a loaded or searched issue.
+/// These are candidate keys, not Jira results: existence is checked on activation.
+fn issue_number_candidates(query: &str, projects: &[String]) -> Vec<PaletteItem> {
+    let number = query.trim();
+    if number.is_empty() || !number.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Vec::new();
+    }
+    let mut seen = HashSet::new();
+    projects.iter().filter_map(|project| {
+        let project = project.trim().to_ascii_uppercase();
+        if project.is_empty()
+            || !project.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+            || !seen.insert(project.clone())
+        {
+            return None;
+        }
+        let key = format!("{project}-{number}");
+        Some(PaletteItem::new(
+            &key, "Open directly from Jira · not yet verified",
+            "Open ticket", "document-open-symbolic", false,
+            PaletteCommand::OpenIssueByKey(key),
+        ))
+    }).collect()
+}
+
 fn render_results(
     list: &gtk::ListBox,
     hint: &gtk::Label,
     all_items: &[PaletteItem],
     remote_issues: &[Issue],
+    project_keys: &[String],
     query: &str,
     status: &PaletteStatus,
     shown_items: &RefCell<Vec<PaletteItem>>,
@@ -164,6 +191,12 @@ fn render_results(
                 PaletteCommand::OpenIssue(issue.clone()),
             ));
         }
+    }
+    let mut suggested_direct_open = false;
+    if matched.is_empty() && !status.search_loading {
+        let candidates = issue_number_candidates(query, project_keys);
+        suggested_direct_open = !candidates.is_empty();
+        matched.extend(candidates);
     }
     matched.truncate(35);
     for item in &matched {
@@ -210,7 +243,9 @@ fn render_results(
     if let Some(row) = list.row_at_index(selected_index as i32) {
         list.select_row(Some(&row));
     }
-    let message = if let Some(error) = status.search_error.as_deref() {
+    let message = if suggested_direct_open {
+        "Possible ticket keys · verified in Jira when opened".to_owned()
+    } else if let Some(error) = status.search_error.as_deref() {
         format!("Jira search failed: {error}")
     } else if status.search_loading {
         "Searching Jira…".to_owned()
@@ -232,6 +267,7 @@ pub(crate) fn open(
     parent: &adw::ApplicationWindow,
     all_items: Vec<PaletteItem>,
     account: Option<Credentials>,
+    project_keys: Vec<String>,
     selected_key: Option<String>,
     on_activate: Rc<dyn Fn(PaletteCommand)>,
 ) -> gtk::Window {
@@ -303,6 +339,7 @@ pub(crate) fn open(
         });
     }
     let all_items = Rc::new(RefCell::new(all_items));
+    let project_keys = Rc::new(project_keys);
 
     let update: Rc<dyn Fn()> = Rc::new({
         let all_items = all_items.clone();
@@ -311,12 +348,13 @@ pub(crate) fn open(
         let entry = entry.downgrade();
         let shown_items = shown_items.clone();
         let remote_issues = remote_issues.clone();
+        let project_keys = project_keys.clone();
         let status = status.clone();
         move || {
             let Some(entry) = entry.upgrade() else { return; };
             render_results(
                 &list, &hint, &all_items.borrow(), &remote_issues.borrow(),
-                entry.text().as_str(), &status.borrow(), &shown_items,
+                &project_keys, entry.text().as_str(), &status.borrow(), &shown_items,
             );
         }
     });
@@ -471,12 +509,28 @@ pub(crate) fn open(
 
 #[cfg(test)]
 mod tests {
-    use super::{PaletteCommand, make_search_jql, transition_items};
+    use super::{PaletteCommand, issue_number_candidates, make_search_jql, transition_items};
     use crate::jira::{IssueTransition, TransitionField};
 
     #[test]
     fn searches_exact_jira_keys() {
         assert_eq!(make_search_jql("art-123"), Some("key = ART-123 ORDER BY updated DESC".to_owned()));
+    }
+
+    #[test]
+    fn numeric_queries_offer_direct_lookup_in_selected_projects() {
+        let projects = vec!["art".to_owned(), "AFB".to_owned(), "ART".to_owned()];
+        let items = issue_number_candidates(" 2272 ", &projects);
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].title, "ART-2272");
+        assert_eq!(items[1].title, "AFB-2272");
+        assert!(matches!(
+            &items[0].command,
+            PaletteCommand::OpenIssueByKey(key) if key == "ART-2272"
+        ));
+        assert!(issue_number_candidates("ART-2272", &projects).is_empty());
+        assert!(issue_number_candidates("22 72", &projects).is_empty());
+        assert!(issue_number_candidates("", &projects).is_empty());
     }
 
     #[test]
