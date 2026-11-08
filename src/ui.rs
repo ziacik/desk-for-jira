@@ -13,7 +13,7 @@ use gtk::glib;
 use crate::{
     issue_detail,
     command_palette::{self, PaletteCommand, PaletteItem},
-    jira::{AuthMode, Credentials, Issue, IssueTransition, JiraClient, Project, ProjectStatus},
+    jira::{AuthMode, Credentials, Issue, IssueTransition, JiraClient, JiraTransitionError, Project, ProjectStatus},
     transition_ui,
     preferences::{self, BoardSettings, IssueScope, UiLayout, ViewSettings},
     secrets,
@@ -152,6 +152,8 @@ impl State {
 struct TransitionFailure {
     message: String,
     worklog_recorded: bool,
+    validation_failed: bool,
+    field_keys: Vec<String>,
 }
 
 enum Event {
@@ -977,9 +979,12 @@ fn transition_submit(
                     (false, true) => "Work was logged, but the status did not change. ",
                     (false, false) => "",
                 };
+                let jira = error.downcast_ref::<JiraTransitionError>();
                 TransitionFailure {
                     message: format!("{note}{error}"),
                     worklog_recorded,
+                    validation_failed: jira.is_some_and(JiraTransitionError::is_validation_failure),
+                    field_keys: jira.map(|failure| failure.field_keys.clone()).unwrap_or_default(),
                 }
             });
             let _ = sender.send(Event::TransitionFinished(id, key, transition, result));
@@ -1010,14 +1015,11 @@ fn transition_form_opened(ui: &Ui) -> transition_ui::FormOpened {
     })
 }
 
-fn transition_error_needs_input(error: &str) -> bool {
-    let lower = error.to_ascii_lowercase();
-    lower.contains("jira http 400:")
-        || lower.contains("jira http 422:")
-        || lower.contains(" is required")
-        || lower.contains("required field")
-        || lower.contains("cannot be empty")
-        || lower.contains("must be specified")
+fn transition_error_needs_input(error: &TransitionFailure, transition: &IssueTransition) -> bool {
+    // HTTP status and available Jira field metadata are structured data.
+    // Never infer API semantics by parsing a localized error sentence.
+    error.validation_failed
+        && (!transition.fields.is_empty() || !transition.edit_fields.is_empty())
 }
 
 fn handle_event(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>, event: Event) {
@@ -1193,9 +1195,9 @@ fn handle_event(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>, eve
                         .is_some_and(|form| form.key == key);
                     if has_form {
                         if let Some(form) = ui.transition_form.borrow().as_ref() {
-                            form.show_error(&error.message, error.worklog_recorded);
+                            form.show_error(&error.message, error.worklog_recorded, &error.field_keys);
                         }
-                    } else if transition_error_needs_input(&error.message) {
+                    } else if transition_error_needs_input(&error, &transition) {
                         if let Some(account) = state.borrow().account.as_ref() {
                             let cloud = account.mode == AuthMode::Cloud;
                             transition_ui::open_transition_form(
@@ -1204,7 +1206,7 @@ fn handle_event(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>, eve
                                 transition_form_opened(ui),
                             );
                             if let Some(form) = ui.transition_form.borrow().as_ref() {
-                                form.show_error(&error.message, error.worklog_recorded);
+                                form.show_error(&error.message, error.worklog_recorded, &error.field_keys);
                             }
                         }
                     } else {
@@ -3089,13 +3091,32 @@ mod workflow_error_tests {
     use super::*;
 
     #[test]
-    fn opens_editor_only_for_validation_failures() {
-        assert!(transition_error_needs_input("Jira HTTP 400: customfield_123: Required"));
-        assert!(transition_error_needs_input("Jira HTTP 422: missing field"));
-        assert!(transition_error_needs_input("Field A is required"));
-        assert!(!transition_error_needs_input("Jira HTTP 401: Unauthorized"));
-        assert!(!transition_error_needs_input("Could not connect to Jira"));
+    fn shows_editor_for_server_validation_only_with_editable_metadata() {
+        let error = TransitionFailure {
+            message: "Please fill impact assessment".into(),
+            worklog_recorded: false,
+            validation_failed: true,
+            field_keys: vec![],
+        };
+        let transition = IssueTransition {
+            id: "121".into(), name: "Review".into(),
+            to_name: "In Review".into(), to_id: "10".into(),
+            fields: vec![], edit_fields: vec![],
+        };
+        assert!(!transition_error_needs_input(&error, &transition));
+        let field = crate::jira::TransitionField {
+            id: "customfield_10135".into(), name: "Impact Assessment".into(),
+            schema_type: "string".into(), item_type: String::new(),
+            custom_type: String::new(), required: false, choices: vec![],
+        };
+        let editable = IssueTransition { fields: vec![field], ..transition };
+        assert!(transition_error_needs_input(&error, &editable));
+        assert!(!transition_error_needs_input(
+            &TransitionFailure { validation_failed: false, ..error },
+            &editable,
+        ));
     }
+
 }
 
 #[cfg(test)]
