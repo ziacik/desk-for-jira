@@ -162,6 +162,7 @@ enum Event {
     Stored(Result<Option<Credentials>, String>),
     Loaded(u64, Credentials, Result<Loaded, String>),
     BoardLoaded(u64, BoardKey, Result<BoardData, String>),
+    RememberedIssueLoaded(u64, String, Result<Vec<Issue>, String>),
     ImageLoaded(u64, String, String, Result<Vec<u8>, String>),
     TransitionsLoaded(u64, u64, String, Result<Vec<IssueTransition>, String>),
     TransitionFinished(u64, String, IssueTransition, Result<(), TransitionFailure>),
@@ -1056,6 +1057,7 @@ fn handle_event(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>, eve
                         s.issue_scope = view.scope;
                         s.active_sprint_only = view.active_sprint_only;
                     }
+                    *ui.remembered_issue.borrow_mut() = view.open_issue;
                     *ui.project_filter.borrow_mut() = view.project_filter;
                     *ui.collapsed_columns.borrow_mut() = view.collapsed_columns;
                     ui.search.set_text(&view.search);
@@ -1076,6 +1078,20 @@ fn handle_event(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>, eve
                         show_error(ui, &format!("Could not list projects: {error}"));
                     }
                     start_board_load(ui, state, sender);
+                    // A remembered ticket may be outside the current board, sprint,
+                    // assignee scope or search. Load it directly from Jira.
+                    if let Some(key) = ui.remembered_issue.borrow().clone() {
+                        let account = state.borrow().account.clone();
+                        if let Some(account) = account {
+                            let sender = sender.clone();
+                            thread::spawn(move || {
+                                let result = JiraClient::new(account)
+                                    .and_then(|client| client.issues_by_keys(std::slice::from_ref(&key)))
+                                    .map_err(|error| error.to_string());
+                                let _ = sender.send(Event::RememberedIssueLoaded(id, key, result));
+                            });
+                        }
+                    }
                 }
                 Err(error) => {
                     ui.status.set_text("Connection failed");
@@ -1105,6 +1121,28 @@ fn handle_event(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>, eve
                     show_empty(&ui.board_box, "Could not load project board", &error);
                     show_error(ui, &error);
                 }
+            }
+        }
+        Event::RememberedIssueLoaded(id, key, result) => {
+            // Do not reopen a stale ticket when the user switched sites, opened
+            // another ticket or explicitly closed the inspector while loading.
+            if state.borrow().generation != id
+                || ui.remembered_issue.borrow().as_deref() != Some(key.as_str())
+                || ui.selected_issue.borrow().is_some()
+            {
+                return;
+            }
+            match result {
+                Ok(issues) => {
+                    if let Some(issue) = issues.into_iter().find(|issue| issue.key == key) {
+                        open_issue(ui, &issue, None);
+                        // Rebuild the selected card highlight after restoring.
+                        render_board(ui, &state.borrow());
+                    } else {
+                        eprintln!("Could not restore {key}: Jira did not return the issue");
+                    }
+                }
+                Err(error) => eprintln!("Could not restore {key}: {error}"),
             }
         }
         Event::TransitionsLoaded(id, request, key, result) => {
@@ -1311,7 +1349,7 @@ fn start_board_load(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>)
         display_board(ui, state, data);
         return;
     }
-    close_issue_details(ui);
+    // A board refresh is not a request to close the selected inspector.
     ui.status.set_text("Loading project issues…");
     show_empty(&ui.board_box, "Loading board…", "Fetching issues from Jira");
     set_busy(ui, state, true);
@@ -2195,6 +2233,7 @@ fn current_view(ui: &Ui, state: &State) -> ViewSettings {
         project_filter: ui.project_filter.borrow().clone(),
         search: ui.search.text().to_string(),
         collapsed_columns: ui.collapsed_columns.borrow().clone(),
+        open_issue: ui.remembered_issue.borrow().clone(),
     }
 }
 
@@ -2204,15 +2243,6 @@ fn save_view(ui: &Ui, state: &State) {
         && let Err(error) = preferences::save_view(&account.base_url, &current_view(ui, state))
     {
         show_error(ui, &format!("Could not save view: {error}"));
-    }
-}
-
-fn save_collapsed_view(site: &str, view: &ViewSettings, collapsed: &HashSet<String>) {
-    if site.is_empty() { return; }
-    let mut view = view.clone();
-    view.collapsed_columns = collapsed.clone();
-    if let Err(error) = preferences::save_view(site, &view) {
-        eprintln!("Could not save collapsed columns: {error}");
     }
 }
 
@@ -2464,10 +2494,9 @@ fn render_board(ui: &Ui, state: &State) {
         && !groups.iter().any(|(_, issues)| issues.iter().any(|issue| issue.key == key))
         && !pinned_issue_refs(&state.settings, &state.issues, &state.pinned_issues)
             .iter().any(|issue| issue.key == key)
-        // Keep a ticket found through global Jira search open even though
-        // it is not a member of the currently loaded board.
-        && !state.recent_issues.iter().any(|issue| issue.key == key
-            && !state.issues.iter().any(|loaded| loaded.key == key))
+        // A directly opened (or restored) ticket may be outside the board's
+        // active scope, sprint or text filter. Keep its details visible.
+        && !state.recent_issues.iter().any(|issue| issue.key == key)
     {
         close_issue_details(ui);
     }
@@ -2477,7 +2506,6 @@ fn render_board(ui: &Ui, state: &State) {
     }
 
     let url = state.account.as_ref().map(|a| a.base_url.as_str()).unwrap_or("");
-    let view = current_view(ui, state);
     for (name, issues) in groups {
         let issue_count = issues.len();
         let initially_collapsed = ui.collapsed_columns.borrow().contains(&name);
@@ -2554,8 +2582,7 @@ fn render_board(ui: &Ui, state: &State) {
         {
             let collapsed_columns = ui.collapsed_columns.clone();
             let name = name.clone();
-            let site = url.to_owned();
-            let view = view.clone();
+            let ui = ui.clone();
             let column = column.downgrade();
             let expanded = expanded.downgrade();
             let collapsed = collapsed.downgrade();
@@ -2563,7 +2590,7 @@ fn render_board(ui: &Ui, state: &State) {
                 let (Some(column), Some(expanded), Some(collapsed)) =
                     (column.upgrade(), expanded.upgrade(), collapsed.upgrade()) else { return };
                 collapsed_columns.borrow_mut().insert(name.clone());
-                save_collapsed_view(&site, &view, &collapsed_columns.borrow());
+                save_view(&ui, &ui.state.borrow());
                 expanded.set_visible(false);
                 collapsed.set_visible(true);
                 column.set_width_request(COLLAPSED_COLUMN_WIDTH);
@@ -2572,8 +2599,7 @@ fn render_board(ui: &Ui, state: &State) {
         }
         {
             let collapsed_columns = ui.collapsed_columns.clone();
-            let site = url.to_owned();
-            let view = view.clone();
+            let ui = ui.clone();
             let column = column.downgrade();
             let expanded = expanded.downgrade();
             let collapsed = collapsed.downgrade();
@@ -2581,7 +2607,7 @@ fn render_board(ui: &Ui, state: &State) {
                 let (Some(column), Some(expanded), Some(collapsed)) =
                     (column.upgrade(), expanded.upgrade(), collapsed.upgrade()) else { return };
                 collapsed_columns.borrow_mut().remove(&name);
-                save_collapsed_view(&site, &view, &collapsed_columns.borrow());
+                save_view(&ui, &ui.state.borrow());
                 collapsed.set_visible(false);
                 expanded.set_visible(true);
                 column.set_width_request(COLUMN_WIDTH);
@@ -2903,6 +2929,8 @@ fn open_issue(ui: &Ui, issue: &Issue, source_button: Option<&gtk::Button>) {
         *ui.selected_button.borrow_mut() = Some(button.clone());
     }
     *ui.selected_issue.borrow_mut() = Some(issue.key.clone());
+    *ui.remembered_issue.borrow_mut() = Some(issue.key.clone());
+    save_view(ui, &ui.state.borrow());
 
     let (account, generation) = {
         let mut state = ui.state.borrow_mut();
