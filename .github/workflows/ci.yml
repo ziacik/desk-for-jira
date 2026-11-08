@@ -16,7 +16,7 @@ jobs:
       - name: Install system dependencies
         run: |
           pacman -Syu --noconfirm
-          pacman -S --noconfirm --needed git rust cargo base-devel gtk4 libadwaita
+          pacman -S --noconfirm --needed git rust cargo base-devel gtk4 libadwaita xorg-server-xvfb xorg-xauth
 
       - name: Checkout
         uses: actions/checkout@v4
@@ -27,5 +27,5 @@ jobs:
       - name: Cargo clippy
         run: cargo clippy --all-targets -- -D warnings
 
-      - name: Cargo test
-        run: cargo test
+      - name: Cargo test (including GTK layout on Xvfb)
+        run: xvfb-run -a cargo test
