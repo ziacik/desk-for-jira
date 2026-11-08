@@ -362,10 +362,10 @@ fn build_ui(app: &adw::Application) {
     center.append(&pinned_section);
 
     let board_box = gtk::Box::new(gtk::Orientation::Horizontal, 14);
-    // Columns retain a useful width even on ultra-wide monitors.
-    // The horizontal scroller handles additional columns instead of stretching cards.
-    board_box.set_hexpand(false);
-    board_box.set_halign(gtk::Align::Start);
+    // Fill the viewport for centered empty/loading states. Individual columns
+    // keep their fixed widths, so a wide window does not stretch issue cards.
+    board_box.set_hexpand(true);
+    board_box.set_halign(gtk::Align::Fill);
     let scroller = gtk::ScrolledWindow::new();
     scroller.add_css_class("board-scroll");
     scroller.set_min_content_width(320);
@@ -1354,7 +1354,7 @@ fn start_board_load(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>)
     }
     // A board refresh is not a request to close the selected inspector.
     ui.status.set_text("Loading project issues…");
-    show_empty(&ui.board_box, "Loading board…", "Fetching issues from Jira");
+    show_loading(&ui.board_box);
     set_busy(ui, state, true);
     if pending {
         // A request for this exact filter is already running; its response
@@ -3106,6 +3106,31 @@ fn set_busy(ui: &Ui, state: &Rc<RefCell<State>>, busy: bool) {
     }
 }
 
+fn show_loading(container: &gtk::Box) {
+    clear_box(container);
+    let content = gtk::Box::new(gtk::Orientation::Vertical, 10);
+    content.set_hexpand(true);
+    content.set_vexpand(true);
+    content.set_halign(gtk::Align::Center);
+    content.set_valign(gtk::Align::Center);
+
+    let spinner = gtk::Spinner::new();
+    spinner.set_size_request(32, 32);
+    spinner.set_halign(gtk::Align::Center);
+    spinner.start();
+    content.append(&spinner);
+
+    let title = gtk::Label::new(Some("Loading board…"));
+    title.add_css_class("title-3");
+    content.append(&title);
+
+    let description = gtk::Label::new(Some("Fetching issues from Jira"));
+    description.add_css_class("dim-label");
+    content.append(&description);
+
+    container.append(&content);
+}
+
 fn show_empty(container: &gtk::Box, title: &str, description: &str) {
     clear_box(container);
     let message = adw::StatusPage::builder()
@@ -3113,6 +3138,7 @@ fn show_empty(container: &gtk::Box, title: &str, description: &str) {
         .title(title)
         .description(description)
         .build();
+    message.set_hexpand(true);
     message.set_vexpand(true);
     container.append(&message);
 }
