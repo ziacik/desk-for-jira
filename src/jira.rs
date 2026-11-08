@@ -209,6 +209,8 @@ pub struct IssueTransition {
     pub to_name: String,
     pub to_id: String,
     pub fields: Vec<TransitionField>,
+    // Fields editable on the issue but absent from this transition screen.
+    pub edit_fields: Vec<TransitionField>,
 }
 
 #[derive(Clone, Debug)]
@@ -319,7 +321,40 @@ impl JiraClient {
                 }
             }
         }
+        // Workflow validators may require issue fields that do not appear on
+        // the transition screen. Offer fields editable separately on the issue
+        // instead of pretending the transition metadata covers all validators.
+        let edit_path = format!("/rest/api/{version}/issue/{key}/editmeta");
+        if let Ok(editmeta) = self.read_json(self.http.get(self.url(&edit_path)))
+            && let Some(meta_fields) = editmeta.get("fields").and_then(Value::as_object)
+        {
+            let editable = parse_transition_fields(meta_fields);
+            for transition in &mut transitions {
+                transition.edit_fields = editable.iter().filter(|field| {
+                    field.id != "comment" && !transition.fields.iter()
+                        .any(|screen_field| screen_field.id == field.id)
+                }).cloned().collect();
+            }
+        }
         Ok(transitions)
+    }
+
+    pub fn edit_issue_fields(&self, key: &str, fields: serde_json::Map<String, Value>) -> Result<()> {
+        if fields.is_empty() {
+            return Ok(());
+        }
+        let version = if self.account.mode == AuthMode::Cloud { "3" } else { "2" };
+        let path = format!("/rest/api/{version}/issue/{key}");
+        let response = self.authorize(self.http.put(self.url(&path))
+            .json(&json!({"fields": fields})))
+            .header(reqwest::header::ACCEPT, "application/json")
+            .send().context("Could not connect to Jira")?;
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().unwrap_or_default();
+            bail!("Jira HTTP {}: {}", status.as_u16(), jira_error_message(&body));
+        }
+        Ok(())
     }
 
     pub fn transition_issue(&self, key: &str, transition_id: &str, fields: serde_json::Map<String, Value>) -> Result<()> {
@@ -870,6 +905,54 @@ fn field_has_value(value: &Value) -> bool {
     }
 }
 
+fn parse_transition_fields(metadata_fields: &serde_json::Map<String, Value>) -> Vec<TransitionField> {
+    let mut fields = Vec::new();
+    for (id, metadata) in metadata_fields {
+        let required = metadata.get("required").and_then(Value::as_bool) == Some(true)
+            && metadata.get("hasDefaultValue").and_then(Value::as_bool) != Some(true);
+        let schema = metadata.get("schema");
+        let schema_type = schema.and_then(|s| s.get("type"))
+            .and_then(Value::as_str).unwrap_or("").to_owned();
+        let item_type = schema.and_then(|s| s.get("items"))
+            .and_then(Value::as_str).unwrap_or("").to_owned();
+        let custom_type = schema.and_then(|s| s.get("custom"))
+            .and_then(Value::as_str).unwrap_or("").to_owned();
+        let choices = metadata.get("allowedValues").and_then(Value::as_array)
+            .into_iter().flatten()
+            .filter_map(|value| {
+                let label = value.as_str()
+                    .or_else(|| value.get("name").and_then(Value::as_str))
+                    .or_else(|| value.get("value").and_then(Value::as_str))
+                    .or_else(|| value.get("displayName").and_then(Value::as_str))
+                    .or_else(|| value.get("key").and_then(Value::as_str))?
+                    .to_owned();
+                let payload = if let Some(id) = value.get("id") {
+                    json!({"id": id})
+                } else if let Some(id) = value.get("accountId") {
+                    json!({"accountId": id})
+                } else if let Some(name) = value.get("name") {
+                    json!({"name": name})
+                } else {
+                    value.clone()
+                };
+                Some(TransitionChoice { label, value: payload })
+            }).collect();
+        fields.push(TransitionField {
+            id: id.clone(),
+            name: metadata.get("name").and_then(Value::as_str)
+                .unwrap_or(id).to_owned(),
+            schema_type,
+            item_type,
+            custom_type,
+            required,
+            choices,
+        });
+    }
+    fields.sort_by(|a, b| b.required.cmp(&a.required)
+        .then_with(|| a.name.cmp(&b.name)));
+    fields
+}
+
 fn parse_issue_transitions(response: &Value) -> Vec<IssueTransition> {
     response.get("transitions").and_then(Value::as_array)
         .into_iter().flatten().filter_map(|transition| {
@@ -878,55 +961,12 @@ fn parse_issue_transitions(response: &Value) -> Vec<IssueTransition> {
             let to = transition.get("to")?;
             let to_name = to.get("name").and_then(Value::as_str).unwrap_or(&name).to_owned();
             let to_id = to.get("id").and_then(Value::as_str).unwrap_or("").to_owned();
-            let mut fields = Vec::new();
-            if let Some(metadata_fields) = transition.get("fields").and_then(Value::as_object) {
-                for (id, metadata) in metadata_fields {
-                    // Include every field on the transition screen. Workflow validators
-                    // can require a field without marking it 'required' in this API.
-                    let required = metadata.get("required").and_then(Value::as_bool) == Some(true)
-                        && metadata.get("hasDefaultValue").and_then(Value::as_bool) != Some(true);
-                    let schema = metadata.get("schema");
-                    let schema_type = schema.and_then(|s| s.get("type"))
-                        .and_then(Value::as_str).unwrap_or("").to_owned();
-                    let item_type = schema.and_then(|s| s.get("items"))
-                        .and_then(Value::as_str).unwrap_or("").to_owned();
-                    let custom_type = schema.and_then(|s| s.get("custom"))
-                        .and_then(Value::as_str).unwrap_or("").to_owned();
-                    let choices = metadata.get("allowedValues").and_then(Value::as_array)
-                        .into_iter().flatten()
-                        .filter_map(|value| {
-                            let label = value.as_str()
-                                .or_else(|| value.get("name").and_then(Value::as_str))
-                                .or_else(|| value.get("value").and_then(Value::as_str))
-                                .or_else(|| value.get("displayName").and_then(Value::as_str))
-                                .or_else(|| value.get("key").and_then(Value::as_str))?
-                                .to_owned();
-                            let payload = if let Some(id) = value.get("id") {
-                                json!({"id": id})
-                            } else if let Some(id) = value.get("accountId") {
-                                json!({"accountId": id})
-                            } else if let Some(name) = value.get("name") {
-                                json!({"name": name})
-                            } else {
-                                value.clone()
-                            };
-                            Some(TransitionChoice { label, value: payload })
-                        }).collect();
-                    fields.push(TransitionField {
-                        id: id.clone(),
-                        name: metadata.get("name").and_then(Value::as_str)
-                            .unwrap_or(id).to_owned(),
-                        schema_type,
-                        item_type,
-                        custom_type,
-                        required,
-                        choices,
-                    });
-                }
-            }
-            fields.sort_by(|a, b| b.required.cmp(&a.required)
-                .then_with(|| a.name.cmp(&b.name)));
-            Some(IssueTransition { id, name, to_name, to_id, fields })
+            let fields = transition.get("fields").and_then(Value::as_object)
+                .map(parse_transition_fields).unwrap_or_default();
+            Some(IssueTransition {
+                id, name, to_name, to_id, fields,
+                edit_fields: Vec::new(),
+            })
         }).collect()
 }
 
@@ -1227,6 +1267,30 @@ mod transition_tests {
         };
         assert_eq!(number.text_value("2.5", false).unwrap(), json!(2.5));
         assert!(number.text_value("invalid", false).is_err());
+    }
+
+    #[test]
+    fn finds_editable_fields_missing_from_transition_screen() {
+        let transitions = parse_issue_transitions(&json!({"transitions":[
+            {"id":"3","name":"Done","to":{"name":"Done"},
+             "fields":{"resolution":{"name":"Resolution","required":false,
+                 "schema":{"type":"resolution"}}}}
+        ]}));
+        let edit = parse_transition_fields(json!({
+            "customfield_42": {
+                "name":"Business justification", "required":false,
+                "schema":{"type":"string"}
+            },
+            "resolution": {
+                "name":"Resolution", "required":false,
+                "schema":{"type":"resolution"}
+            }
+        }).as_object().unwrap());
+        let available: Vec<_> = edit.iter().filter(|field| {
+            !transitions[0].fields.iter().any(|screen_field| screen_field.id == field.id)
+        }).collect();
+        assert_eq!(available.len(), 1);
+        assert_eq!(available[0].id, "customfield_42");
     }
 
     #[test]
