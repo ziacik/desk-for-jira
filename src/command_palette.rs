@@ -10,12 +10,12 @@ use std::{
 use adw::prelude::*;
 use gtk::glib;
 
-use crate::jira::{Credentials, Issue, JiraClient};
+use crate::jira::{Credentials, Issue, IssueTransition, JiraClient};
 
 #[derive(Clone)]
 pub(crate) enum PaletteCommand {
     OpenIssue(Issue),
-    ChangeStatus(Issue),
+    Transition { issue_key: String, transition: IssueTransition },
     FilterProject(Option<String>),
     ChooseProjects,
     EditColumns,
@@ -62,6 +62,32 @@ impl PaletteItem {
     }
 }
 
+#[derive(Default)]
+struct PaletteStatus {
+    search_loading: bool,
+    search_error: Option<String>,
+    transitions_loading: bool,
+    transitions_error: Option<String>,
+}
+
+fn transition_items(key: &str, transitions: Vec<IssueTransition>) -> Vec<PaletteItem> {
+    transitions.into_iter().map(|transition| {
+        let title = if transition.required_fields.is_empty() {
+            transition.name.clone()
+        } else {
+            format!("{}…", transition.name)
+        };
+        let subtitle = format!("{key} · Move to {}", transition.to_name);
+        PaletteItem::new(
+            title, subtitle, "Transition", "go-next-symbolic", true,
+            PaletteCommand::Transition {
+                issue_key: key.to_owned(),
+                transition,
+            },
+        )
+    }).collect()
+}
+
 fn make_search_jql(raw: &str) -> Option<String> {
     let raw = raw.trim();
     if raw.chars().count() < 3 {
@@ -104,10 +130,13 @@ fn render_results(
     all_items: &[PaletteItem],
     remote_issues: &[Issue],
     query: &str,
-    search_status: (bool, Option<&str>),
+    status: &PaletteStatus,
     shown_items: &RefCell<Vec<PaletteItem>>,
 ) {
-    let (loading, error) = search_status;
+    let previous_selection = list.selected_row().and_then(|row| {
+        shown_items.borrow().get(row.index() as usize)
+            .map(|item| (item.title.clone(), item.subtitle.clone(), item.category))
+    });
     while let Some(row) = list.row_at_index(0) {
         list.remove(&row);
     }
@@ -172,14 +201,23 @@ fn render_results(
         row.set_child(Some(&content));
         list.append(&row);
     }
+    let selected_index = previous_selection.and_then(|(title, subtitle, category)| {
+        matched.iter().position(|item| {
+            item.title == title && item.subtitle == subtitle && item.category == category
+        })
+    }).unwrap_or(0);
     *shown_items.borrow_mut() = matched;
-    if let Some(row) = list.row_at_index(0) {
+    if let Some(row) = list.row_at_index(selected_index as i32) {
         list.select_row(Some(&row));
     }
-    let message = if let Some(error) = error {
+    let message = if let Some(error) = status.search_error.as_deref() {
         format!("Jira search failed: {error}")
-    } else if loading {
+    } else if status.search_loading {
         "Searching Jira…".to_owned()
+    } else if needle.is_empty() && status.transitions_loading {
+        "Loading available Jira transitions…".to_owned()
+    } else if needle.is_empty() && let Some(error) = status.transitions_error.as_deref() {
+        format!("Could not load transitions: {error}")
     } else if shown_items.borrow().is_empty() {
         "No matching tickets or commands".to_owned()
     } else if needle.is_empty() {
@@ -194,6 +232,7 @@ pub(crate) fn open(
     parent: &adw::ApplicationWindow,
     all_items: Vec<PaletteItem>,
     account: Option<Credentials>,
+    selected_key: Option<String>,
     on_activate: Rc<dyn Fn(PaletteCommand)>,
 ) -> gtk::Window {
     let window = gtk::Window::builder()
@@ -247,12 +286,23 @@ pub(crate) fn open(
 
     let shown_items = Rc::new(RefCell::new(Vec::<PaletteItem>::new()));
     let remote_issues = Rc::new(RefCell::new(Vec::<Issue>::new()));
-    let error = Rc::new(RefCell::new(None::<String>));
-    let loading = Rc::new(Cell::new(false));
+    let status = Rc::new(RefCell::new(PaletteStatus {
+        transitions_loading: selected_key.is_some() && account.is_some(),
+        ..PaletteStatus::default()
+    }));
     let request_id = Rc::new(Cell::new(0_u64));
     let debounce = Rc::new(RefCell::new(None::<glib::SourceId>));
     let (sender, receiver) = mpsc::channel::<(u64, Result<Vec<Issue>, String>)>();
-    let all_items = Rc::new(all_items);
+    let (transition_sender, transition_receiver) = mpsc::channel::<(String, Result<Vec<IssueTransition>, String>)>();
+    if let (Some(key), Some(account)) = (selected_key, account.clone()) {
+        thread::spawn(move || {
+            let result = (|| -> anyhow::Result<Vec<IssueTransition>> {
+                JiraClient::new(account)?.issue_transitions(&key)
+            })().map_err(|error| error.to_string());
+            let _ = transition_sender.send((key, result));
+        });
+    }
+    let all_items = Rc::new(RefCell::new(all_items));
 
     let update: Rc<dyn Fn()> = Rc::new({
         let list = list.clone();
@@ -260,14 +310,12 @@ pub(crate) fn open(
         let entry = entry.downgrade();
         let shown_items = shown_items.clone();
         let remote_issues = remote_issues.clone();
-        let error = error.clone();
-        let loading = loading.clone();
+        let status = status.clone();
         move || {
             let Some(entry) = entry.upgrade() else { return; };
             render_results(
-                &list, &hint, &all_items, &remote_issues.borrow(),
-                entry.text().as_str(), (loading.get(), error.borrow().as_deref()),
-                &shown_items,
+                &list, &hint, &all_items.borrow(), &remote_issues.borrow(),
+                entry.text().as_str(), &status.borrow(), &shown_items,
             );
         }
     });
