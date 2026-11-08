@@ -16,6 +16,7 @@ pub struct TransitionForm {
     pub submit: gtk::Button,
     pub progress: gtk::Spinner,
     fields_box: gtk::Box,
+    fields_scroll: gtk::ScrolledWindow,
     controls: Rc<RefCell<Vec<FormField>>>,
     extra_fields: Vec<TransitionField>,
     worklog_recorded: Rc<Cell<bool>>,
@@ -37,18 +38,31 @@ impl TransitionForm {
         self.progress.stop();
         self.progress.set_visible(false);
 
-        // Validators sometimes report a field that is not on the transition
-        // screen. Offer the matching issue-editable field in the same dialog.
+        // Workflow validators may require fields that their metadata calls
+        // optional. Respect the actual error rather than that stale flag.
+        for item in self.controls.borrow_mut().iter_mut() {
+            if field_mentioned(message, &item.field) {
+                item.field.required = true;
+                item.label.set_text(&format!("{} *", item.field.name));
+            }
+        }
+        let mut added = false;
         for mut field in referenced_fields(message, &self.extra_fields) {
             if self.controls.borrow().iter().any(|existing| existing.field.id == field.id) {
                 continue;
             }
             field.required = true;
-            let control = append_field_row(&self.fields_box, &field, self.cloud);
+            let (control, label) = append_field_row(&self.fields_box, &field, self.cloud);
             self.controls.borrow_mut().push(FormField {
-                field,
-                control,
-                update_issue: true,
+                field, control, label, update_issue: true,
+            });
+            added = true;
+        }
+        if added {
+            let scroll = self.fields_scroll.clone();
+            gtk::glib::idle_add_local_once(move || {
+                let adjustment = scroll.vadjustment();
+                adjustment.set_value((adjustment.upper() - adjustment.page_size()).max(0.0));
             });
         }
     }
@@ -61,16 +75,19 @@ impl TransitionForm {
 struct FormField {
     field: TransitionField,
     control: FieldControl,
+    label: gtk::Label,
     update_issue: bool,
 }
 
-fn referenced_fields(message: &str, fields: &[TransitionField]) -> Vec<TransitionField> {
+fn field_mentioned(message: &str, field: &TransitionField) -> bool {
     let error = message.to_lowercase();
-    fields.iter().filter(|field| {
-        error.contains(&field.id.to_lowercase())
-            || (field.name.chars().count() >= 4
-                && error.contains(&field.name.to_lowercase()))
-    }).cloned().collect()
+    error.contains(&field.id.to_lowercase())
+        || (field.name.chars().count() >= 4
+            && error.contains(&field.name.to_lowercase()))
+}
+
+fn referenced_fields(message: &str, fields: &[TransitionField]) -> Vec<TransitionField> {
+    fields.iter().filter(|field| field_mentioned(message, field)).cloned().collect()
 }
 
 enum FieldControl {
@@ -196,10 +213,11 @@ pub fn open_transition_form(
     let form = gtk::Box::new(gtk::Orientation::Vertical, 13);
     let controls = Rc::new(RefCell::new(Vec::<FormField>::new()));
     for field in &transition.fields {
-        let control = append_field_row(&form, field, cloud);
+        let (control, label) = append_field_row(&form, field, cloud);
         controls.borrow_mut().push(FormField {
             field: field.clone(),
             control,
+            label,
             update_issue: false,
         });
     }
@@ -278,6 +296,7 @@ pub fn open_transition_form(
         submit: apply,
         progress,
         fields_box: form,
+        fields_scroll: scroller,
         controls,
         extra_fields: edit_fields_for_form,
         worklog_recorded,
@@ -286,7 +305,9 @@ pub fn open_transition_form(
     dialog.present();
 }
 
-fn append_field_row(form: &gtk::Box, field: &TransitionField, cloud: bool) -> FieldControl {
+fn append_field_row(
+    form: &gtk::Box, field: &TransitionField, cloud: bool,
+) -> (FieldControl, gtk::Label) {
     let row = gtk::Box::new(gtk::Orientation::Vertical, 5);
     let name = gtk::Label::new(Some(&format!(
         "{}{}", field.name, if field.required { " *" } else { "" },
@@ -370,7 +391,7 @@ fn append_field_row(form: &gtk::Box, field: &TransitionField, cloud: bool) -> Fi
         FieldControl::Text(input)
     };
     form.append(&row);
-    control
+    (control, name)
 }
 
 fn text_area(initial: &str, monospace: bool) -> gtk::TextView {
@@ -537,6 +558,18 @@ mod tests {
         for text in ["", "{}", "0m", "30", "garbage", "😀"] {
             assert!(!valid_worklog_duration(text), "{text}");
         }
+    }
+
+    #[test]
+    fn missing_required_field_is_inferred_from_jira_validation_text() {
+        let impact = TransitionField {
+            id: "customfield_10135".into(), name: "Impact Assessment".into(),
+            schema_type: "string".into(), item_type: String::new(),
+            custom_type: String::new(), required: false, choices: vec![],
+        };
+        let error = "Please fill the impact assessment and fix versions fields.";
+        assert!(field_mentioned(error, &impact));
+        assert!(!field_mentioned("Time budget exceeded", &impact));
     }
 
     #[test]
