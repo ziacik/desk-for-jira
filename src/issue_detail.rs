@@ -548,13 +548,13 @@ fn match_media<'a>(
     let attrs = node.get("attrs")?;
     let id = attrs.get("id").and_then(Value::as_str);
     let alt = attrs.get("alt").and_then(Value::as_str);
+    // Only use a stable REST attachment ID or an exact filename match.
+    // Media UUIDs in ADF do not necessarily match REST attachment IDs. Guessing
+    // from attachment order can put the wrong image into the issue description.
     attachments.iter().find(|a| a.is_image() && !used.contains(&a.id)
         && id == Some(a.id.as_str()))
         .or_else(|| attachments.iter().find(|a| a.is_image() && !used.contains(&a.id)
             && alt.is_some_and(|alt| alt.eq_ignore_ascii_case(&a.filename))))
-        // ADF media UUIDs differ from REST attachment IDs. Jira gives us no
-        // reliable ID mapping, so fall back to image attachment order.
-        .or_else(|| attachments.iter().find(|a| a.is_image() && !used.contains(&a.id)))
 }
 
 fn append_image(parent: &gtk::Box, attachment: &Attachment, slots: &mut ImageSlots) {
@@ -661,10 +661,18 @@ mod tests {
     }
 
     #[test]
-    fn adf_media_uses_filename_before_order_fallback() {
+    fn adf_media_matches_exact_filename_not_attachment_order() {
         let attachments = vec![attachment("1", "first.png"), attachment("2", "target.png")];
         let node = json!({"type":"media","attrs":{"id":"not-an-attachment-id","alt":"target.png"}});
         let used = HashSet::new();
         assert_eq!(match_media(&node, &attachments, &used).unwrap().id, "2");
     }
+    #[test]
+    fn unresolved_adf_media_never_displays_an_unrelated_attachment() {
+        let attachments = vec![attachment("1", "first.png"), attachment("2", "second.png")];
+        let node = json!({"type":"media","attrs":{"id":"unrelated-media-uuid"}});
+        assert!(match_media(&node, &attachments, &HashSet::new()).is_none());
+        // Attachments are still displayed in their normal separate section.
+    }
+
 }
