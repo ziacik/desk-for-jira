@@ -28,4 +28,4 @@ jobs:
         run: cargo clippy --all-targets -- -D warnings
 
       - name: Cargo test (including GTK layout on Xvfb)
-        run: xvfb-run -a cargo test
+        run: xvfb-run -a -s "-screen 0 1920x1080x24" env GSK_RENDERER=cairo cargo test
