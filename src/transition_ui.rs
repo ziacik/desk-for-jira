@@ -364,38 +364,6 @@ fn append_field_row(form: &gtk::Box, field: &TransitionField, cloud: bool) -> Fi
     control
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn recognizes_validator_fields_by_id_and_name() {
-        let fields = vec![
-            TransitionField {
-                id: "customfield_142".into(),
-                name: "Business Justification".into(),
-                schema_type: "string".into(),
-                item_type: String::new(),
-                custom_type: String::new(),
-                required: false,
-                choices: Vec::new(),
-            },
-            TransitionField {
-                id: "customfield_143".into(),
-                name: "Priority Rationale".into(),
-                schema_type: "string".into(),
-                item_type: String::new(),
-                custom_type: String::new(),
-                required: false,
-                choices: Vec::new(),
-            },
-        ];
-        assert_eq!(referenced_fields("Field Business Justification is required", &fields).len(), 1);
-        assert_eq!(referenced_fields("customfield_143: Required", &fields)[0].id, "customfield_143");
-        assert!(referenced_fields("Permission denied", &fields).is_empty());
-    }
-}
-
 fn text_area(initial: &str, monospace: bool) -> gtk::TextView {
     let input = gtk::TextView::new();
     input.set_wrap_mode(gtk::WrapMode::WordChar);
@@ -483,3 +451,36 @@ fn text_value_or_none(
         .map(Some)
         .map_err(|error| error.to_string())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn recognizes_validator_fields_by_id_and_name() {
+        let fields = vec![
+            TransitionField {
+                id: "customfield_142".into(),
+                name: "Business Justification".into(),
+                schema_type: "string".into(),
+                item_type: String::new(),
+                custom_type: String::new(),
+                required: false,
+                choices: Vec::new(),
+            },
+            TransitionField {
+                id: "customfield_143".into(),
+                name: "Priority Rationale".into(),
+                schema_type: "string".into(),
+                item_type: String::new(),
+                custom_type: String::new(),
+                required: false,
+                choices: Vec::new(),
+            },
+        ];
+        assert_eq!(referenced_fields("Field Business Justification is required", &fields).len(), 1);
+        assert_eq!(referenced_fields("customfield_143: Required", &fields)[0].id, "customfield_143");
+        assert!(referenced_fields("Permission denied", &fields).is_empty());
+    }
+}
+
