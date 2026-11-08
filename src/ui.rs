@@ -2915,6 +2915,22 @@ fn remember_visible_detail_width(ui: &Ui) {
     }
 }
 
+/// Save after GTK has allocated the new position, not during the input event
+/// (when the end child's reported width may still be from the previous frame).
+fn capture_detail_width_after_layout(ui: &Ui) {
+    let ui = ui.clone();
+    let frames = Rc::new(Cell::new(0_u8));
+    ui.inner_split.add_tick_callback(move |_, _| {
+        frames.set(frames.get() + 1);
+        if frames.get() < 2 {
+            glib::ControlFlow::Continue
+        } else {
+            remember_visible_detail_width(&ui);
+            glib::ControlFlow::Break
+        }
+    });
+}
+
 /// GtkPaned has no user-resize signal: notify::position also fires during
 /// automatic allocation. Observe raw pointer events without claiming GTK's
 /// own drag gesture, and save the final allocated child width on release.
@@ -2941,9 +2957,7 @@ fn watch_detail_resize(ui: &Ui) {
             }
             gtk::gdk::EventType::ButtonRelease | gtk::gdk::EventType::TouchEnd => {
                 if drag_started_on_handle.replace(false) {
-                    let ui = ui_events.clone();
-                    // Allow GTK's own drag callback and the layout allocation to finish.
-                    glib::idle_add_local_once(move || remember_visible_detail_width(&ui));
+                    capture_detail_width_after_layout(&ui_events);
                 }
             }
             gtk::gdk::EventType::TouchCancel => drag_started_on_handle.set(false),
@@ -2967,8 +2981,7 @@ fn watch_detail_resize(ui: &Ui) {
                 gtk::gdk::Key::Home | gtk::gdk::Key::End
             )
         {
-            let ui = ui_keys.clone();
-            glib::idle_add_local_once(move || remember_visible_detail_width(&ui));
+            capture_detail_width_after_layout(&ui_keys);
         }
     });
     ui.inner_split.add_controller(keys);
