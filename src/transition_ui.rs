@@ -119,10 +119,16 @@ pub fn render_actions(
         let submit = submit.clone();
         let on_open = on_open.clone();
         button.connect_clicked(move |_| {
-            if let Some(parent) = parent.upgrade() {
-                open_transition_form(
-                    &parent, &key, cloud, transition.clone(), submit.clone(), on_open.clone(),
-                );
+            if transition.fields.iter().any(|field| field.required) {
+                if let Some(parent) = parent.upgrade() {
+                    open_transition_form(
+                        &parent, &key, cloud, transition.clone(), submit.clone(), on_open.clone(),
+                    );
+                }
+            } else {
+                // No required fields exposed by Jira: keep the one-click action.
+                // If a workflow validator rejects it, the caller opens this form.
+                submit(transition.clone(), Map::new(), Map::new());
             }
         });
         actions.insert(&button, -1);
@@ -130,7 +136,7 @@ pub fn render_actions(
     container.append(&actions);
 }
 
-fn open_transition_form(
+pub fn open_transition_form(
     parent: &adw::ApplicationWindow,
     issue_key: &str,
     cloud: bool,
