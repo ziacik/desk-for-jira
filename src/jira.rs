@@ -7,13 +7,14 @@ use serde_json::{Value, json};
 
 const PAGE_SIZE: usize = 100;
 const MAX_ITEMS: usize = 500;
-const FIELDS: [&str; 12] = [
+const FIELDS: [&str; 13] = [
     "summary",
     "status",
     "assignee",
     "issuetype",
     "priority",
     "fixVersions",
+    "versions",
     "updated",
     "description",
     "attachment",
@@ -71,6 +72,7 @@ pub struct Issue {
     pub kind: String,
     pub priority: String,
     pub fix_versions: Vec<String>,
+    pub affects_versions: Vec<String>,
     pub assignee: String,
     pub updated: String,
     pub description: String,
@@ -922,6 +924,10 @@ fn parse_issue(v: &Value, epic_link_field: Option<&str>) -> Option<Issue> {
             .into_iter().flatten()
             .filter_map(|version| version.get("name").and_then(Value::as_str))
             .map(str::to_owned).collect(),
+        affects_versions: f.get("versions").and_then(Value::as_array)
+            .into_iter().flatten()
+            .filter_map(|version| version.get("name").and_then(Value::as_str))
+            .map(str::to_owned).collect(),
         assignee: nested("assignee", "displayName"),
         updated: field("updated").chars().take(10).collect(),
         description: format_description(f.get("description")),
@@ -1290,6 +1296,28 @@ mod tests {
         assert_eq!(issues[1].fix_versions, vec!["2.0"]);
         for issue in issues.iter().skip(2) {
             assert!(issue.fix_versions.is_empty());
+        }
+    }
+
+    #[test]
+    fn reads_affects_versions_including_empty_and_missing_values() {
+        let data = json!({"issues":[
+            {"key":"ART-201","fields":{
+                "versions":[{"id":"1","name":"1.2.0"},{"id":"2","name":"1.3.0"}],
+                "fixVersions":[{"name":"1.4.0"}]
+            }},
+            {"key":"ART-202","fields":{"versions":[{"name":"2.0"}]}},
+            {"key":"ART-203","fields":{"versions":[]}},
+            {"key":"ART-204","fields":{"versions":null}},
+            {"key":"ART-205","fields":{}}
+        ]});
+        assert!(FIELDS.contains(&"versions"));
+        let issues = parse_issues(&data);
+        assert_eq!(issues[0].affects_versions, vec!["1.2.0", "1.3.0"]);
+        assert_eq!(issues[0].fix_versions, vec!["1.4.0"]);
+        assert_eq!(issues[1].affects_versions, vec!["2.0"]);
+        for issue in issues.iter().skip(2) {
+            assert!(issue.affects_versions.is_empty());
         }
     }
 
