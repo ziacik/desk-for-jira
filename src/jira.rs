@@ -361,10 +361,13 @@ impl JiraClient {
         if !field_ids.is_empty() {
             let names = field_ids.into_iter().collect::<Vec<_>>().join(",");
             let issue_path = format!("/rest/api/{version}/issue/{key}");
-            if let Ok(issue) = self.read_json(self.http.get(self.url(&issue_path))
+            // If the current issue values cannot be read, fail explicitly.
+            // Guessing that a field is empty would prompt for values that
+            // may already be set and could overwrite valid issue data.
+            let issue = self.read_json(self.http.get(self.url(&issue_path))
                 .query(&[("fields", names)]))
-                && let Some(values) = issue.get("fields").and_then(Value::as_object)
-            {
+                .with_context(|| format!("Could not read current fields for {key}"))?;
+            if let Some(values) = issue.get("fields").and_then(Value::as_object) {
                 for transition in &mut transitions {
                     remove_populated_fields(transition, values);
                 }
@@ -656,13 +659,7 @@ impl JiraClient {
         }
         let fields = self.read_json(self.http.get(self.url("/rest/api/2/field"))).ok()?;
         fields.as_array()?.iter()
-            .find(|field| {
-                field.get("schema").and_then(|schema| schema.get("custom"))
-                    .and_then(Value::as_str)
-                    .is_some_and(|kind| kind.contains("gh-epic-link"))
-                    || field.get("name").and_then(Value::as_str)
-                        .is_some_and(|name| name.eq_ignore_ascii_case("Epic Link"))
-            })
+            .find(|field| is_legacy_epic_link(field))
             .and_then(|field| field.get("id").and_then(Value::as_str))
             .map(str::to_owned)
     }
@@ -873,6 +870,14 @@ fn parse_issues_with_epic_link(data: &Value, epic_link_field: Option<&str>) -> V
         .into_iter().flatten()
         .filter_map(|value| parse_issue(value, epic_link_field))
         .collect()
+}
+
+fn is_legacy_epic_link(field: &Value) -> bool {
+    // The display name can be changed, localized, or reused by another field.
+    // GreenHopper's exact custom type identifies the real Epic Link field.
+    field.get("schema").and_then(|schema| schema.get("custom"))
+        .and_then(Value::as_str)
+        == Some("com.pyxis.greenhopper.jira:gh-epic-link")
 }
 
 fn parse_issue(v: &Value, epic_link_field: Option<&str>) -> Option<Issue> {
@@ -1360,6 +1365,22 @@ mod transition_tests {
         remove_populated_fields(&mut transition,
             json!({"worklog": [{"id":"99"}]}).as_object().unwrap());
         assert_eq!(transition.fields.len(), 1);
+    }
+
+    #[test]
+    fn legacy_epic_link_requires_exact_custom_field_type() {
+        assert!(is_legacy_epic_link(&json!({
+            "name": "Different localized name",
+            "schema": {"custom":"com.pyxis.greenhopper.jira:gh-epic-link"}
+        })));
+        assert!(!is_legacy_epic_link(&json!({
+            "name": "Epic Link",
+            "schema": {"custom":"vendor.example:some-other-field"}
+        })));
+        assert!(!is_legacy_epic_link(&json!({
+            "name": "Epic Link",
+            "schema": {"type":"string"}
+        })));
     }
 
     #[test]
