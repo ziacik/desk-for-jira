@@ -24,7 +24,7 @@ pub struct TransitionForm {
 }
 
 impl TransitionForm {
-    pub fn show_error(&self, message: &str, worklog_recorded: bool) {
+    pub fn show_error(&self, message: &str, worklog_recorded: bool, field_keys: &[String]) {
         if worklog_recorded {
             self.worklog_recorded.set(true);
         }
@@ -41,13 +41,13 @@ impl TransitionForm {
         // Workflow validators may require fields that their metadata calls
         // optional. Respect the actual error rather than that stale flag.
         for item in self.controls.borrow_mut().iter_mut() {
-            if field_mentioned(message, &item.field) {
+            if field_in_errors(&item.field, field_keys) {
                 item.field.required = true;
                 item.label.set_text(&format!("{} *", item.field.name));
             }
         }
         let mut added = false;
-        for mut field in referenced_fields(message, &self.extra_fields) {
+        for mut field in referenced_fields(field_keys, &self.extra_fields) {
             if self.controls.borrow().iter().any(|existing| existing.field.id == field.id) {
                 continue;
             }
@@ -79,31 +79,17 @@ struct FormField {
     update_issue: bool,
 }
 
-fn field_mentioned(message: &str, field: &TransitionField) -> bool {
-    let error = message.to_lowercase();
-    if field.is_worklog() && (error.contains("time spent") || error.contains("log work")) {
-        return true;
-    }
-    if field.name.chars().count() >= 4 && error.contains(&field.name.to_lowercase()) {
-        return true;
-    }
-
-    // Jira may report machine field IDs, e.g. "versions: Required".
-    // An ordinary substring search is wrong: "versions" also occurs in
-    // "fix versions", so it falsely asks for Affects versions.
-    let id = field.id.to_lowercase();
-    let key = format!("{id}:");
-    error.split([';', '\n']).any(|part| {
-        let part = part.trim();
-        let part = part.strip_prefix("jira http 400:")
-            .or_else(|| part.strip_prefix("jira http 422:"))
-            .unwrap_or(part).trim();
-        part.starts_with(&key)
-    }) || ["'", "\"","`"].iter().any(|quote| error.contains(&format!("{quote}{id}{quote}")))
+fn field_in_errors(field: &TransitionField, field_keys: &[String]) -> bool {
+    // The original error JSON supplies exact field keys, so no free-text
+    // heuristics or substring searches are needed.
+    field_keys.iter().any(|key| {
+        key.eq_ignore_ascii_case(&field.id) || key.eq_ignore_ascii_case(&field.name)
+    })
 }
 
-fn referenced_fields(message: &str, fields: &[TransitionField]) -> Vec<TransitionField> {
-    fields.iter().filter(|field| field_mentioned(message, field)).cloned().collect()
+fn referenced_fields(field_keys: &[String], fields: &[TransitionField]) -> Vec<TransitionField> {
+    fields.iter().filter(|field| field_in_errors(field, field_keys))
+        .cloned().collect()
 }
 
 enum FieldControl {
@@ -577,67 +563,29 @@ mod tests {
     }
 
     #[test]
-    fn missing_required_field_is_inferred_from_jira_validation_text() {
-        let impact = TransitionField {
-            id: "customfield_10135".into(), name: "Impact Assessment".into(),
-            schema_type: "string".into(), item_type: String::new(),
-            custom_type: String::new(), required: false, choices: vec![],
-        };
-        let error = "Please fill the impact assessment and fix versions fields.";
-        assert!(field_mentioned(error, &impact));
-        assert!(!field_mentioned("Time budget exceeded", &impact));
-        let worklog = TransitionField {
-            id: "worklog".into(), name: "Log Work".into(),
-            schema_type: "array".into(), item_type: "worklog".into(),
-            custom_type: String::new(), required: false, choices: vec![],
-        };
-        assert!(field_mentioned("Time spent is required", &worklog));
-    }
-
-    #[test]
-    fn distinguishes_fix_versions_from_affects_versions() {
-        let fix_versions = TransitionField {
+    fn jira_error_matching_uses_only_exact_structured_field_keys() {
+        let fix = TransitionField {
             id: "fixVersions".into(), name: "Fix versions".into(),
             schema_type: "array".into(), item_type: "version".into(),
             custom_type: String::new(), required: false, choices: vec![],
         };
-        let affects_versions = TransitionField {
+        let affects = TransitionField {
             id: "versions".into(), name: "Affects versions".into(),
-            ..fix_versions.clone()
+            ..fix.clone()
         };
-        let jira_error = "Jira HTTP 400: Please fill the impact assessment and fix versions fields.";
-        assert!(field_mentioned(jira_error, &fix_versions));
-        assert!(!field_mentioned(jira_error, &affects_versions));
-        assert!(!field_mentioned("Jira HTTP 400: fixVersions: Required", &affects_versions));
-        assert!(field_mentioned("Jira HTTP 400: versions: Required", &affects_versions));
-        assert!(field_mentioned("Affects versions must be set", &affects_versions));
+        let impact = TransitionField {
+            id: "customfield_10135".into(), name: "Impact Assessment".into(),
+            ..fix.clone()
+        };
+        assert!(field_in_errors(&fix, &["fixVersions".into()]));
+        assert!(!field_in_errors(&affects, &["fixVersions".into()]));
+        assert!(field_in_errors(&impact, &["customfield_10135".into()]));
+        assert!(field_in_errors(&impact, &["Impact Assessment".into()]));
+        assert!(!field_in_errors(&impact, &[
+            "Please fill the impact assessment and fix versions fields".into()
+        ]));
+        assert!(referenced_fields(&[], &[fix, affects, impact]).is_empty());
     }
 
-    #[test]
-    fn recognizes_validator_fields_by_id_and_name() {
-        let fields = vec![
-            TransitionField {
-                id: "customfield_142".into(),
-                name: "Business Justification".into(),
-                schema_type: "string".into(),
-                item_type: String::new(),
-                custom_type: String::new(),
-                required: false,
-                choices: Vec::new(),
-            },
-            TransitionField {
-                id: "customfield_143".into(),
-                name: "Priority Rationale".into(),
-                schema_type: "string".into(),
-                item_type: String::new(),
-                custom_type: String::new(),
-                required: false,
-                choices: Vec::new(),
-            },
-        ];
-        assert_eq!(referenced_fields("Field Business Justification is required", &fields).len(), 1);
-        assert_eq!(referenced_fields("customfield_143: Required", &fields)[0].id, "customfield_143");
-        assert!(referenced_fields("Permission denied", &fields).is_empty());
-    }
 }
 
