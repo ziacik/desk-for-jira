@@ -3230,9 +3230,8 @@ mod detail_layout_tests {
 
     // Exercise GTK's real size allocation, including the hidden pane and
     // separator. Pure math tests cannot catch GTK's position adjustments.
-    #[test]
+    #[gtk::test]
     fn inspector_width_survives_hiding_and_reopening() {
-        gtk::init().expect("A display is required for this GUI test");
         let window = gtk::Window::new();
         window.set_default_size(1440, 750);
         let split = gtk::Paned::new(gtk::Orientation::Horizontal);
