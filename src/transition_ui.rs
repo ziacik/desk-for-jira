@@ -1,11 +1,11 @@
-use std::{cell::RefCell, rc::Rc};
+use std::{cell::{Cell, RefCell}, rc::Rc};
 
 use adw::prelude::*;
 use serde_json::{Map, Value};
 
 use crate::jira::{IssueTransition, TransitionField};
 
-pub type TransitionSubmit = Rc<dyn Fn(IssueTransition, Map<String, Value>, Map<String, Value>) -> bool>;
+pub type TransitionSubmit = Rc<dyn Fn(IssueTransition, Map<String, Value>, Map<String, Value>, Option<Value>) -> bool>;
 pub type FormOpened = Rc<dyn Fn(TransitionForm)>;
 
 #[derive(Clone)]
@@ -18,12 +18,20 @@ pub struct TransitionForm {
     fields_box: gtk::Box,
     controls: Rc<RefCell<Vec<FormField>>>,
     extra_fields: Vec<TransitionField>,
+    worklog_recorded: Rc<Cell<bool>>,
     cloud: bool,
 }
 
 impl TransitionForm {
-    pub fn show_error(&self, message: &str) {
-        self.error.set_text(message);
+    pub fn show_error(&self, message: &str, worklog_recorded: bool) {
+        if worklog_recorded {
+            self.worklog_recorded.set(true);
+        }
+        let human_message = message
+            .strip_prefix("Jira HTTP 400: ")
+            .or_else(|| message.strip_prefix("Jira HTTP 422: "))
+            .unwrap_or(message);
+        self.error.set_text(human_message);
         self.error.set_visible(true);
         self.submit.set_sensitive(true);
         self.progress.stop();
@@ -70,6 +78,7 @@ enum FieldControl {
     Paragraph(gtk::TextView),
     Structured(gtk::TextView),
     Boolean(gtk::DropDown),
+    Worklog { duration: gtk::Entry, note: gtk::TextView },
     Single(gtk::DropDown),
     Multiple(Vec<gtk::CheckButton>),
 }
@@ -143,7 +152,7 @@ pub fn activate_transition(
     if transition_needs_form(&transition) {
         open_transition_form(parent, issue_key, cloud, transition, submit, on_open);
     } else {
-        submit(transition, Map::new(), Map::new());
+        submit(transition, Map::new(), Map::new(), None);
     }
 }
 
@@ -163,10 +172,11 @@ pub fn open_transition_form(
         .title(format!("{} · {}", issue_key, transition.name))
         .transient_for(parent)
         .modal(true)
-        .default_width(500)
-        .default_height(if transition.fields.is_empty() && transition.edit_fields.is_empty() { 240 } else { 460 })
+        .default_width(660)
+        .default_height(if transition.fields.len() >= 4 { 720 } else { 560 })
+        .resizable(true)
         .build();
-    let root = gtk::Box::new(gtk::Orientation::Vertical, 15);
+    let root = gtk::Box::new(gtk::Orientation::Vertical, 14);
     root.set_margin_top(20);
     root.set_margin_bottom(20);
     root.set_margin_start(22);
@@ -177,13 +187,7 @@ pub fn open_transition_form(
     title.set_xalign(0.0);
     root.append(&title);
 
-    let explanation = gtk::Label::new(Some(
-        if transition.fields.is_empty() {
-            "Jira did not provide a transition screen. You can add issue fields below if a workflow validator requires them."
-        } else {
-            "Set any fields needed for this transition. Required fields are marked with *."
-        },
-    ));
+    let explanation = gtk::Label::new(Some("Complete the missing details to change the status."));
     explanation.add_css_class("dim-label");
     explanation.set_xalign(0.0);
     explanation.set_wrap(true);
@@ -199,61 +203,12 @@ pub fn open_transition_form(
             update_issue: false,
         });
     }
-    if !transition.fields.is_empty() || !transition.edit_fields.is_empty() {
-        let scroller = gtk::ScrolledWindow::new();
-        scroller.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
-        scroller.set_vexpand(true);
-        scroller.set_child(Some(&form));
-        root.append(&scroller);
-    }
-    if !transition.edit_fields.is_empty() {
-        let hint = gtk::Label::new(Some(
-            "Need to satisfy a workflow validator? Add an issue field. \
-             These values are saved to the issue before changing its status.",
-        ));
-        hint.add_css_class("dim-label");
-        hint.set_wrap(true);
-        hint.set_xalign(0.0);
-        root.append(&hint);
-
-        let picker = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-        let labels = std::iter::once("Choose an issue field…")
-            .chain(transition.edit_fields.iter().map(|field| field.name.as_str()))
-            .collect::<Vec<_>>();
-        let selection = gtk::DropDown::from_strings(&labels);
-        selection.set_hexpand(true);
-        picker.append(&selection);
-        let add_field = gtk::Button::with_label("Add");
-        add_field.add_css_class("flat");
-        picker.append(&add_field);
-        root.append(&picker);
-
-        let extra_fields = transition.edit_fields.clone();
-        let controls_for_add = controls.clone();
-        let form_for_add = form.clone();
-        add_field.connect_clicked(move |_| {
-            let selected = selection.selected();
-            let Some(mut field) = selected.checked_sub(1)
-                .and_then(|index| extra_fields.get(index as usize)).cloned()
-            else {
-                return;
-            };
-            if controls_for_add.borrow().iter()
-                .any(|existing| existing.field.id == field.id)
-            {
-                return;
-            }
-            // Adding a field manually is optional until the server asks for it.
-            field.required = false;
-            let control = append_field_row(&form_for_add, &field, cloud);
-            controls_for_add.borrow_mut().push(FormField {
-                field,
-                control,
-                update_issue: true,
-            });
-        });
-    }
-
+    let scroller = gtk::ScrolledWindow::new();
+    scroller.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
+    scroller.set_vexpand(true);
+    scroller.set_min_content_height(180);
+    scroller.set_child(Some(&form));
+    root.append(&scroller);
     let error = gtk::Label::new(None);
     error.add_css_class("error");
     error.set_wrap(true);
@@ -281,14 +236,21 @@ pub fn open_transition_form(
     let error_apply = error.clone();
     let controls_for_apply = controls.clone();
     let edit_fields_for_form = transition.edit_fields.clone();
+    let worklog_recorded = Rc::new(Cell::new(false));
+    let recorded_for_apply = worklog_recorded.clone();
     apply.connect_clicked(move |_| {
         error_apply.set_visible(false);
         let mut values = Map::new();
         let mut issue_edits = Map::new();
+        let mut worklog = None;
         for item in controls_for_apply.borrow().iter() {
             match control_value(&item.field, &item.control, cloud) {
                 Ok(Some(value)) => {
-                    if item.update_issue {
+                    if item.field.is_worklog() {
+                        if !recorded_for_apply.get() {
+                            worklog = Some(value);
+                        }
+                    } else if item.update_issue {
                         issue_edits.insert(item.field.id.clone(), value);
                     } else {
                         values.insert(item.field.id.clone(), value);
@@ -302,7 +264,7 @@ pub fn open_transition_form(
                 }
             }
         }
-        if submit(transition.clone(), values, issue_edits) {
+        if submit(transition.clone(), values, issue_edits, worklog) {
             apply_button.set_sensitive(false);
             progress_apply.set_visible(true);
             progress_apply.start();
@@ -318,6 +280,7 @@ pub fn open_transition_form(
         fields_box: form,
         controls,
         extra_fields: edit_fields_for_form,
+        worklog_recorded,
         cloud,
     });
     dialog.present();
@@ -330,7 +293,20 @@ fn append_field_row(form: &gtk::Box, field: &TransitionField, cloud: bool) -> Fi
     )));
     name.set_xalign(0.0);
     row.append(&name);
-    let control = if !field.choices.is_empty() && field.schema_type == "array" {
+    let control = if field.is_worklog() {
+        let label = gtk::Label::new(Some("Time spent"));
+        label.set_xalign(0.0);
+        row.append(&label);
+        let duration = gtk::Entry::new();
+        duration.set_placeholder_text(Some("e.g. 1h 30m"));
+        row.append(&duration);
+        let label = gtk::Label::new(Some("Description (optional)"));
+        label.set_xalign(0.0);
+        row.append(&label);
+        let note = text_area("", false);
+        row.append(&text_area_frame(&note));
+        FieldControl::Worklog { duration, note }
+    } else if !field.choices.is_empty() && field.schema_type == "array" {
         let mut checks = Vec::new();
         for choice in &field.choices {
             let check = gtk::CheckButton::with_label(&choice.label);
@@ -422,6 +398,37 @@ fn control_value(
             let text = buffer.text(&buffer.start_iter(), &buffer.end_iter(), false);
             text_value_or_none(field, &text, cloud)
         }
+        FieldControl::Worklog { duration, note } => {
+            let spent = duration.text();
+            let spent = spent.trim();
+            if spent.is_empty() {
+                return if field.required {
+                    Err("Enter the time spent (e.g. 1h 30m)".to_owned())
+                } else {
+                    Ok(None)
+                };
+            }
+            if !valid_worklog_duration(spent) {
+                return Err("Enter time like 45m, 2h or 1h 30m".to_owned());
+            }
+            let buffer = note.buffer();
+            let message = buffer.text(&buffer.start_iter(), &buffer.end_iter(), false);
+            let mut payload = serde_json::json!({"timeSpent": spent});
+            if !message.trim().is_empty() {
+                payload["comment"] = if cloud {
+                    serde_json::json!({
+                        "type": "doc", "version": 1,
+                        "content": [{
+                            "type": "paragraph",
+                            "content": [{"type": "text", "text": message.trim()}]
+                        }]
+                    })
+                } else {
+                    Value::String(message.trim().to_owned())
+                };
+            }
+            Ok(Some(payload))
+        }
         FieldControl::Boolean(select) => match select.selected() {
             0 if field.required => Err(format!("{} is required", field.name)),
             0 => Ok(None),
@@ -460,6 +467,17 @@ fn control_value(
     }
 }
 
+fn valid_worklog_duration(value: &str) -> bool {
+    let mut parts = value.split_whitespace();
+    let valid_part = |part: &str| {
+        let (digits, unit) = part.split_at(part.len().saturating_sub(1));
+        !digits.is_empty() && digits.bytes().all(|digit| digit.is_ascii_digit())
+            && digits.parse::<u32>().is_ok_and(|amount| amount > 0)
+            && matches!(unit, "w" | "d" | "h" | "m")
+    };
+    parts.next().is_some_and(valid_part) && parts.all(valid_part)
+}
+
 fn text_value_or_none(
     field: &TransitionField,
     value: &str,
@@ -494,6 +512,16 @@ mod tests {
         assert!(!transition_needs_form(&with_optional));
         let with_required = IssueTransition { fields: vec![required], ..transition };
         assert!(transition_needs_form(&with_required));
+    }
+
+    #[test]
+    fn worklog_duration_has_normal_human_input() {
+        for text in ["45m", "2h", "1h 30m", "1d 2h 5m"] {
+            assert!(valid_worklog_duration(text), "{text}");
+        }
+        for text in ["", "{}", "0m", "30", "garbage"] {
+            assert!(!valid_worklog_duration(text), "{text}");
+        }
     }
 
     #[test]
