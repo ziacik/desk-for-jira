@@ -81,7 +81,8 @@ struct FormField {
 
 fn field_mentioned(message: &str, field: &TransitionField) -> bool {
     let error = message.to_lowercase();
-    error.contains(&field.id.to_lowercase())
+    (field.is_worklog() && (error.contains("time spent") || error.contains("log work")))
+        || error.contains(&field.id.to_lowercase())
         || (field.name.chars().count() >= 4
             && error.contains(&field.name.to_lowercase()))
 }
@@ -570,6 +571,12 @@ mod tests {
         let error = "Please fill the impact assessment and fix versions fields.";
         assert!(field_mentioned(error, &impact));
         assert!(!field_mentioned("Time budget exceeded", &impact));
+        let worklog = TransitionField {
+            id: "worklog".into(), name: "Log Work".into(),
+            schema_type: "array".into(), item_type: "worklog".into(),
+            custom_type: String::new(), required: false, choices: vec![],
+        };
+        assert!(field_mentioned("Time spent is required", &worklog));
     }
 
     #[test]
