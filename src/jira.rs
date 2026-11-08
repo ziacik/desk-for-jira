@@ -461,6 +461,28 @@ impl JiraClient {
         Ok(parse_issues(&data))
     }
 
+    /// Fetch a single issue by its exact key, independently of board filters and
+    /// search indexing. A 404 is returned as an error, not an empty candidate.
+    pub fn issue_by_key(&self, key: &str) -> Result<Issue> {
+        let Some((project, number)) = key.split_once('-') else {
+            bail!("Invalid Jira issue key");
+        };
+        ensure!(
+            !project.is_empty()
+                && project.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+                && !number.is_empty()
+                && number.bytes().all(|byte| byte.is_ascii_digit()),
+            "Invalid Jira issue key"
+        );
+        let version = if self.account.mode == AuthMode::Cloud { "3" } else { "2" };
+        let path = format!("/rest/api/{version}/issue/{key}");
+        let data = self.read_json(
+            self.http.get(self.url(&path))
+                .query(&[("fields", FIELDS.join(","))])
+        )?;
+        parse_issue(&data, None).context("Jira returned an invalid issue response")
+    }
+
     fn search_issues_with_epic_link(&self, jql: &str, epic_link_field: Option<&str>) -> Result<Vec<Issue>> {
         let mut fields = FIELDS.to_vec();
         if let Some(field) = epic_link_field {
