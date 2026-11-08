@@ -1,11 +1,11 @@
-use std::rc::Rc;
+use std::{cell::RefCell, rc::Rc};
 
 use adw::prelude::*;
 use serde_json::{Map, Value};
 
 use crate::jira::{IssueTransition, TransitionField};
 
-pub type TransitionSubmit = Rc<dyn Fn(IssueTransition, Map<String, Value>) -> bool>;
+pub type TransitionSubmit = Rc<dyn Fn(IssueTransition, Map<String, Value>, Map<String, Value>) -> bool>;
 pub type FormOpened = Rc<dyn Fn(TransitionForm)>;
 
 #[derive(Clone)]
@@ -15,6 +15,10 @@ pub struct TransitionForm {
     pub error: gtk::Label,
     pub submit: gtk::Button,
     pub progress: gtk::Spinner,
+    fields_box: gtk::Box,
+    controls: Rc<RefCell<Vec<FormField>>>,
+    extra_fields: Vec<TransitionField>,
+    cloud: bool,
 }
 
 impl TransitionForm {
@@ -24,11 +28,41 @@ impl TransitionForm {
         self.submit.set_sensitive(true);
         self.progress.stop();
         self.progress.set_visible(false);
+
+        // Validators sometimes report a field that is not on the transition
+        // screen. Offer the matching issue-editable field in the same dialog.
+        for mut field in referenced_fields(message, &self.extra_fields) {
+            if self.controls.borrow().iter().any(|existing| existing.field.id == field.id) {
+                continue;
+            }
+            field.required = true;
+            let control = append_field_row(&self.fields_box, &field, self.cloud);
+            self.controls.borrow_mut().push(FormField {
+                field,
+                control,
+                update_issue: true,
+            });
+        }
     }
 
     pub fn close(&self) {
         self.window.close();
     }
+}
+
+struct FormField {
+    field: TransitionField,
+    control: FieldControl,
+    update_issue: bool,
+}
+
+fn referenced_fields(message: &str, fields: &[TransitionField]) -> Vec<TransitionField> {
+    let error = message.to_lowercase();
+    fields.iter().filter(|field| {
+        error.contains(&field.id.to_lowercase())
+            || (field.name.chars().count() >= 4
+                && error.contains(&field.name.to_lowercase()))
+    }).cloned().collect()
 }
 
 enum FieldControl {
@@ -109,7 +143,7 @@ fn open_transition_form(
         .transient_for(parent)
         .modal(true)
         .default_width(500)
-        .default_height(if transition.fields.is_empty() { 240 } else { 420 })
+        .default_height(if transition.fields.is_empty() && transition.edit_fields.is_empty() { 240 } else { 460 })
         .build();
     let root = gtk::Box::new(gtk::Orientation::Vertical, 15);
     root.set_margin_top(20);
@@ -124,7 +158,7 @@ fn open_transition_form(
 
     let explanation = gtk::Label::new(Some(
         if transition.fields.is_empty() {
-            "Jira did not provide editable fields for this transition. Confirm the status change below."
+            "Jira did not provide a transition screen. You can add issue fields below if a workflow validator requires them."
         } else {
             "Set any fields needed for this transition. Required fields are marked with *."
         },
@@ -135,77 +169,68 @@ fn open_transition_form(
     root.append(&explanation);
 
     let form = gtk::Box::new(gtk::Orientation::Vertical, 13);
-    let mut controls = Vec::new();
+    let controls = Rc::new(RefCell::new(Vec::<FormField>::new()));
     for field in &transition.fields {
-        let row = gtk::Box::new(gtk::Orientation::Vertical, 5);
-        let name = gtk::Label::new(Some(&format!(
-            "{}{}", field.name, if field.required { " *" } else { "" },
-        )));
-        name.set_xalign(0.0);
-        row.append(&name);
-        let control = if !field.choices.is_empty() && field.schema_type == "array" {
-            let mut checks = Vec::new();
-            for choice in &field.choices {
-                let check = gtk::CheckButton::with_label(&choice.label);
-                row.append(&check);
-                checks.push(check);
-            }
-            FieldControl::Multiple(checks)
-        } else if !field.choices.is_empty() {
-            let labels = std::iter::once("Select a value…")
-                .chain(field.choices.iter().map(|choice| choice.label.as_str()))
-                .collect::<Vec<_>>();
-            let select = gtk::DropDown::from_strings(&labels);
-            select.set_hexpand(true);
-            row.append(&select);
-            FieldControl::Single(select)
-        } else if field.schema_type == "boolean" {
-            let select = gtk::DropDown::from_strings(&["No change", "No", "Yes"]);
-            if field.required {
-                select.set_selected(0);
-            }
-            row.append(&select);
-            FieldControl::Boolean(select)
-        } else if field.is_multiline() {
-            let input = text_area("", false);
-            row.append(&text_area_frame(&input));
-            FieldControl::Paragraph(input)
-        } else if field.uses_structured_input() {
-            let hint = gtk::Label::new(Some("Advanced Jira field · enter a JSON value"));
-            hint.add_css_class("dim-label");
-            hint.set_xalign(0.0);
-            row.append(&hint);
-            let input = text_area("", true);
-            row.append(&text_area_frame(&input));
-            FieldControl::Structured(input)
-        } else {
-            let input = gtk::Entry::new();
-            let placeholder = match field.schema_type.as_str() {
-                "date" => "YYYY-MM-DD",
-                "datetime" => "2026-11-06T15:30:00.000+0100",
-                "number" => "Enter a number",
-                "user" if cloud => "Atlassian account ID",
-                "user" => "Jira username",
-                "option" | "resolution" | "priority" | "version"
-                    | "component" | "issuetype" | "project" => "Jira field value ID",
-                "array" if field.item_type == "string" => "Comma-separated values",
-                "array" => "Comma-separated Jira value IDs",
-                _ => "Enter a value",
-            };
-            input.set_placeholder_text(Some(placeholder));
-            input.set_hexpand(true);
-            row.append(&input);
-            FieldControl::Text(input)
-        };
-        controls.push((field.clone(), control));
-        form.append(&row);
+        let control = append_field_row(&form, field, cloud);
+        controls.borrow_mut().push(FormField {
+            field: field.clone(),
+            control,
+            update_issue: false,
+        });
     }
-    if !transition.fields.is_empty() {
+    if !transition.fields.is_empty() || !transition.edit_fields.is_empty() {
         let scroller = gtk::ScrolledWindow::new();
         scroller.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
         scroller.set_vexpand(true);
         scroller.set_child(Some(&form));
         root.append(&scroller);
+    }
+    if !transition.edit_fields.is_empty() {
+        let hint = gtk::Label::new(Some(
+            "Need to satisfy a workflow validator? Add an issue field. \
+             These values are saved to the issue before changing its status.",
+        ));
+        hint.add_css_class("dim-label");
+        hint.set_wrap(true);
+        hint.set_xalign(0.0);
+        root.append(&hint);
+
+        let picker = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        let labels = std::iter::once("Choose an issue field…")
+            .chain(transition.edit_fields.iter().map(|field| field.name.as_str()))
+            .collect::<Vec<_>>();
+        let selection = gtk::DropDown::from_strings(&labels);
+        selection.set_hexpand(true);
+        picker.append(&selection);
+        let add_field = gtk::Button::with_label("Add");
+        add_field.add_css_class("flat");
+        picker.append(&add_field);
+        root.append(&picker);
+
+        let extra_fields = transition.edit_fields.clone();
+        let controls_for_add = controls.clone();
+        let form_for_add = form.clone();
+        add_field.connect_clicked(move |_| {
+            let selected = selection.selected();
+            let Some(mut field) = selected.checked_sub(1)
+                .and_then(|index| extra_fields.get(index as usize)).cloned()
+            else {
+                return;
+            };
+            if controls_for_add.borrow().iter()
+                .any(|existing| existing.field.id == field.id)
+            {
+                return;
+            }
+            // Adding a field manually is optional until the server asks for it.
+            field.required = false;
+            let control = append_field_row(&form_for_add, &field, cloud);
+            controls_for_add.borrow_mut().push(FormField {
+                field,
+                control,
+                update_issue: true,
+            });
+        });
     }
 
     let error = gtk::Label::new(None);
@@ -236,9 +261,16 @@ fn open_transition_form(
     apply.connect_clicked(move |_| {
         error_apply.set_visible(false);
         let mut values = Map::new();
-        for (field, control) in &controls {
-            match control_value(field, control, cloud) {
-                Ok(Some(value)) => { values.insert(field.id.clone(), value); }
+        let mut issue_edits = Map::new();
+        for item in controls.borrow().iter() {
+            match control_value(&item.field, &item.control, cloud) {
+                Ok(Some(value)) => {
+                    if item.update_issue {
+                        issue_edits.insert(item.field.id.clone(), value);
+                    } else {
+                        values.insert(item.field.id.clone(), value);
+                    }
+                }
                 Ok(None) => {}
                 Err(message) => {
                     error_apply.set_text(&message);
@@ -247,7 +279,7 @@ fn open_transition_form(
                 }
             }
         }
-        if submit(transition.clone(), values) {
+        if submit(transition.clone(), values, issue_edits) {
             apply_button.set_sensitive(false);
             progress_apply.set_visible(true);
             progress_apply.start();
@@ -260,8 +292,106 @@ fn open_transition_form(
         error,
         submit: apply,
         progress,
+        fields_box: form,
+        controls,
+        extra_fields: transition.edit_fields.clone(),
+        cloud,
     });
     dialog.present();
+}
+
+fn append_field_row(form: &gtk::Box, field: &TransitionField, cloud: bool) -> FieldControl {
+    let row = gtk::Box::new(gtk::Orientation::Vertical, 5);
+    let name = gtk::Label::new(Some(&format!(
+        "{}{}", field.name, if field.required { " *" } else { "" },
+    )));
+    name.set_xalign(0.0);
+    row.append(&name);
+    let control = if !field.choices.is_empty() && field.schema_type == "array" {
+        let mut checks = Vec::new();
+        for choice in &field.choices {
+            let check = gtk::CheckButton::with_label(&choice.label);
+            row.append(&check);
+            checks.push(check);
+        }
+        FieldControl::Multiple(checks)
+    } else if !field.choices.is_empty() {
+        let labels = std::iter::once("Select a value…")
+            .chain(field.choices.iter().map(|choice| choice.label.as_str()))
+            .collect::<Vec<_>>();
+        let select = gtk::DropDown::from_strings(&labels);
+        select.set_hexpand(true);
+        row.append(&select);
+        FieldControl::Single(select)
+    } else if field.schema_type == "boolean" {
+        let select = gtk::DropDown::from_strings(&["No change", "No", "Yes"]);
+        row.append(&select);
+        FieldControl::Boolean(select)
+    } else if field.is_multiline() {
+        let input = text_area("", false);
+        row.append(&text_area_frame(&input));
+        FieldControl::Paragraph(input)
+    } else if field.uses_structured_input() {
+        let hint = gtk::Label::new(Some("Advanced Jira field · enter a JSON value"));
+        hint.add_css_class("dim-label");
+        hint.set_xalign(0.0);
+        row.append(&hint);
+        let input = text_area("", true);
+        row.append(&text_area_frame(&input));
+        FieldControl::Structured(input)
+    } else {
+        let input = gtk::Entry::new();
+        let placeholder = match field.schema_type.as_str() {
+            "date" => "YYYY-MM-DD",
+            "datetime" => "2026-11-06T15:30:00.000+0100",
+            "number" => "Enter a number",
+            "user" if cloud => "Atlassian account ID",
+            "user" => "Jira username",
+            "option" | "resolution" | "priority" | "version"
+                | "component" | "issuetype" | "project" => "Jira field value ID",
+            "array" if field.item_type == "string" => "Comma-separated values",
+            "array" => "Comma-separated Jira value IDs",
+            _ => "Enter a value",
+        };
+        input.set_placeholder_text(Some(placeholder));
+        input.set_hexpand(true);
+        row.append(&input);
+        FieldControl::Text(input)
+    };
+    form.append(&row);
+    control
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn recognizes_validator_fields_by_id_and_name() {
+        let fields = vec![
+            TransitionField {
+                id: "customfield_142".into(),
+                name: "Business Justification".into(),
+                schema_type: "string".into(),
+                item_type: String::new(),
+                custom_type: String::new(),
+                required: false,
+                choices: Vec::new(),
+            },
+            TransitionField {
+                id: "customfield_143".into(),
+                name: "Priority Rationale".into(),
+                schema_type: "string".into(),
+                item_type: String::new(),
+                custom_type: String::new(),
+                required: false,
+                choices: Vec::new(),
+            },
+        ];
+        assert_eq!(referenced_fields("Field Business Justification is required", &fields).len(), 1);
+        assert_eq!(referenced_fields("customfield_143: Required", &fields)[0].id, "customfield_143");
+        assert!(referenced_fields("Permission denied", &fields).is_empty());
+    }
 }
 
 fn text_area(initial: &str, monospace: bool) -> gtk::TextView {
