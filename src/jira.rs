@@ -970,9 +970,31 @@ fn field_has_value(value: &Value) -> bool {
         Value::Null => false,
         Value::String(text) => !text.trim().is_empty(),
         Value::Array(values) => !values.is_empty(),
+        Value::Object(values) if values.get("type").and_then(Value::as_str) == Some("doc") => {
+            values.get("content").and_then(Value::as_array)
+                .is_some_and(|content| content.iter().any(adf_node_has_value))
+        }
         Value::Object(values) => !values.is_empty(),
         _ => true,
     }
+}
+
+fn adf_node_has_value(node: &Value) -> bool {
+    if node.get("text").and_then(Value::as_str)
+        .is_some_and(|text| !text.trim().is_empty())
+    {
+        return true;
+    }
+    // ADF nodes such as images, mentions and cards are content even if
+    // they do not contain a text leaf.
+    if matches!(
+        node.get("type").and_then(Value::as_str),
+        Some("media" | "mediaInline" | "mention" | "emoji" | "inlineCard" | "blockCard")
+    ) {
+        return true;
+    }
+    node.get("content").and_then(Value::as_array)
+        .is_some_and(|content| content.iter().any(adf_node_has_value))
 }
 
 fn remove_populated_fields(
@@ -1380,6 +1402,23 @@ mod transition_tests {
         assert!(!is_legacy_epic_link(&json!({
             "name": "Epic Link",
             "schema": {"type":"string"}
+        })));
+    }
+
+    #[test]
+    fn empty_adf_document_does_not_count_as_a_filled_required_field() {
+        assert!(!field_has_value(&json!({"type":"doc","version":1,"content":[]})));
+        assert!(!field_has_value(&json!({
+            "type":"doc", "version":1,
+            "content":[{"type":"paragraph","content":[]}]
+        })));
+        assert!(field_has_value(&json!({
+            "type":"doc", "version":1,
+            "content":[{"type":"paragraph","content":[{"type":"text","text":"Impact"}]}]
+        })));
+        assert!(field_has_value(&json!({
+            "type":"doc", "version":1,
+            "content":[{"type":"mediaSingle","content":[{"type":"media","attrs":{"id":"123"}}]}]
         })));
     }
 
