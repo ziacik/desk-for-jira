@@ -297,6 +297,7 @@ pub(crate) fn open(
     });
 
     let keys = gtk::EventControllerKey::new();
+    keys.set_propagation_phase(gtk::PropagationPhase::Capture);
     keys.connect_key_pressed({
         let list = list.clone();
         let window = window.downgrade();
