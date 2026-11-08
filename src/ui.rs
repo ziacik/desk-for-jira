@@ -13,7 +13,7 @@ use gtk::glib;
 use crate::{
     issue_detail,
     command_palette::{self, PaletteCommand, PaletteItem},
-    jira::{AuthMode, Credentials, Issue, IssueTransition, JiraClient, JiraTransitionError, Project, ProjectStatus},
+    jira::{Attachment, AuthMode, Credentials, Issue, IssueComment, IssueTransition, JiraClient, JiraTransitionError, Project, ProjectStatus},
     transition_ui,
     preferences::{self, BoardSettings, IssueScope, UiLayout, ViewSettings},
     secrets,
@@ -47,6 +47,8 @@ struct Ui {
     pinned_scroll: gtk::ScrolledWindow,
     pinned_count: gtk::Label,
     detail_box: gtk::Box,
+    comments_box: Rc<RefCell<gtk::Box>>,
+    comments_request: Rc<Cell<u64>>,
     detail_actions: gtk::Box,
     detail_request: Rc<Cell<u64>>,
     transition_busy: Rc<Cell<bool>>,
@@ -164,6 +166,7 @@ enum Event {
     BoardLoaded(u64, BoardKey, Result<BoardData, String>),
     RememberedIssueLoaded(u64, String, Result<Vec<Issue>, String>),
     ImageLoaded(u64, String, String, Result<Vec<u8>, String>),
+    CommentsLoaded(u64, u64, String, Result<Vec<IssueComment>, String>),
     TransitionsLoaded(u64, u64, String, Result<Vec<IssueTransition>, String>),
     TransitionFinished(u64, String, IssueTransition, Result<(), TransitionFailure>),
     Disconnected(u64, Result<(), String>),
@@ -621,7 +624,9 @@ fn build_ui(app: &adw::Application) {
         palette_window: Rc::new(RefCell::new(None)),
         search, center_title,
         board_box, pinned_section, pinned_box, pinned_scroll, pinned_count,
-        detail_box, detail_actions, detail_panel, detail_heading, open_in_jira, copy_branch, pin_detail, inner_split,
+        detail_box, comments_box: Rc::new(RefCell::new(gtk::Box::new(gtk::Orientation::Vertical, 10))),
+        comments_request: Rc::new(Cell::new(0)),
+        detail_actions, detail_panel, detail_heading, open_in_jira, copy_branch, pin_detail, inner_split,
         state: state.clone(),
         detail_request: Rc::new(Cell::new(0)),
         transition_busy: Rc::new(Cell::new(false)),
@@ -1148,6 +1153,47 @@ fn handle_event(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>, eve
                 Err(error) => eprintln!("Could not restore {key}: {error}"),
             }
         }
+        Event::CommentsLoaded(id, request, key, result) => {
+            if state.borrow().generation != id
+                || ui.comments_request.get() != request
+                || ui.selected_issue.borrow().as_deref() != Some(key.as_str())
+            {
+                return;
+            }
+            match result {
+                Ok(comments) => {
+                    let attachments = {
+                        let s = state.borrow();
+                        s.issues.iter().chain(s.pinned_issues.iter())
+                            .chain(s.recent_issues.iter())
+                            .find(|issue| issue.key == key)
+                            .map(|issue| issue.attachments.clone())
+                            .unwrap_or_default()
+                    };
+                    let slots = issue_detail::render_comments(
+                        &ui.comments_box.borrow(), &comments, &attachments,
+                    );
+                    let image_ids: HashSet<String> = slots.keys().cloned().collect();
+                    {
+                        let mut all_slots = ui.image_slots.borrow_mut();
+                        for (attachment_id, targets) in slots {
+                            all_slots.entry(attachment_id).or_default().extend(targets);
+                        }
+                    }
+                    if !image_ids.is_empty()
+                        && let Some(account) = state.borrow().account.clone()
+                    {
+                        let images = attachments.into_iter()
+                            .filter(|attachment| image_ids.contains(&attachment.id))
+                            .collect();
+                        load_attachment_images(&ui.events, account, &key, id, images);
+                    }
+                }
+                Err(error) => {
+                    issue_detail::show_comments_error(&ui.comments_box.borrow(), &error);
+                }
+            }
+        }
         Event::TransitionsLoaded(id, request, key, result) => {
             if state.borrow().generation != id
                 || ui.detail_request.get() != request
@@ -1212,13 +1258,14 @@ fn handle_event(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>, eve
                         let account = state.borrow().account.clone();
                         if let Some(issue) = issue {
                             let base_url = account.as_ref().map(|a| a.base_url.as_str()).unwrap_or("");
-                            *ui.image_slots.borrow_mut() =
-                                issue_detail::render(&ui.detail_box, &issue, base_url);
+                            render_issue_detail(ui, &issue, base_url);
                             if let Some(account) = account.clone() {
                                 load_issue_images(&ui.events, account, &issue, id);
                             }
                         }
-                        request_transitions(&ui.detail_actions, &ui.detail_request, &ui.events, account, id, &key);
+                        request_transitions(&ui.detail_actions, &ui.detail_request, &ui.events,
+                            account.clone(), id, &key);
+                        request_issue_comments(ui, account, id, &key);
                     }
                     ui.toast.add_toast(adw::Toast::new(&format!("Moved to {}", transition.to_name)));
                 }
@@ -2949,7 +2996,7 @@ fn open_issue(ui: &Ui, issue: &Issue, source_button: Option<&gtk::Button>) {
     ui.pin_detail.set_visible(true);
     style_pin_button(&ui.pin_detail,
         ui.state.borrow().settings.pinned_issues.iter().any(|key| key == &issue.key));
-    *ui.image_slots.borrow_mut() = issue_detail::render(&ui.detail_box, issue, base_url);
+    render_issue_detail(ui, issue, base_url);
     if !ui.detail_panel.is_visible() {
         // Restore after GTK has allocated the newly visible pane. Until then,
         // position notifications must not overwrite the saved user preference.
@@ -2966,9 +3013,34 @@ fn open_issue(ui: &Ui, issue: &Issue, source_button: Option<&gtk::Button>) {
     }
     request_transitions(&ui.detail_actions, &ui.detail_request, &ui.events,
         account.clone(), generation, &issue.key);
+    request_issue_comments(ui, account.clone(), generation, &issue.key);
     if let Some(account) = account {
         load_issue_images(&ui.events, account, issue, generation);
     }
+}
+
+fn render_issue_detail(ui: &Ui, issue: &Issue, base_url: &str) {
+    let detail = issue_detail::render(&ui.detail_box, issue, base_url);
+    *ui.image_slots.borrow_mut() = detail.images;
+    *ui.comments_box.borrow_mut() = detail.comments;
+}
+
+fn request_issue_comments(ui: &Ui, account: Option<Credentials>, generation: u64, key: &str) {
+    let request = ui.comments_request.get().wrapping_add(1);
+    ui.comments_request.set(request);
+    issue_detail::show_comments_loading(&ui.comments_box.borrow());
+    let Some(account) = account else {
+        issue_detail::show_comments_error(&ui.comments_box.borrow(), "No Jira account");
+        return;
+    };
+    let events = ui.events.clone();
+    let key = key.to_owned();
+    thread::spawn(move || {
+        let result = JiraClient::new(account)
+            .and_then(|client| client.issue_comments(&key))
+            .map_err(|error| error.to_string());
+        let _ = events.send(Event::CommentsLoaded(generation, request, key, result));
+    });
 }
 
 /// Shared selection behavior for board cards and pinned issues.
@@ -3076,12 +3148,22 @@ fn request_transitions(
 }
 
 fn load_issue_images(events: &Sender<Event>, account: Credentials, issue: &Issue, generation: u64) {
-    let attachments: Vec<_> = issue.attachments.iter()
+    load_attachment_images(events, account, &issue.key, generation, issue.attachments.clone());
+}
+
+fn load_attachment_images(
+    events: &Sender<Event>,
+    account: Credentials,
+    key: &str,
+    generation: u64,
+    attachments: Vec<Attachment>,
+) {
+    let attachments: Vec<_> = attachments.into_iter()
         .filter(|attachment| attachment.is_image() && !attachment.content_url.is_empty())
-        .cloned().collect();
+        .collect();
     if attachments.is_empty() { return; }
     let events = events.clone();
-    let key = issue.key.clone();
+    let key = key.to_owned();
     thread::spawn(move || {
         let Ok(client) = JiraClient::new(account) else { return };
         for attachment in attachments {

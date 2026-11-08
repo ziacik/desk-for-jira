@@ -4,9 +4,14 @@ use adw::prelude::*;
 use gtk::glib;
 use serde_json::Value;
 
-use crate::jira::{Attachment, Issue};
+use crate::jira::{Attachment, Issue, IssueComment};
 
 pub type ImageSlots = HashMap<String, Vec<(gtk::Box, String)>>;
+
+pub struct DetailRender {
+    pub images: ImageSlots,
+    pub comments: gtk::Box,
+}
 
 /// Both header actions use exactly the same symbolic drawing system:
 /// size, stroke, color and alignment follow the current GTK theme.
@@ -81,7 +86,7 @@ pub fn render(
     container: &gtk::Box,
     issue: &Issue,
     base_url: &str,
-) -> ImageSlots {
+) -> DetailRender {
     while let Some(child) = container.first_child() {
         container.remove(&child);
     }
@@ -207,7 +212,89 @@ pub fn render(
         container.append(&attachments);
     }
 
+    let comments_section = gtk::Box::new(gtk::Orientation::Vertical, 12);
+    comments_section.add_css_class("detail-section");
+    let comments_title = gtk::Label::new(Some("Comments"));
+    comments_title.add_css_class("detail-section-title");
+    comments_title.set_xalign(0.0);
+    comments_section.append(&comments_title);
+    let comments = gtk::Box::new(gtk::Orientation::Vertical, 10);
+    show_comments_loading(&comments);
+    comments_section.append(&comments);
+    container.append(&comments_section);
+
+    DetailRender { images: slots, comments }
+}
+
+pub fn show_comments_loading(container: &gtk::Box) {
+    clear_comments(container);
+    add_text(container, "Loading comments…", "detail-empty");
+}
+
+pub fn show_comments_error(container: &gtk::Box, error: &str) {
+    clear_comments(container);
+    add_text(container, &format!("Could not load comments: {error}"), "detail-empty");
+}
+
+pub fn render_comments(
+    container: &gtk::Box,
+    comments: &[IssueComment],
+    attachments: &[Attachment],
+) -> ImageSlots {
+    clear_comments(container);
+    let mut slots = ImageSlots::new();
+    if comments.is_empty() {
+        add_text(container, "No comments yet.", "detail-empty");
+        return slots;
+    }
+    let mut used_images = HashSet::new();
+    for comment in comments {
+        let card = gtk::Box::new(gtk::Orientation::Vertical, 9);
+        card.add_css_class("issue-comment");
+        let header = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        let author = gtk::Label::new(Some(&comment.author));
+        author.add_css_class("issue-comment-author");
+        author.set_xalign(0.0);
+        author.set_hexpand(true);
+        author.set_ellipsize(gtk::pango::EllipsizeMode::End);
+        header.append(&author);
+        let date = gtk::Label::new(Some(&format_comment_time(&comment.created)));
+        date.add_css_class("issue-comment-date");
+        date.set_xalign(1.0);
+        header.append(&date);
+        card.append(&header);
+
+        let body = gtk::Box::new(gtk::Orientation::Vertical, 8);
+        body.add_css_class("detail-body");
+        if let Some(nodes) = comment.body.get("content").and_then(Value::as_array) {
+            for node in nodes {
+                render_block(&body, node, attachments, &mut used_images, &mut slots);
+            }
+        } else if let Some(text) = comment.body.as_str() {
+            render_legacy(&body, text, attachments, &mut used_images, &mut slots);
+        }
+        if body.first_child().is_none() {
+            add_text(&body, "Empty comment", "detail-empty");
+        }
+        card.append(&body);
+        container.append(&card);
+    }
     slots
+}
+
+fn clear_comments(container: &gtk::Box) {
+    while let Some(child) = container.first_child() {
+        container.remove(&child);
+    }
+}
+
+fn format_comment_time(created: &str) -> String {
+    if let Some((day, rest)) = created.split_once('T')
+        && let Some(time) = rest.get(..5)
+    {
+        return format!("{day} · {time}");
+    }
+    created.to_owned()
 }
 
 pub(crate) fn suggested_branch_name(key: &str, summary: &str) -> String {
@@ -633,6 +720,13 @@ mod tests {
             mime_type: "image/png".into(),
             content_url: format!("https://jira.example.com/attachment/{id}"),
         }
+    }
+
+    #[test]
+    fn displays_jira_comment_time_without_milliseconds() {
+        assert_eq!(format_comment_time("2026-11-08T13:20:01.000+0100"),
+            "2026-11-08 · 13:20");
+        assert_eq!(format_comment_time("unknown"), "unknown");
     }
 
     #[test]
