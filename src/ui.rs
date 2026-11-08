@@ -50,6 +50,8 @@ struct Ui {
     detail_box: gtk::Box,
     comments_box: Rc<RefCell<gtk::Box>>,
     comments_request: Rc<Cell<u64>>,
+    children_box: Rc<RefCell<gtk::Box>>,
+    children_request: Rc<Cell<u64>>,
     detail_actions: gtk::Box,
     detail_request: Rc<Cell<u64>>,
     transition_busy: Rc<Cell<bool>>,
@@ -168,10 +170,11 @@ enum Event {
     Loaded(u64, Credentials, Result<Loaded, String>),
     BoardLoaded(u64, BoardKey, Result<BoardData, String>),
     RememberedIssueLoaded(u64, String, Result<Vec<Issue>, String>),
-    PaletteIssueLoaded(u64, String, Result<Issue, String>),
+    PaletteIssueLoaded(u64, String, Box<Result<Issue, String>>),
     OpenLinkedIssue(String),
     ImageLoaded(u64, String, String, Result<Vec<u8>, String>),
     CommentsLoaded(u64, u64, String, Result<Vec<IssueComment>, String>),
+    ChildrenLoaded(u64, u64, String, Result<Vec<Issue>, String>),
     TransitionsLoaded(u64, u64, String, Result<Vec<IssueTransition>, String>),
     TransitionFinished(u64, String, IssueTransition, Result<(), TransitionFailure>),
     Disconnected(u64, Result<(), String>),
@@ -604,6 +607,8 @@ fn build_ui(app: &adw::Application) {
         board_box, pinned_section, pinned_box, pinned_scroll, pinned_count,
         detail_box, comments_box: Rc::new(RefCell::new(gtk::Box::new(gtk::Orientation::Vertical, 10))),
         comments_request: Rc::new(Cell::new(0)),
+        children_box: Rc::new(RefCell::new(gtk::Box::new(gtk::Orientation::Vertical, 9))),
+        children_request: Rc::new(Cell::new(0)),
         detail_actions, detail_panel, detail_heading, open_in_jira, copy_branch, pin_detail, inner_split,
         state: state.clone(),
         detail_request: Rc::new(Cell::new(0)),
@@ -1120,7 +1125,7 @@ fn handle_event(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>, eve
                 return;
             }
             ui.pending_direct_issue.borrow_mut().take();
-            match result {
+            match *result {
                 Ok(issue) => {
                     open_issue(ui, &issue, None);
                     if !state.borrow().busy {
@@ -1200,6 +1205,22 @@ fn handle_event(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>, eve
                 }
             }
         }
+        Event::ChildrenLoaded(id, request, key, result) => {
+            if state.borrow().generation != id
+                || ui.children_request.get() != request
+                || ui.selected_issue.borrow().as_deref() != Some(key.as_str())
+            {
+                return;
+            }
+            match result {
+                Ok(children) => issue_detail::render_children(
+                    &ui.children_box.borrow(), &children, &issue_link_handler(ui),
+                ),
+                Err(error) => issue_detail::show_children_error(
+                    &ui.children_box.borrow(), &error,
+                ),
+            }
+        }
         Event::TransitionsLoaded(id, request, key, result) => {
             if state.borrow().generation != id
                 || ui.detail_request.get() != request
@@ -1271,7 +1292,8 @@ fn handle_event(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>, eve
                         }
                         request_transitions(&ui.detail_actions, &ui.detail_request, &ui.events,
                             account.clone(), id, &key);
-                        request_issue_comments(ui, account, id, &key);
+                        request_issue_comments(ui, account.clone(), id, &key);
+                        request_issue_children(ui, account, id, &key);
                     }
                     ui.toast.add_toast(adw::Toast::new(&format!("Moved to {}", transition.to_name)));
                 }
@@ -3120,7 +3142,7 @@ fn open_issue_by_key(ui: &Ui, key: &str) {
         let result = JiraClient::new(account)
             .and_then(|client| client.issue_by_key(&key))
             .map_err(|error| error.to_string());
-        let _ = events.send(Event::PaletteIssueLoaded(generation, key, result));
+        let _ = events.send(Event::PaletteIssueLoaded(generation, key, Box::new(result)));
     });
 }
 
@@ -3189,6 +3211,7 @@ fn open_issue(ui: &Ui, issue: &Issue, source_button: Option<&gtk::Button>) {
     request_transitions(&ui.detail_actions, &ui.detail_request, &ui.events,
         account.clone(), generation, &issue.key);
     request_issue_comments(ui, account.clone(), generation, &issue.key);
+    request_issue_children(ui, account.clone(), generation, &issue.key);
     if let Some(account) = account {
         load_issue_images(&ui.events, account, issue, generation);
     }
@@ -3201,6 +3224,7 @@ fn render_issue_detail(ui: &Ui, issue: &Issue, base_url: &str) {
     );
     *ui.image_slots.borrow_mut() = detail.images;
     *ui.comments_box.borrow_mut() = detail.comments;
+    *ui.children_box.borrow_mut() = detail.children;
 }
 
 fn request_issue_comments(ui: &Ui, account: Option<Credentials>, generation: u64, key: &str) {
@@ -3218,6 +3242,20 @@ fn request_issue_comments(ui: &Ui, account: Option<Credentials>, generation: u64
             .and_then(|client| client.issue_comments(&key))
             .map_err(|error| error.to_string());
         let _ = events.send(Event::CommentsLoaded(generation, request, key, result));
+    });
+}
+
+fn request_issue_children(ui: &Ui, account: Option<Credentials>, generation: u64, key: &str) {
+    let request = ui.children_request.get().wrapping_add(1);
+    ui.children_request.set(request);
+    let Some(account) = account else { return };
+    let events = ui.events.clone();
+    let key = key.to_owned();
+    thread::spawn(move || {
+        let result = JiraClient::new(account)
+            .and_then(|client| client.child_issues(&key))
+            .map_err(|error| error.to_string());
+        let _ = events.send(Event::ChildrenLoaded(generation, request, key, result));
     });
 }
 
@@ -3537,6 +3575,7 @@ mod scope_tests {
             attachments: Vec::new(),
             is_epic: false,
             epic: None,
+            parent: None,
         }
     }
 

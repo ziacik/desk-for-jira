@@ -12,6 +12,7 @@ pub type OpenIssueLink = Rc<dyn Fn(&str)>;
 pub struct DetailRender {
     pub images: ImageSlots,
     pub comments: gtk::Box,
+    pub children: gtk::Box,
 }
 
 /// Both header actions use exactly the same symbolic drawing system:
@@ -101,6 +102,101 @@ fn section_heading(title: &str, icon: &str, count: Option<usize>) -> gtk::Box {
     heading
 }
 
+fn issue_relation_row(
+    relation: &str,
+    key: &str,
+    summary: &str,
+    on_issue_link: &OpenIssueLink,
+) -> gtk::Box {
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 9);
+    row.add_css_class("detail-relation-row");
+    let icon = gtk::Image::from_icon_name("view-list-symbolic");
+    icon.add_css_class("detail-relation-icon");
+    row.append(&icon);
+    let caption = gtk::Label::new(Some(relation));
+    caption.add_css_class("detail-relation-caption");
+    row.append(&caption);
+
+    let display = if summary.is_empty() {
+        key.to_owned()
+    } else {
+        format!("{key} · {summary}")
+    };
+    let button = gtk::Button::new();
+    button.add_css_class("detail-relation-link");
+    button.set_halign(gtk::Align::Start);
+    button.set_hexpand(true);
+    button.set_tooltip_text(Some(&format!("Open {key}")));
+    let text = gtk::Label::new(Some(&display));
+    text.set_wrap(true);
+    text.set_xalign(0.0);
+    button.set_child(Some(&text));
+    let key = key.to_owned();
+    let on_issue_link = on_issue_link.clone();
+    button.connect_clicked(move |_| on_issue_link(&key));
+    row.append(&button);
+    row
+}
+
+pub fn render_children(
+    container: &gtk::Box,
+    children: &[Issue],
+    on_issue_link: &OpenIssueLink,
+) {
+    while let Some(child) = container.first_child() {
+        container.remove(&child);
+    }
+    if children.is_empty() {
+        container.set_visible(false);
+        return;
+    }
+
+    container.append(&section_heading(
+        "Child tickets", "view-list-symbolic", Some(children.len()),
+    ));
+    let list = gtk::Box::new(gtk::Orientation::Vertical, 6);
+    list.add_css_class("detail-children-list");
+    for issue in children {
+        let button = gtk::Button::new();
+        button.add_css_class("detail-child-link");
+        button.set_tooltip_text(Some(&format!("Open {}", issue.key)));
+        let content = gtk::Box::new(gtk::Orientation::Horizontal, 10);
+        let title = gtk::Box::new(gtk::Orientation::Vertical, 3);
+        title.set_hexpand(true);
+        let key = gtk::Label::new(Some(&issue.key));
+        key.add_css_class("detail-child-key");
+        key.set_xalign(0.0);
+        title.append(&key);
+        let summary = gtk::Label::new(Some(&issue.summary));
+        summary.add_css_class("detail-child-summary");
+        summary.set_wrap(true);
+        summary.set_wrap_mode(gtk::pango::WrapMode::WordChar);
+        summary.set_xalign(0.0);
+        title.append(&summary);
+        content.append(&title);
+        let status = gtk::Label::new(Some(&issue.status));
+        status.add_css_class("detail-child-status");
+        status.set_valign(gtk::Align::Center);
+        content.append(&status);
+        button.set_child(Some(&content));
+        let key = issue.key.clone();
+        let on_issue_link = on_issue_link.clone();
+        button.connect_clicked(move |_| on_issue_link(&key));
+        list.append(&button);
+    }
+    container.append(&list);
+    container.set_visible(true);
+}
+
+pub fn show_children_error(container: &gtk::Box, error: &str) {
+    while let Some(child) = container.first_child() {
+        container.remove(&child);
+    }
+    container.append(&section_heading("Child tickets", "view-list-symbolic", None));
+    add_text(container, &format!("Could not load child tickets: {error}"), "detail-empty");
+    container.set_visible(true);
+}
+
 pub fn render(
     container: &gtk::Box,
     issue: &Issue,
@@ -166,32 +262,22 @@ pub fn render(
     badges.append(&priority);
     header.append(&badges);
 
-    if let Some(epic) = &issue.epic {
-        let epic_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-        epic_row.add_css_class("detail-epic-row");
-        let epic_icon = gtk::Image::from_icon_name("view-list-symbolic");
-        epic_icon.add_css_class("detail-epic-icon");
-        epic_row.append(&epic_icon);
-        let title = if epic.summary.is_empty() { &epic.key } else { &epic.summary };
-        if base_url.is_empty() {
-            let label = gtk::Label::new(Some(title));
-            label.set_xalign(0.0);
-            label.set_wrap(true);
-            epic_row.append(&label);
+    if let Some(parent) = &issue.parent {
+        let epic = issue.epic.as_ref().filter(|epic| epic.key == parent.key);
+        let summary = if parent.summary.is_empty() {
+            epic.map(|epic| epic.summary.as_str()).unwrap_or("")
         } else {
-            let url = format!("{base_url}/browse/{}", epic.key);
-            let link = gtk::LinkButton::with_label(&url, title);
-            link.add_css_class("detail-epic-link");
-            link.set_tooltip_text(Some(&epic.key));
-            let key = epic.key.clone();
-            let on_issue_link = on_issue_link.clone();
-            link.connect_activate_link(move |_| {
-                on_issue_link(&key);
-                glib::Propagation::Stop
-            });
-            epic_row.append(&link);
-        }
-        header.append(&epic_row);
+            &parent.summary
+        };
+        header.append(&issue_relation_row(
+            if epic.is_some() { "Epic" } else { "Parent" },
+            &parent.key, summary, on_issue_link,
+        ));
+    } else if let Some(epic) = &issue.epic {
+        // Older Jira Server projects expose the Epic Link custom field instead.
+        header.append(&issue_relation_row(
+            "Epic", &epic.key, &epic.summary, on_issue_link,
+        ));
     }
 
     // Workflow actions belong to the issue header, not to a detached strip.
@@ -235,6 +321,11 @@ pub fn render(
         metadata.insert(&cell, -1);
     }
     container.append(&metadata);
+
+    let children = gtk::Box::new(gtk::Orientation::Vertical, 9);
+    children.add_css_class("detail-section");
+    children.set_visible(false);
+    container.append(&children);
 
     let section = gtk::Box::new(gtk::Orientation::Vertical, 12);
     section.add_css_class("detail-section");
@@ -298,7 +389,7 @@ pub fn render(
     comments_section.append(&comments);
     container.append(&comments_section);
 
-    DetailRender { images: slots, comments }
+    DetailRender { images: slots, comments, children }
 }
 
 pub fn show_comments_loading(container: &gtk::Box) {
