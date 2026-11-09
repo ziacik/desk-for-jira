@@ -132,6 +132,7 @@ pub fn recommended_base(repository: &Path) -> String {
 
 pub fn create(request: &CreateWorktree<'_>) -> Result<()> {
     if !is_repository(request.repository) { bail!("Not a Git repository"); }
+    if !request.destination.is_absolute() { bail!("Worktree destination must be absolute"); }
     if request.destination.exists() { bail!("Worktree directory already exists"); }
     if !command(request.repository, &["check-ref-format", "--branch", request.branch])?
         .status.success()
@@ -194,6 +195,10 @@ pub fn remove_merged(repository: &Path, tree: &Worktree, target: &str, key: &str
     if !is_repository(repository) { bail!("Repository is missing"); }
     let branch = tree.branch.as_deref().context("Detached worktree cannot be removed here")?;
     if !branch_matches_issue(branch, key) { bail!("Branch does not belong to this ticket"); }
+    // A branch is trivially an ancestor of itself. Never treat that as a merge.
+    if target == branch || target == format!("refs/heads/{branch}") {
+        bail!("The merge target cannot be the ticket branch itself");
+    }
     if !tree.path.exists() { bail!("Worktree path is missing"); }
     if !worktrees(repository)?.iter().any(|t| t.path == tree.path && t.branch == tree.branch) {
         bail!("Worktree is no longer registered in this repository");
