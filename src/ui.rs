@@ -3100,8 +3100,8 @@ fn show_command_palette(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Eve
             };
             items.push(PaletteItem::new(pin_action, &issue.key, "Ticket action",
                 "view-pin-symbolic", true, PaletteCommand::TogglePin(issue.clone())));
-            items.push(PaletteItem::new("Copy branch name", &issue.key, "Ticket action",
-                "edit-copy-symbolic", true, PaletteCommand::CopyBranch(issue.clone())));
+            items.push(PaletteItem::new("Git worktrees", &issue.key, "Ticket action",
+                "folder-symbolic", true, PaletteCommand::ManageWorktree(issue.clone())));
             items.push(PaletteItem::new("Open current ticket in Jira", &issue.key, "Ticket action",
                 "web-browser-symbolic", false, PaletteCommand::OpenInJira(issue.clone())));
         }
@@ -3193,11 +3193,10 @@ fn show_command_palette(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Eve
             PaletteCommand::TogglePin(issue) => {
                 toggle_pinned_issue(&ui_for_action, &issue);
             }
-            PaletteCommand::CopyBranch(issue) => {
-                if let Some(display) = gtk::gdk::Display::default() {
-                    let name = issue_detail::suggested_branch_name(&issue.key, &issue.summary);
-                    display.clipboard().set_text(&name);
-                    ui_for_action.toast.add_toast(adw::Toast::new("Branch name copied"));
+            PaletteCommand::ManageWorktree(issue) => {
+                if let Some(account) = state_for_action.borrow().account.as_ref() {
+                    crate::git_ui::show(&ui_for_action.window, &account.base_url,
+                        &issue.key, &issue.summary);
                 }
             }
             PaletteCommand::OpenInJira(issue) => {
