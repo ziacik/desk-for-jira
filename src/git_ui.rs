@@ -242,6 +242,10 @@ impl View {
         };
         let branch = self.branch.text().trim().to_owned();
         if branch.is_empty() { report(&self.info, "Enter a branch name"); return; }
+        if !git::branch_matches_issue(&branch, &self.key) {
+            report(&self.info, "Branch name must start with the ticket key (optionally after a prefix such as feature/).");
+            return;
+        }
         if let Err(error) = self.store_preferences() {
             report(&self.info, &error); return;
         }
