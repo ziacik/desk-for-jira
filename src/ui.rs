@@ -2946,12 +2946,6 @@ fn issue_button(issue: &Issue, ui: &Ui, base_url: &str, account: Option<&Credent
     button.set_hexpand(true);
     button.set_vexpand(false);
     button.set_tooltip_text(Some(&format!("{} · {}", issue.key, issue.summary)));
-    if let Some(epic) = &issue.epic {
-        // Paint the Epic accent as part of the card's own border so its rounded
-        // corners, selected outline and hit area remain one continuous surface.
-        button.add_css_class("has-epic");
-        button.add_css_class(&format!("epic-color-{}", epic_color_index(&epic.key)));
-    }
     let content = gtk::Box::new(gtk::Orientation::Vertical, 7);
     content.set_hexpand(true);
     content.set_margin_top(12);
