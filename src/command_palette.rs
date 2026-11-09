@@ -23,7 +23,7 @@ pub(crate) enum PaletteCommand {
     Refresh,
     FocusBoardSearch,
     TogglePin(Issue),
-    CopyBranch(Issue),
+    ManageWorktree(Issue),
     OpenInJira(Issue),
 }
 
