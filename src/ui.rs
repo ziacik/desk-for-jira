@@ -743,6 +743,7 @@ fn build_ui(app: &adw::Application) {
     };
     watch_detail_resize(&ui);
     install_issue_swipe(&ui);
+    install_mouse_history_buttons(&ui);
     for (button, back) in [(ui.history_back.clone(), true), (ui.history_forward.clone(), false)] {
         let ui = ui.clone();
         button.connect_clicked(move |_| navigate_issue_history(&ui, back));
@@ -2617,6 +2618,40 @@ fn install_issue_swipe(ui: &Ui) {
     ui.detail_panel.add_controller(controller);
 }
 
+/// Standard extra mouse buttons used for browser Back/Forward on Linux.
+fn mouse_history_direction(button: u32) -> Option<bool> {
+    match button {
+        8 => Some(true),  // Back
+        9 => Some(false), // Forward
+        _ => None,
+    }
+}
+
+fn install_mouse_history_buttons(ui: &Ui) {
+    // A raw controller avoids GTK GestureClick's bookkeeping of buttons 8/9.
+    // Handle releases rather than presses, so a navigation that rebuilds
+    // the inspector cannot invalidate a still-active press on a child widget.
+    let controller = gtk::EventControllerLegacy::new();
+    controller.set_propagation_phase(gtk::PropagationPhase::Capture);
+    let ui = ui.clone();
+    controller.connect_event(move |_, event| {
+        if !ui.detail_panel.is_visible()
+            || event.event_type() != gtk::gdk::EventType::ButtonRelease
+        {
+            return glib::Propagation::Proceed;
+        }
+        let Some(button) = event.downcast_ref::<gtk::gdk::ButtonEvent>() else {
+            return glib::Propagation::Proceed;
+        };
+        if let Some(back) = mouse_history_direction(button.button()) {
+            navigate_issue_history(&ui, back);
+        }
+        // Leave mouse event processing alone for buttons and other widgets.
+        glib::Propagation::Proceed
+    });
+    ui.window.add_controller(controller);
+}
+
 fn update_history_buttons(ui: &Ui) {
     let history = ui.issue_history.borrow();
     ui.history_back.set_sensitive(history.can_go_back());
@@ -4040,6 +4075,16 @@ mod scope_tests {
         swipe.begin();
         swipe.update(25.0, 0.0, true);
         assert_eq!(swipe.finish(), None);
+    }
+
+    #[test]
+    fn extra_mouse_buttons_map_to_browser_navigation() {
+        assert_eq!(mouse_history_direction(8), Some(true));
+        assert_eq!(mouse_history_direction(9), Some(false));
+        // Ordinary mouse clicks, wheel and unknown buttons are not navigation.
+        for button in [0, 1, 2, 3, 4, 5, 6, 7, 10, 11] {
+            assert_eq!(mouse_history_direction(button), None);
+        }
     }
 
     #[test]
