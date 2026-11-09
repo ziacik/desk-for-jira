@@ -128,6 +128,7 @@ struct View {
     create: gtk::Button,
     open: gtk::Button,
     retry: gtk::Button,
+    terminal: gtk::Button,
     remove: gtk::Button,
     active_tree: Rc<RefCell<Option<Worktree>>>,
 }
@@ -155,6 +156,7 @@ impl View {
             self.create.set_sensitive(false);
             self.open.set_visible(false);
             self.retry.set_visible(false);
+            self.terminal.set_visible(false);
             self.remove.set_visible(false);
             self.summary.set_text("Register a local repository to begin.");
             *self.active_tree.borrow_mut() = None;
@@ -181,6 +183,7 @@ impl View {
             self.create.set_visible(false);
             self.open.set_visible(true);
             self.retry.set_visible(true);
+            self.terminal.set_visible(true);
             self.remove.set_visible(true);
         } else {
             let existing = git::matching_branches(path, &self.key).unwrap_or_default();
@@ -195,6 +198,7 @@ impl View {
             self.create.set_sensitive(true);
             self.open.set_visible(false);
             self.retry.set_visible(false);
+            self.terminal.set_visible(false);
             self.remove.set_visible(false);
             self.update_path();
         }
@@ -489,8 +493,22 @@ pub fn show(parent: &adw::ApplicationWindow, site: &str, key: &str, summary: &st
     base.set_hexpand(true);
     main.append(&field("Base branch (also used for safe cleanup)", &base));
     let branch = gtk::Entry::new();
+    branch.set_hexpand(true);
     branch.set_text(&issue_detail::suggested_branch_name(key, summary));
-    main.append(&field("Branch", &branch));
+    let branch_actions = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    branch_actions.append(&branch);
+    let copy_branch = gtk::Button::from_icon_name("edit-copy-symbolic");
+    copy_branch.set_tooltip_text(Some("Copy branch name"));
+    branch_actions.append(&copy_branch);
+    main.append(&field("Branch", &branch_actions));
+    {
+        let branch = branch.clone();
+        copy_branch.connect_clicked(move |_| {
+            if let Some(display) = gtk::gdk::Display::default() {
+                display.clipboard().set_text(&branch.text());
+            }
+        });
+    }
 
     let root = gtk::Entry::new();
     root.set_text(&settings.worktree_root);
@@ -536,14 +554,16 @@ pub fn show(parent: &adw::ApplicationWindow, site: &str, key: &str, summary: &st
 
     let actions = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     actions.set_halign(gtk::Align::End);
-    let create = gtk::Button::with_label("Create & Open");
+    let create = gtk::Button::with_label("Create worktree");
     create.add_css_class("suggested-action");
     let open = gtk::Button::with_label("Open in editor");
     open.add_css_class("suggested-action");
     let retry = gtk::Button::with_label("Run setup");
+    let terminal = gtk::Button::with_label("Terminal");
     let remove = gtk::Button::with_label("Remove…");
     actions.append(&remove);
     actions.append(&retry);
+    actions.append(&terminal);
     actions.append(&open);
     actions.append(&create);
     main.append(&actions);
@@ -562,7 +582,8 @@ pub fn show(parent: &adw::ApplicationWindow, site: &str, key: &str, summary: &st
         suggested_branch: issue_detail::suggested_branch_name(key, summary),
         repository: repository.clone(),
         base, branch, root, editor, setup, run_setup, fetch, after_open,
-        summary: summary_label, path, info, log, log_scroller, create, open, retry, remove,
+        summary: summary_label, path, info, log, log_scroller,
+        create, open, retry, terminal, remove,
         active_tree: Rc::new(RefCell::new(None)),
     });
     {
@@ -591,6 +612,16 @@ pub fn show(parent: &adw::ApplicationWindow, site: &str, key: &str, summary: &st
     {
         let view = view.clone();
         view.remove.clone().connect_clicked(move |_| view.confirm_remove());
+    }
+    {
+        let view = view.clone();
+        view.terminal.clone().connect_clicked(move |_| {
+            if let Some(tree) = view.active_tree.borrow().clone()
+                && let Err(error) = git::open_terminal(&tree.path)
+            {
+                report(&view.info, &error.to_string());
+            }
+        });
     }
     {
         let view = view.clone();
