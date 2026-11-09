@@ -2940,6 +2940,17 @@ fn epic_color_index(key: &str) -> u32 {
     }) % 8
 }
 
+// The Epic label is inside a ticket card, but it navigates independently:
+// never let GTK's default hyperlink handler launch the browser.
+fn connect_epic_card_navigation(label: &gtk::Label, key: &str, events: &Sender<Event>) {
+    let key = key.to_owned();
+    let events = events.clone();
+    label.connect_activate_link(move |_, _| {
+        let _ = events.send(Event::OpenLinkedIssue(key.clone()));
+        glib::Propagation::Stop
+    });
+}
+
 fn issue_button(issue: &Issue, ui: &Ui, base_url: &str, account: Option<&Credentials>, generation: u64) -> gtk::Overlay {
     let button = gtk::Button::new();
     button.add_css_class("issue-card");
@@ -3026,6 +3037,7 @@ fn issue_button(issue: &Issue, ui: &Ui, base_url: &str, account: Option<&Credent
                 glib::markup_escape_text(&url),
                 glib::markup_escape_text(title),
             ));
+            connect_epic_card_navigation(&label, &epic.key, &ui.events);
         }
         label.set_xalign(0.0);
         label.set_hexpand(true);
@@ -3947,6 +3959,22 @@ mod scope_tests {
 
         filter_project_groups(&mut groups, None);
         assert_eq!(groups.len(), 1);
+    }
+
+    #[gtk::test]
+    fn epic_card_link_opens_inside_the_app() {
+        let (events, receiver) = mpsc::channel();
+        let label = gtk::Label::new(None);
+        let url = "https://jira.example.com/browse/ART-123";
+        label.set_markup(&format!("<a href=\"{url}\">Epic name</a>"));
+        connect_epic_card_navigation(&label, "ART-123", &events);
+
+        let handled = label.emit_by_name::<bool>("activate-link", &[&url]);
+        assert!(handled, "GTK's default browser opener must be suppressed");
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(Event::OpenLinkedIssue(key)) if key == "ART-123",
+        ));
     }
 
     #[test]
