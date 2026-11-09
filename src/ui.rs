@@ -141,6 +141,46 @@ impl IssueHistory {
     }
 }
 
+/// Only a deliberate, predominantly horizontal two-finger scroll changes issues.
+/// GTK reports touchpad scrolling as smooth scroll events, not GestureSwipe.
+const ISSUE_SWIPE_THRESHOLD: f64 = 80.0;
+
+#[derive(Default)]
+struct IssueSwipe {
+    horizontal: f64,
+    vertical: f64,
+    active: bool,
+}
+
+impl IssueSwipe {
+    fn begin(&mut self) {
+        *self = Self { active: true, ..Self::default() };
+    }
+
+    fn update(&mut self, dx: f64, dy: f64, surface_units: bool) {
+        if self.active && surface_units {
+            self.horizontal += dx;
+            self.vertical += dy;
+        }
+    }
+
+    /// Returns true for Back and false for Forward, at most once per swipe.
+    fn finish(&mut self) -> Option<bool> {
+        let dx = self.horizontal;
+        let dy = self.vertical;
+        let active = self.active;
+        *self = Self::default();
+
+        if active && dx.abs() >= ISSUE_SWIPE_THRESHOLD && dx.abs() > dy.abs() * 1.5 {
+            // GTK uses positive dx for scrolling towards the right: the
+            // same direction as libadwaita's Back navigation gesture.
+            Some(dx > 0.0)
+        } else {
+            None
+        }
+    }
+}
+
 impl IssueScope {
     fn jql(self) -> Option<&'static str> {
         match self {
@@ -702,6 +742,7 @@ fn build_ui(app: &adw::Application) {
         collapsed_columns: Rc::new(RefCell::new(HashSet::new())),
     };
     watch_detail_resize(&ui);
+    install_issue_swipe(&ui);
     for (button, back) in [(ui.history_back.clone(), true), (ui.history_forward.clone(), false)] {
         let ui = ui.clone();
         button.connect_clicked(move |_| navigate_issue_history(&ui, back));
@@ -2544,6 +2585,38 @@ fn visible_board_groups<'a>(
 }
 
 
+fn install_issue_swipe(ui: &Ui) {
+    // Attach only to the inspector: the board uses horizontal touchpad
+    // scrolling to move between columns and must keep that behavior.
+    let controller = gtk::EventControllerScroll::new(gtk::EventControllerScrollFlags::BOTH_AXES);
+    controller.set_propagation_phase(gtk::PropagationPhase::Capture);
+    let gesture = Rc::new(RefCell::new(IssueSwipe::default()));
+    {
+        let gesture = gesture.clone();
+        controller.connect_scroll_begin(move |_| gesture.borrow_mut().begin());
+    }
+    {
+        let gesture = gesture.clone();
+        controller.connect_scroll(move |controller, dx, dy| {
+            gesture.borrow_mut().update(
+                dx, dy, controller.unit() == gtk::gdk::ScrollUnit::Surface,
+            );
+            // Don't interfere with vertical scrolling or child widgets.
+            glib::Propagation::Proceed
+        });
+    }
+    {
+        let ui = ui.clone();
+        controller.connect_scroll_end(move |_| {
+            let direction = gesture.borrow_mut().finish();
+            if let Some(back) = direction {
+                navigate_issue_history(&ui, back);
+            }
+        });
+    }
+    ui.detail_panel.add_controller(controller);
+}
+
 fn update_history_buttons(ui: &Ui) {
     let history = ui.issue_history.borrow();
     ui.history_back.set_sensitive(history.can_go_back());
@@ -3924,6 +3997,49 @@ mod scope_tests {
         assert_eq!(detail_split_position(900, 6, 1180), Some(300));
         // Never restore from a zero/unallocated GTK widget.
         assert_eq!(detail_split_position(0, 6, 540), None);
+    }
+
+    #[test]
+    fn two_finger_horizontal_scroll_navigates_only_at_end() {
+        let mut swipe = IssueSwipe::default();
+        swipe.begin();
+        swipe.update(40.0, 4.0, true);
+        swipe.update(46.0, 6.0, true);
+        assert_eq!(swipe.finish(), Some(true)); // right: Back
+        assert_eq!(swipe.finish(), None); // cannot navigate twice
+
+        swipe.begin();
+        swipe.update(-95.0, 0.0, true);
+        assert_eq!(swipe.finish(), Some(false)); // left: Forward
+    }
+
+    #[test]
+    fn swipe_ignores_vertical_diagonal_short_and_wheel_scrolls() {
+        let mut swipe = IssueSwipe::default();
+        swipe.begin();
+        swipe.update(120.0, 100.0, true);
+        assert_eq!(swipe.finish(), None); // predominantly vertical
+
+        swipe.begin();
+        swipe.update(45.0, 0.0, true);
+        assert_eq!(swipe.finish(), None); // not an intentional swipe
+
+        swipe.begin();
+        swipe.update(200.0, 0.0, false);
+        assert_eq!(swipe.finish(), None); // mouse wheel units
+
+        swipe.update(200.0, 0.0, true);
+        assert_eq!(swipe.finish(), None); // no scroll-begin
+    }
+
+    #[test]
+    fn new_touchpad_gesture_resets_previous_incomplete_scroll() {
+        let mut swipe = IssueSwipe::default();
+        swipe.begin();
+        swipe.update(60.0, 0.0, true);
+        swipe.begin();
+        swipe.update(25.0, 0.0, true);
+        assert_eq!(swipe.finish(), None);
     }
 
     #[test]
