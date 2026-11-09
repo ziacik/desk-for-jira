@@ -2633,9 +2633,9 @@ fn install_mouse_history_buttons(ui: &Ui) {
     // the inspector cannot invalidate a still-active press on a child widget.
     let controller = gtk::EventControllerLegacy::new();
     controller.set_propagation_phase(gtk::PropagationPhase::Capture);
-    let ui = ui.clone();
+    let event_ui = ui.clone();
     controller.connect_event(move |_, event| {
-        if !ui.detail_panel.is_visible()
+        if !event_ui.detail_panel.is_visible()
             || event.event_type() != gtk::gdk::EventType::ButtonRelease
         {
             return glib::Propagation::Proceed;
@@ -2644,7 +2644,7 @@ fn install_mouse_history_buttons(ui: &Ui) {
             return glib::Propagation::Proceed;
         };
         if let Some(back) = mouse_history_direction(button.button()) {
-            navigate_issue_history(&ui, back);
+            navigate_issue_history(&event_ui, back);
         }
         // Leave mouse event processing alone for buttons and other widgets.
         glib::Propagation::Proceed
