@@ -260,19 +260,13 @@ impl UiLayout {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct GitRepository {
     pub name: String,
     pub path: String,
     /// User-approved setup script, run only immediately after new worktree creation.
     pub setup: String,
-}
-
-impl Default for GitRepository {
-    fn default() -> Self {
-        Self { name: String::new(), path: String::new(), setup: String::new() }
-    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
