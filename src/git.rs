@@ -189,6 +189,16 @@ pub fn open_editor(worktree: &Path, editor: &str) -> Result<()> {
     Ok(())
 }
 
+pub fn open_terminal(worktree: &Path) -> Result<()> {
+    for program in ["cosmic-term", "kgx", "gnome-terminal"] {
+        let result = Command::new(program)
+            .arg(format!("--working-directory={}", worktree.display()))
+            .spawn();
+        if result.is_ok() { return Ok(()); }
+    }
+    bail!("No supported terminal found (cosmic-term, kgx, gnome-terminal)")
+}
+
 /// Never deletes a branch merely because Jira says Done.
 /// Requires its tip to be an ancestor of the explicitly selected integration ref.
 pub fn remove_merged(repository: &Path, tree: &Worktree, target: &str, key: &str) -> Result<()> {
