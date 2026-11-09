@@ -260,6 +260,74 @@ impl UiLayout {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GitRepository {
+    pub name: String,
+    pub path: String,
+    /// User-approved setup script, run only immediately after new worktree creation.
+    pub setup: String,
+}
+
+impl Default for GitRepository {
+    fn default() -> Self {
+        Self { name: String::new(), path: String::new(), setup: String::new() }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GitSettings {
+    pub repositories: Vec<GitRepository>,
+    pub scan_roots: Vec<String>,
+    pub worktree_root: String,
+    pub editor: String,
+    pub fetch_before_create: bool,
+    /// site -> Jira project key -> repository path -> number of successful creates.
+    pub usage: HashMap<String, HashMap<String, HashMap<String, u64>>>,
+}
+
+impl Default for GitSettings {
+    fn default() -> Self {
+        Self {
+            repositories: Vec::new(),
+            scan_roots: Vec::new(),
+            worktree_root: "~/Worktrees".to_owned(),
+            editor: "code".to_owned(),
+            fetch_before_create: true,
+            usage: HashMap::new(),
+        }
+    }
+}
+
+impl GitSettings {
+    pub fn register(&mut self, repository: GitRepository) {
+        if let Some(previous) = self.repositories.iter_mut().find(|r| r.path == repository.path) {
+            // Re-discovery never overwrites an explicitly configured setup.
+            if previous.name.is_empty() { previous.name = repository.name; }
+        } else {
+            self.repositories.push(repository);
+        }
+    }
+
+    pub fn preferred_index(&self, site: &str, key: &str) -> Option<usize> {
+        let project = key.split_once('-')?.0;
+        let counts = self.usage.get(site)?.get(project)?;
+        self.repositories.iter().enumerate()
+            .filter(|(_, repo)| counts.get(&repo.path).copied().unwrap_or(0) > 0)
+            .max_by_key(|(_, repo)| counts.get(&repo.path).copied().unwrap_or(0))
+            .map(|(index, _)| index)
+    }
+
+    pub fn record_usage(&mut self, site: &str, key: &str, path: &str) {
+        let Some((project, _)) = key.split_once('-') else { return; };
+        let entry = self.usage.entry(site.to_owned()).or_default()
+            .entry(project.to_owned()).or_default()
+            .entry(path.to_owned()).or_default();
+        *entry = entry.saturating_add(1);
+    }
+}
+
 #[derive(Default, Serialize, Deserialize)]
 struct Preferences {
     #[serde(default)]
@@ -268,6 +336,8 @@ struct Preferences {
     view_by_site: HashMap<String, ViewSettings>,
     #[serde(default)]
     ui_layout: UiLayout,
+    #[serde(default)]
+    git: GitSettings,
 }
 fn preferences_path() -> Result<PathBuf> {
     let root = env::var_os("XDG_CONFIG_HOME").filter(|p| !p.is_empty()).map(PathBuf::from)
@@ -326,6 +396,17 @@ pub fn save_layout(layout: &UiLayout) -> Result<()> {
     prefs.ui_layout = layout.clone().sanitized();
     write_preferences(&path, &prefs)
 }
+pub fn load_git() -> Result<GitSettings> {
+    Ok(read_preferences(&preferences_path()?)?.git)
+}
+
+pub fn save_git(settings: &GitSettings) -> Result<()> {
+    let path = preferences_path()?;
+    let mut prefs = read_preferences(&path)?;
+    prefs.git = settings.clone();
+    write_preferences(&path, &prefs)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
