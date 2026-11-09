@@ -517,7 +517,7 @@ fn build_ui(app: &adw::Application) {
     )));
     copy_branch.add_css_class("flat");
     copy_branch.add_css_class("detail-header-action");
-    copy_branch.set_tooltip_text(Some("Copy suggested Git branch name"));
+    copy_branch.set_tooltip_text(Some("Open Git worktrees for this ticket"));
     copy_branch.set_visible(false);
     detail_header.pack_end(&copy_branch);
     let pin_detail = gtk::Button::from_icon_name("view-pin-symbolic");
@@ -767,23 +767,17 @@ fn build_ui(app: &adw::Application) {
         });
     }
     {
-        let selected_issue = ui.selected_issue.clone();
-        let state = state.clone();
-        let toast = ui.toast.clone();
-        ui.copy_branch.connect_clicked(move |_| {
-            let key = selected_issue.borrow().clone();
-            let state = state.borrow();
+        let ui = ui.clone();
+        ui.copy_branch.clone().connect_clicked(move |_| {
+            let key = ui.selected_issue.borrow().clone();
+            let state = ui.state.borrow();
             let issue = key.as_deref().and_then(|key| {
                 state.issues.iter().chain(state.pinned_issues.iter())
                     .chain(state.recent_issues.iter())
                     .find(|issue| issue.key == key)
             });
-            if let Some(issue) = issue
-                && let Some(display) = gtk::gdk::Display::default()
-            {
-                let name = issue_detail::suggested_branch_name(&issue.key, &issue.summary);
-                display.clipboard().set_text(&name);
-                toast.add_toast(adw::Toast::new("Branch name copied"));
+            if let (Some(issue), Some(account)) = (issue, state.account.as_ref()) {
+                crate::git_ui::show(&ui.window, &account.base_url, &issue.key, &issue.summary);
             }
         });
     }
