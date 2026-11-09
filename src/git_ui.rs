@@ -31,6 +31,25 @@ fn field(name: &str, child: &impl IsA<gtk::Widget>) -> gtk::Box {
     box_
 }
 
+fn set_choices(dropdown: &gtk::DropDown, labels: &[String], selected: usize) {
+    let values: Vec<&str> = labels.iter().map(String::as_str).collect();
+    let model = gtk::StringList::new(&values);
+    dropdown.set_model(Some(&model));
+    if !labels.is_empty() {
+        dropdown.set_selected(selected.min(labels.len() - 1) as u32);
+    }
+}
+
+fn selected_text(dropdown: &gtk::DropDown) -> Option<String> {
+    dropdown.selected_item()
+        .and_then(|item| item.downcast::<gtk::StringObject>().ok())
+        .map(|item| item.string().to_string())
+}
+
+fn selected_index(dropdown: &gtk::DropDown) -> Option<usize> {
+    (dropdown.selected() != u32::MAX).then_some(dropdown.selected() as usize)
+}
+
 fn report(info: &gtk::Label, message: &str) {
     info.set_text(message);
     info.set_tooltip_text(Some(message));
@@ -92,11 +111,11 @@ struct View {
     site: String,
     key: String,
     suggested_branch: String,
-    repository: gtk::ComboBoxText,
-    base: gtk::ComboBoxText,
+    repository: gtk::DropDown,
+    base: gtk::DropDown,
     branch: gtk::Entry,
     root: gtk::Entry,
-    editor: gtk::ComboBoxText,
+    editor: gtk::DropDown,
     setup: gtk::Entry,
     run_setup: gtk::CheckButton,
     fetch: gtk::CheckButton,
@@ -120,21 +139,15 @@ impl View {
     }
 
     fn selected(&self) -> Option<GitRepository> {
-        let index = self.repository.active()? as usize;
+        let index = selected_index(&self.repository)?;
         self.settings.borrow().repositories.get(index).cloned()
     }
 
     fn reload_repositories(&self, preference: Option<usize>) {
-        self.repository.remove_all();
-        let repos = &self.settings.borrow().repositories;
-        for repo in repos {
-            self.repository.append_text(&repo.name);
-        }
-        if !repos.is_empty() {
-            self.repository.set_active(Some(preference.unwrap_or(0).min(repos.len() - 1) as u32));
-        } else {
-            self.refresh();
-        }
+        let names: Vec<String> = self.settings.borrow().repositories.iter()
+            .map(|repo| repo.name.clone()).collect();
+        set_choices(&self.repository, &names, preference.unwrap_or(0));
+        if names.is_empty() { self.refresh(); }
     }
 
     fn refresh(&self) {
@@ -148,12 +161,10 @@ impl View {
             return;
         };
         let path = Path::new(&repo.path);
-        self.base.remove_all();
         let bases = git::available_bases(path).unwrap_or_default();
         let recommended = git::recommended_base(path);
         let index = bases.iter().position(|b| b == &recommended).unwrap_or(0);
-        for base in &bases { self.base.append_text(base); }
-        if !bases.is_empty() { self.base.set_active(Some(index as u32)); }
+        set_choices(&self.base, &bases, index);
 
         let trees = git::matching_worktrees(path, &self.key).unwrap_or_default();
         let tree = trees.first().cloned();
@@ -206,9 +217,9 @@ impl View {
         let mut new = self.settings.borrow().clone();
         new.worktree_root = self.root.text().to_string();
         new.fetch_before_create = self.fetch.is_active();
-        new.editor = self.editor.active_id().map(|s| s.to_string())
+        new.editor = selected_text(&self.editor)
             .unwrap_or_else(|| "code".to_owned());
-        if let Some(index) = self.repository.active().map(|i| i as usize)
+        if let Some(index) = selected_index(&self.repository)
             && let Some(repo) = new.repositories.get_mut(index)
         {
             repo.setup = if self.run_setup.is_active() {
@@ -222,7 +233,7 @@ impl View {
 
     fn create_worktree(self: &Rc<Self>) {
         let Some(repo) = self.selected() else { return; };
-        let Some(base) = self.base.active_text().map(|s| s.to_string()) else {
+        let Some(base) = selected_text(&self.base) else {
             report(&self.info, "Select a base branch"); return;
         };
         let branch = self.branch.text().trim().to_owned();
@@ -314,26 +325,21 @@ impl View {
     fn confirm_remove(self: &Rc<Self>) {
         let Some(tree) = self.active_tree.borrow().clone() else { return; };
         let Some(repo) = self.selected() else { return; };
-        let Some(base) = self.base.active_text().map(|s| s.to_string()) else { return; };
-        let confirmation = gtk::Dialog::new();
-        confirmation.set_title(Some("Remove worktree and branch?"));
-        confirmation.set_transient_for(Some(&self.dialog));
-        confirmation.set_modal(true);
-        confirmation.add_button("Cancel", gtk::ResponseType::Cancel);
-        confirmation.add_button("Remove", gtk::ResponseType::Accept);
-        let content = label(&format!(
-            "Remove {} and its local branch only if clean and provably merged into {}?\n\nIgnored files (including node_modules) may be deleted. Remote branches are never deleted.",
-            tree.path.display(), base,
-        ));
-        content.set_margin_start(16);
-        content.set_margin_end(16);
-        content.set_margin_top(16);
-        content.set_margin_bottom(16);
-        confirmation.content_area().append(&content);
+        let Some(base) = selected_text(&self.base) else { return; };
+        let confirmation = gtk::AlertDialog::builder()
+            .message("Remove worktree and branch?")
+            .detail(format!(
+                "Remove {} and its local branch only if clean and provably merged into {}?\n\nIgnored files (including node_modules) may be deleted. Remote branches are never deleted.",
+                tree.path.display(), base,
+            ))
+            .buttons(["Cancel", "Remove"])
+            .cancel_button(0)
+            .default_button(0)
+            .modal(true)
+            .build();
         let view = self.clone();
-        confirmation.connect_response(move |dialog, response| {
-            dialog.close();
-            if response != gtk::ResponseType::Accept { return; }
+        confirmation.choose(Some(&self.dialog), None::<&gtk::gio::Cancellable>, move |response| {
+            if !matches!(response, Ok(1)) { return; }
             view.remove.set_sensitive(false);
             report(&view.info, "Verifying merge and removing worktree…");
             let repo = repo.clone();
@@ -358,13 +364,12 @@ impl View {
                 }
             });
         });
-        confirmation.present();
     }
 }
 
 fn open_selected(view: &Rc<View>) {
     let Some(tree) = view.active_tree.borrow().clone() else { return; };
-    let editor = view.editor.active_id().map(|s| s.to_string())
+    let editor = selected_text(&view.editor)
         .unwrap_or_else(|| "code".into());
     if let Err(error) = view.store_preferences() {
         report(&view.info, &error); return;
@@ -471,7 +476,7 @@ pub fn show(parent: &adw::ApplicationWindow, site: &str, key: &str, summary: &st
     main.append(&heading);
 
     let controls = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-    let repository = gtk::ComboBoxText::new();
+    let repository = gtk::DropDown::from_strings(&[]);
     repository.set_hexpand(true);
     let add = gtk::Button::with_label("Add folder");
     let scan = gtk::Button::with_label("Scan…");
@@ -480,7 +485,7 @@ pub fn show(parent: &adw::ApplicationWindow, site: &str, key: &str, summary: &st
     controls.append(&scan);
     main.append(&field("Repository", &controls));
 
-    let base = gtk::ComboBoxText::new();
+    let base = gtk::DropDown::from_strings(&[]);
     base.set_hexpand(true);
     main.append(&field("Base branch (also used for safe cleanup)", &base));
     let branch = gtk::Entry::new();
@@ -503,10 +508,8 @@ pub fn show(parent: &adw::ApplicationWindow, site: &str, key: &str, summary: &st
     main.append(&field("Setup command (runs once after creation)", &setup));
     let run_setup = gtk::CheckButton::with_label("Run setup after creating");
     main.append(&run_setup);
-    let editor = gtk::ComboBoxText::new();
-    editor.append(Some("code"), "VS Code");
-    editor.append(Some("codium"), "VSCodium");
-    editor.set_active_id(Some(if settings.editor == "codium" { "codium" } else { "code" }));
+    let editor = gtk::DropDown::from_strings(&["code", "codium"]);
+    editor.set_selected(if settings.editor == "codium" { 1 } else { 0 });
     main.append(&field("Editor", &editor));
     let after_open = gtk::CheckButton::with_label("Open in editor after creation");
     after_open.set_active(true);
@@ -564,7 +567,7 @@ pub fn show(parent: &adw::ApplicationWindow, site: &str, key: &str, summary: &st
     });
     {
         let view = view.clone();
-        repository.connect_changed(move |_| view.refresh());
+        repository.connect_selected_notify(move |_| view.refresh());
     }
     {
         let view = view.clone();
@@ -594,7 +597,8 @@ pub fn show(parent: &adw::ApplicationWindow, site: &str, key: &str, summary: &st
         add.connect_clicked(move |_| {
             let chooser = gtk::FileDialog::new();
             let view = view.clone();
-            chooser.select_folder(Some(&view.dialog), None::<&gtk::gio::Cancellable>, move |result| {
+            let parent = view.dialog.clone();
+            chooser.select_folder(Some(&parent), None::<&gtk::gio::Cancellable>, move |result| {
                 if let Ok(file) = result
                     && let Some(path) = file.path()
                 {
@@ -615,7 +619,8 @@ pub fn show(parent: &adw::ApplicationWindow, site: &str, key: &str, summary: &st
         scan.connect_clicked(move |_| {
             let chooser = gtk::FileDialog::new();
             let view = view.clone();
-            chooser.select_folder(Some(&view.dialog), None::<&gtk::gio::Cancellable>, move |result| {
+            let parent = view.dialog.clone();
+            chooser.select_folder(Some(&parent), None::<&gtk::gio::Cancellable>, move |result| {
                 if let Ok(file) = result
                     && let Some(root) = file.path()
                 {
@@ -628,7 +633,7 @@ pub fn show(parent: &adw::ApplicationWindow, site: &str, key: &str, summary: &st
                     let view = view.clone();
                     poll(rx, move |results| {
                         report(&view.info, "");
-                        scan_dialog(&view, root, results);
+                        scan_dialog(&view, root.clone(), results);
                     });
                 }
             });
