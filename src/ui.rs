@@ -3969,8 +3969,8 @@ mod scope_tests {
         label.set_markup(&format!("<a href=\"{url}\">Epic name</a>"));
         connect_epic_card_navigation(&label, "ART-123", &events);
 
-        let handled = label.emit_by_name::<glib::Propagation>("activate-link", &[&url]);
-        assert!(matches!(handled, glib::Propagation::Stop));
+        let handled = label.emit_by_name::<bool>("activate-link", &[&url]);
+        assert!(handled, "GTK's default browser opener must be suppressed");
         assert!(matches!(
             receiver.try_recv(),
             Ok(Event::OpenLinkedIssue(key)) if key == "ART-123",
