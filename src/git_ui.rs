@@ -91,6 +91,7 @@ struct View {
     settings: Rc<RefCell<GitSettings>>,
     site: String,
     key: String,
+    suggested_branch: String,
     repository: gtk::ComboBoxText,
     base: gtk::ComboBoxText,
     branch: gtk::Entry,
@@ -103,6 +104,8 @@ struct View {
     summary: gtk::Label,
     path: gtk::Label,
     info: gtk::Label,
+    log: gtk::TextView,
+    log_scroller: gtk::ScrolledWindow,
     create: gtk::Button,
     open: gtk::Button,
     retry: gtk::Button,
@@ -111,6 +114,11 @@ struct View {
 }
 
 impl View {
+    fn show_log(&self, content: &str) {
+        self.log.buffer().set_text(content);
+        self.log_scroller.set_visible(!content.is_empty());
+    }
+
     fn selected(&self) -> Option<GitRepository> {
         let index = self.repository.active()? as usize;
         self.settings.borrow().repositories.get(index).cloned()
@@ -152,7 +160,12 @@ impl View {
         *self.active_tree.borrow_mut() = tree.clone();
         if let Some(tree) = tree {
             self.branch.set_text(tree.branch.as_deref().unwrap_or(""));
-            self.summary.set_text("Existing worktree · opening does not rerun setup");
+            let dirty = git::status(&tree.path).map(|s| !s.is_empty());
+            self.summary.set_text(match dirty {
+                Ok(true) => "Existing worktree · uncommitted changes",
+                Ok(false) => "Existing worktree · clean",
+                Err(_) => "Existing worktree · Git status unavailable",
+            });
             self.path.set_text(&tree.path.to_string_lossy());
             self.create.set_visible(false);
             self.open.set_visible(true);
@@ -164,6 +177,7 @@ impl View {
                 self.branch.set_text(branch);
                 self.summary.set_text("Existing branch · a new worktree will check it out");
             } else {
+                self.branch.set_text(&self.suggested_branch);
                 self.summary.set_text("New worktree and branch");
             }
             self.create.set_visible(true);
@@ -216,6 +230,7 @@ impl View {
         if let Err(error) = self.store_preferences() {
             report(&self.info, &error); return;
         }
+        let repo_path = repo.path.clone();
         let target = expand_home(&self.root.text()).join(&repo.name).join(&self.key);
         let script = if self.run_setup.is_active() { self.setup.text().to_string() }
             else { String::new() };
@@ -242,11 +257,14 @@ impl View {
         let view = self.clone();
         poll(rx, move |(path, result)| {
             if let Some(path) = path {
-                view.settings.borrow_mut().record_usage(&view.site, &view.key, &repo_path(&view, &path));
-                let _ = preferences::save_git(&view.settings.borrow());
+                view.settings.borrow_mut().record_usage(&view.site, &view.key, &repo_path);
+                if let Err(error) = preferences::save_git(&view.settings.borrow()) {
+                    report(&view.info, &format!("Worktree created; failed to save preference: {error}"));
+                }
                 view.refresh();
                 match result {
-                    Ok(_) => {
+                    Ok(log) => {
+                        view.show_log(&log);
                         report(&view.info, "Worktree created.");
                         if open {
                             if let Err(error) = git::open_editor(&path, &editor) {
@@ -256,7 +274,10 @@ impl View {
                             }
                         }
                     }
-                    Err(error) => report(&view.info, &error),
+                    Err(error) => {
+                        view.show_log(&error);
+                        report(&view.info, "Setup failed. You can retry or open the worktree.");
+                    },
                 }
             } else if let Err(error) = result {
                 report(&view.info, &error);
@@ -278,8 +299,14 @@ impl View {
         poll(rx, move |result| {
             view.retry.set_sensitive(true);
             match result {
-                Ok(_) => report(&view.info, "Setup completed successfully."),
-                Err(error) => report(&view.info, &error.to_string()),
+                Ok(log) => {
+                    view.show_log(&log);
+                    report(&view.info, "Setup completed successfully.");
+                }
+                Err(error) => {
+                    view.show_log(&error.to_string());
+                    report(&view.info, "Setup failed. See log.");
+                }
             }
         });
     }
@@ -333,12 +360,6 @@ impl View {
         });
         confirmation.present();
     }
-}
-
-fn repo_path(view: &View, path: &Path) -> String {
-    // The path to a worktree isn't the registered repository path.
-    let _ = path;
-    view.selected().map(|r| r.path).unwrap_or_default()
 }
 
 fn open_selected(view: &Rc<View>) {
@@ -498,6 +519,17 @@ pub fn show(parent: &adw::ApplicationWindow, site: &str, key: &str, summary: &st
     info.set_selectable(true);
     info.set_wrap(true);
     main.append(&info);
+    let log_scroller = gtk::ScrolledWindow::new();
+    log_scroller.set_min_content_height(90);
+    log_scroller.set_max_content_height(160);
+    log_scroller.set_visible(false);
+    let log = gtk::TextView::new();
+    log.set_monospace(true);
+    log.set_editable(false);
+    log.set_cursor_visible(false);
+    log.set_wrap_mode(gtk::WrapMode::WordChar);
+    log_scroller.set_child(Some(&log));
+    main.append(&log_scroller);
 
     let actions = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     actions.set_halign(gtk::Align::End);
@@ -512,14 +544,22 @@ pub fn show(parent: &adw::ApplicationWindow, site: &str, key: &str, summary: &st
     actions.append(&open);
     actions.append(&create);
     main.append(&actions);
-    dialog.set_child(Some(&main));
+    let scroll = gtk::ScrolledWindow::new();
+    scroll.set_vexpand(true);
+    scroll.set_child(Some(&main));
+    dialog.set_child(Some(&scroll));
 
-    let preferred = settings.preferred_index(site, key);
+    let preferred = settings.repositories.iter().position(|repo| {
+        git::matching_worktrees(Path::new(&repo.path), key)
+            .is_ok_and(|trees| !trees.is_empty())
+    }).or_else(|| settings.preferred_index(site, key));
     let view = Rc::new(View {
         dialog: dialog.clone(), settings: Rc::new(RefCell::new(settings)),
-        site: site.into(), key: key.into(), repository: repository.clone(),
+        site: site.into(), key: key.into(),
+        suggested_branch: issue_detail::suggested_branch_name(key, summary),
+        repository: repository.clone(),
         base, branch, root, editor, setup, run_setup, fetch, after_open,
-        summary: summary_label, path, info, create, open, retry, remove,
+        summary: summary_label, path, info, log, log_scroller, create, open, retry, remove,
         active_tree: Rc::new(RefCell::new(None)),
     });
     {
