@@ -117,6 +117,7 @@ struct View {
     cleanup_target: gtk::DropDown,
     branch: gtk::Entry,
     root: gtk::Entry,
+    root_field: gtk::Box,
     editor: gtk::DropDown,
     setup: gtk::Entry,
     run_setup: gtk::CheckButton,
@@ -164,6 +165,8 @@ impl View {
             self.create.set_sensitive(false);
             self.new_box.set_visible(false);
             self.existing_box.set_visible(false);
+            self.root_field.set_visible(false);
+            self.after_open.set_visible(false);
             self.open.set_visible(false);
             self.more.set_visible(false);
             self.summary.set_text("Add a local Git repository to get started.");
@@ -198,6 +201,8 @@ impl View {
             self.summary.set_visible(!existing.is_empty());
             self.new_box.set_visible(true);
             self.existing_box.set_visible(false);
+            self.root_field.set_visible(true);
+            self.after_open.set_visible(true);
             self.create.set_visible(true);
             self.create.set_sensitive(true);
             self.open.set_visible(false);
@@ -240,6 +245,8 @@ impl View {
         self.path.set_tooltip_text(Some(&tree.path.to_string_lossy()));
         self.new_box.set_visible(false);
         self.existing_box.set_visible(true);
+        self.root_field.set_visible(false);
+        self.after_open.set_visible(false);
         self.create.set_visible(false);
         self.open.set_visible(true);
         self.more.set_visible(true);
@@ -661,7 +668,8 @@ pub fn show(parent: &adw::ApplicationWindow, site: &str, key: &str, summary: &st
     advanced.append(&field("Setup command", &setup));
     let root = gtk::Entry::new();
     root.set_text(&settings.worktree_root);
-    advanced.append(&field("Worktree root (~/Worktrees/<repo>/<ticket>)", &root));
+    let root_field = field("Worktree root (~/Worktrees/<repo>/<ticket>)", &root);
+    advanced.append(&root_field);
     let editor = gtk::DropDown::from_strings(&["code", "codium"]);
     editor.set_selected(if settings.editor == "codium" { 1 } else { 0 });
     advanced.append(&field("Editor", &editor));
@@ -753,7 +761,7 @@ pub fn show(parent: &adw::ApplicationWindow, site: &str, key: &str, summary: &st
         site: site.into(), key: key.into(),
         suggested_branch: issue_detail::suggested_branch_name(key, summary),
         repository: repository.clone(),
-        base, cleanup_target, branch, root, editor, setup, run_setup, fetch, after_open,
+        base, cleanup_target, branch, root, root_field, editor, setup, run_setup, fetch, after_open,
         summary: summary_label, path, existing_branch, existing_box, new_box,
         tree_picker, trees: Rc::new(RefCell::new(Vec::new())), more,
         info, log, log_scroller, create, open, retry, terminal, remove,
