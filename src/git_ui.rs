@@ -221,11 +221,20 @@ impl View {
         let Some(tree) = tree else { return; };
         self.existing_branch.set_text(tree.branch.as_deref().unwrap_or("Detached HEAD"));
         let status = git::status(&tree.path);
-        self.summary.set_text(match status {
-            Ok(ref value) if value.is_empty() => "Clean worktree",
-            Ok(_) => "Uncommitted changes",
+        self.summary.remove_css_class("git-status-clean");
+        self.summary.remove_css_class("git-status-dirty");
+        let message = match status {
+            Ok(ref value) if value.is_empty() => {
+                self.summary.add_css_class("git-status-clean");
+                "Clean worktree"
+            }
+            Ok(_) => {
+                self.summary.add_css_class("git-status-dirty");
+                "Uncommitted changes"
+            }
             Err(_) => "Git status unavailable",
-        });
+        };
+        self.summary.set_text(message);
         self.summary.set_visible(true);
         self.path.set_text(&tree.path.to_string_lossy());
         self.path.set_tooltip_text(Some(&tree.path.to_string_lossy()));
