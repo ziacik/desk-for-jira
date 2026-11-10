@@ -252,7 +252,6 @@ impl DevelopmentPanel {
         copy.add_css_class("flat");
         copy.add_css_class("ticket-development-icon-button");
         copy.set_tooltip_text(Some("Copy worktree path"));
-        copy.set_accessible_role(gtk::AccessibleRole::Button);
         let destination = path.to_owned();
         let toast = self.toast.clone();
         copy.connect_clicked(move |_| {
