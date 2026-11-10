@@ -64,7 +64,6 @@ struct Ui {
     history_forward: gtk::Button,
     issue_history: Rc<RefCell<IssueHistory>>,
     open_in_jira: gtk::Button,
-    copy_branch: gtk::Button,
     pin_detail: gtk::Button,
     state: Rc<RefCell<State>>,
     saved_detail_width: Rc<Cell<i32>>,
@@ -513,15 +512,6 @@ fn build_ui(app: &adw::Application) {
     open_in_jira.set_tooltip_text(Some("Open this issue in Jira"));
     open_in_jira.set_visible(false);
     detail_header.pack_end(&open_in_jira);
-    let copy_branch = gtk::Button::new();
-    copy_branch.set_child(Some(&issue_detail::header_action_icon(
-        issue_detail::HeaderActionIcon::Branch,
-    )));
-    copy_branch.add_css_class("flat");
-    copy_branch.add_css_class("detail-header-action");
-    copy_branch.set_tooltip_text(Some("Open worktree (manage via Ctrl+K)"));
-    copy_branch.set_visible(false);
-    detail_header.pack_end(&copy_branch);
     let pin_detail = gtk::Button::from_icon_name("view-pin-symbolic");
     pin_detail.add_css_class("flat");
     pin_detail.add_css_class("detail-header-action");
@@ -728,7 +718,7 @@ fn build_ui(app: &adw::Application) {
         children_request: Rc::new(Cell::new(0)),
         detail_actions, detail_panel, detail_heading, history_back, history_forward,
         issue_history: Rc::new(RefCell::new(IssueHistory::default())),
-        open_in_jira, copy_branch, pin_detail, inner_split,
+        open_in_jira, pin_detail, inner_split,
         state: state.clone(),
         detail_request: Rc::new(Cell::new(0)),
         transition_busy: Rc::new(Cell::new(false)),
@@ -766,22 +756,6 @@ fn build_ui(app: &adw::Application) {
                 let _ = gtk::gio::AppInfo::launch_default_for_uri(
                     &url, None::<&gtk::gio::AppLaunchContext>
                 );
-            }
-        });
-    }
-    {
-        let ui = ui.clone();
-        ui.copy_branch.clone().connect_clicked(move |_| {
-            let key = ui.selected_issue.borrow().clone();
-            let state = ui.state.borrow();
-            let issue = key.as_deref().and_then(|key| {
-                state.issues.iter().chain(state.pinned_issues.iter())
-                    .chain(state.recent_issues.iter())
-                    .find(|issue| issue.key == key)
-            });
-            if let (Some(issue), Some(account)) = (issue, state.account.as_ref()) {
-                crate::git_ui::open_or_manage(&ui.window, &ui.toast,
-                    &account.base_url, &issue.key, &issue.summary);
             }
         });
     }
@@ -3420,7 +3394,6 @@ fn open_issue(ui: &Ui, issue: &Issue, source_button: Option<&gtk::Button>) {
     let base_url = account.as_ref().map(|account| account.base_url.as_str()).unwrap_or("");
     ui.detail_heading.set_text(&issue.key);
     ui.open_in_jira.set_visible(!base_url.is_empty());
-    ui.copy_branch.set_visible(true);
     ui.pin_detail.set_visible(true);
     style_pin_button(&ui.pin_detail,
         ui.state.borrow().settings.pinned_issues.iter().any(|key| key == &issue.key));
