@@ -675,7 +675,9 @@ pub fn show(parent: &adw::ApplicationWindow, site: &str, key: &str, summary: &st
     advanced.append(&field("Editor", &editor));
     let after_open = gtk::CheckButton::with_label("Open in editor after worktree creation");
     after_open.set_active(true);
-    advanced.append(&after_open);
+    // This causes an additional action when Create worktree is pressed.
+    // Keep it visible during creation rather than hiding it in Advanced.
+    new_box.append(&after_open);
     options.set_child(Some(&advanced));
     main.append(&options);
 
