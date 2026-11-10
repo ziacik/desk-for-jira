@@ -221,15 +221,29 @@ impl DevelopmentPanel {
         self.state.set_text(value);
     }
 
-    fn detail(&self, main: &str, secondary: &str) {
-        let value = text(main, "ticket-development-value");
-        value.set_tooltip_text(Some(main));
-        self.body.append(&value);
-        if !secondary.is_empty() {
-            let note = text(secondary, "ticket-development-muted");
-            note.set_tooltip_text(Some(secondary));
-            self.body.append(&note);
+    fn info(title: &str, subtitle: &str) -> gtk::Box {
+        let info = gtk::Box::new(gtk::Orientation::Vertical, 4);
+        info.set_hexpand(true);
+        info.set_valign(gtk::Align::Center);
+        let title_label = text(title, "ticket-development-value");
+        title_label.set_tooltip_text(Some(title));
+        info.append(&title_label);
+        if !subtitle.is_empty() {
+            let subtitle_label = text(subtitle, "ticket-development-muted");
+            subtitle_label.set_tooltip_text(Some(subtitle));
+            info.append(&subtitle_label);
         }
+        info
+    }
+
+    fn action_row(info: &gtk::Box, button: &gtk::Button) -> gtk::Box {
+        let row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+        row.add_css_class("ticket-development-row");
+        row.append(info);
+        button.set_halign(gtk::Align::End);
+        button.set_valign(gtk::Align::Center);
+        row.append(button);
+        row
     }
 
     fn manager(&self, site: &str, key: &str, summary: &str) {
@@ -252,8 +266,7 @@ impl DevelopmentPanel {
 
     fn manager_button(&self, label: &str, site: &str, key: &str, summary: &str) -> gtk::Button {
         let button = gtk::Button::with_label(label);
-        button.add_css_class("suggested-action");
-        button.add_css_class("ticket-development-primary");
+        button.add_css_class("ticket-development-action");
         let panel = self.clone();
         let site = site.to_owned();
         let key = key.to_owned();
@@ -269,8 +282,7 @@ impl DevelopmentPanel {
         } else {
             "Open in VS Code"
         });
-        button.add_css_class("suggested-action");
-        button.add_css_class("ticket-development-primary");
+        button.add_css_class("ticket-development-action");
         let path = path.to_path_buf();
         let toast = self.toast.clone();
         button.connect_clicked(move |_| {
@@ -286,30 +298,29 @@ impl DevelopmentPanel {
         match result {
             Ok(Snapshot::Unconfigured) => {
                 self.set_state("Not configured", None);
-                self.detail("No Git repositories configured",
-                    "Add a local repository before creating a ticket worktree.");
-                self.body.append(&self.manager_button("Configure repositories…", site, key, summary));
+                let info = Self::info("No Git repositories configured",
+                    "Add a local repository to create a ticket worktree.");
+                let button = self.manager_button("Configure repositories…", site, key, summary);
+                self.body.append(&Self::action_row(&info, &button));
             }
             Ok(Snapshot::Missing {
                 repository, branch, destination, base, matching_branches,
             }) => {
                 self.set_state("No worktree", None);
-                self.detail(&format!("Suggested repository · {repository}"),
-                    &format!("Branch · {branch}"));
-                let destination_label = text(&format!("Destination · {destination}"),
-                    "ticket-development-muted");
-                destination_label.set_tooltip_text(Some(&destination));
-                self.body.append(&destination_label);
+                let info = Self::info(&format!("{repository} · {branch}"), &destination);
                 let note = if matching_branches > 1 {
-                    "Multiple matching branches. Choose one in the dialog."
+                    "Multiple matching branches; choose one in the dialog"
                 } else if matching_branches == 1 {
-                    "Existing branch. Review before creating the worktree."
+                    "Existing branch; review before creating the worktree"
                 } else {
-                    "Opens the creation dialog. Git is unchanged until confirmation."
+                    "Review the starting point and setup before creating"
                 };
-                self.body.append(&text(&format!("Starting point · {base}"), "ticket-development-muted"));
-                self.body.append(&text(note, "ticket-development-muted"));
-                self.body.append(&self.manager_button("Create worktree…", site, key, summary));
+                let detail = format!("{base} · {note}");
+                let detail_label = text(&detail, "ticket-development-muted");
+                detail_label.set_tooltip_text(Some(&detail));
+                info.append(&detail_label);
+                let button = self.manager_button("Create worktree…", site, key, summary);
+                self.body.append(&Self::action_row(&info, &button));
             }
             Ok(Snapshot::Existing { editor, worktrees }) => {
                 if worktrees.len() == 1 {
@@ -323,29 +334,27 @@ impl DevelopmentPanel {
                         Some(true) => Some("ticket-development-warning"),
                         None => None,
                     });
-                    self.detail(&format!("{} · {}", tree.repository, tree.branch),
-                        &tree.path.to_string_lossy());
-                    self.body.append(&self.editor_button(&editor, &tree.path));
+                    let info = Self::info(
+                        &format!("{} · {}", tree.repository, tree.branch),
+                        &tree.path.to_string_lossy(),
+                    );
+                    let button = self.editor_button(&editor, &tree.path);
+                    self.body.append(&Self::action_row(&info, &button));
                 } else {
                     self.set_state(&format!("{} worktrees", worktrees.len()), Some("ticket-development-good"));
                     for tree in &worktrees {
-                        let item = gtk::Box::new(gtk::Orientation::Vertical, 6);
-                        item.add_css_class("ticket-development-entry");
                         let title = format!("{} · {}", tree.repository, tree.branch);
-                        let repo = text(&title, "ticket-development-value");
-                        repo.set_tooltip_text(Some(&title));
-                        item.append(&repo);
                         let status = match tree.dirty {
                             Some(false) => "Clean",
                             Some(true) => "Uncommitted changes",
                             None => "Git status unavailable",
                         };
-                        let note = format!("{} · {}", status, tree.path.display());
-                        let secondary = text(&note, "ticket-development-muted");
-                        secondary.set_tooltip_text(Some(&note));
-                        item.append(&secondary);
-                        item.append(&self.editor_button(&editor, &tree.path));
-                        self.body.append(&item);
+                        let detail = format!("{} · {}", status, tree.path.display());
+                        let info = Self::info(&title, &detail);
+                        let button = self.editor_button(&editor, &tree.path);
+                        let row = Self::action_row(&info, &button);
+                        row.add_css_class("ticket-development-entry");
+                        self.body.append(&row);
                     }
                 }
                 let manage = gtk::Button::with_label("Manage worktrees…");
@@ -361,12 +370,9 @@ impl DevelopmentPanel {
             }
             Err(error) => {
                 self.set_state("Unavailable", Some("ticket-development-warning"));
-                let reason = text("Git status could not be read", "ticket-development-value");
-                self.body.append(&reason);
-                let error_label = text(&error, "ticket-development-muted");
-                error_label.set_tooltip_text(Some(&error));
-                self.body.append(&error_label);
-                self.body.append(&self.manager_button("Manage repositories…", site, key, summary));
+                let info = Self::info("Git status could not be read", &error);
+                let button = self.manager_button("Manage repositories…", site, key, summary);
+                self.body.append(&Self::action_row(&info, &button));
             }
         }
     }
