@@ -3173,8 +3173,20 @@ fn show_command_palette(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Eve
             }
             PaletteCommand::ManageWorktree(issue) => {
                 if let Some(account) = state_for_action.borrow().account.as_ref() {
-                    crate::git_ui::show(&ui_for_action.window, &account.base_url,
-                        &issue.key, &issue.summary);
+                    let site = account.base_url.clone();
+                    let dialog = crate::git_ui::show(
+                        &ui_for_action.window, &site, &issue.key, &issue.summary,
+                    );
+                    let panel = ui_for_action.development.clone();
+                    let key = issue.key;
+                    let summary = issue.summary;
+                    let selected = ui_for_action.selected_issue.clone();
+                    dialog.connect_close_request(move |_| {
+                        if selected.borrow().as_deref() == Some(&key) {
+                            panel.refresh(&site, &key, &summary);
+                        }
+                        glib::Propagation::Proceed
+                    });
                 }
             }
             PaletteCommand::OpenInJira(issue) => {
