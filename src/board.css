@@ -1146,6 +1146,16 @@ button.worktree-global-ticket-link {
 button.worktree-global-ticket-link:hover {
   background-color: alpha(@accent_bg_color, 0.16);
 }
+/* Jira workflow state is informational, not a Git error/warning.
+   Preserve the actual Jira status text rather than guessing category colors. */
+.worktree-global-ticket-status {
+  padding: 3px 8px;
+  border-radius: 7px;
+  background-color: alpha(@window_fg_color, 0.06);
+  color: alpha(@window_fg_color, 0.82);
+  font-size: 0.84em;
+  font-weight: 600;
+}
 .worktree-global-status {
   padding: 3px 9px;
   border-radius: 999px;
