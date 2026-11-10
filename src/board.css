@@ -1044,6 +1044,13 @@ button.git-small-action:hover {
   color: alpha(@window_fg_color, 0.72);
   font-size: 0.91em;
 }
+.ticket-development-repository-row {
+  min-height: 22px;
+}
+.ticket-development-branch {
+  color: alpha(@window_fg_color, 0.73);
+  font-size: 0.95em;
+}
 .ticket-development-path-row {
   min-height: 33px;
   padding: 3px 7px 3px 9px;
