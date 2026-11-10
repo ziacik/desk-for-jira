@@ -221,10 +221,10 @@ pub fn remove_merged_worktree(repository: &Path, tree: &Worktree, target: &str) 
     if !is_repository(repository) { bail!("Repository is missing"); }
     if target.trim().is_empty() { bail!("Select the branch it was merged into"); }
     let branch = tree.branch.as_deref().context("Detached worktree cannot be removed here")?;
-    let registered = worktrees(repository)?;
-    if registered.first().is_some_and(|primary| primary.path == tree.path) {
+    if is_primary_worktree(repository, tree)? {
         bail!("The primary checkout cannot be removed");
     }
+    let registered = worktrees(repository)?;
     if !registered.iter().any(|t| t.path == tree.path && t.branch == tree.branch) {
         bail!("Worktree is no longer registered in this repository");
     }
