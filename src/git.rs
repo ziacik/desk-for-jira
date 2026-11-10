@@ -185,6 +185,12 @@ pub fn run_setup(worktree: &Path, script: &str) -> Result<String> {
 
 pub fn open_editor(worktree: &Path, editor: &str) -> Result<()> {
     if !matches!(editor, "code" | "codium") { bail!("Unsupported editor"); }
+    // "Open worktree" must never become an implicit creation path.
+    // A stale UI target or a deleted folder must fail, not open an empty
+    // VS Code workspace at a non-existent destination.
+    if !is_repository(worktree) {
+        bail!("Worktree directory is missing or is not a Git repository: {}", worktree.display());
+    }
     Command::new(editor).arg(worktree).spawn()
         .with_context(|| format!("Unable to open {editor}"))?;
     Ok(())
