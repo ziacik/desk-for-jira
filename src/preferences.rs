@@ -236,6 +236,8 @@ pub struct UiLayout {
     pub sidebar_visible: bool,
     pub sidebar_width: i32,
     pub detail_width: i32,
+    pub worktrees_window_width: i32,
+    pub worktrees_window_height: i32,
 }
 
 impl Default for UiLayout {
@@ -246,6 +248,8 @@ impl Default for UiLayout {
             sidebar_visible: true,
             sidebar_width: 224,
             detail_width: 470,
+            worktrees_window_width: 980,
+            worktrees_window_height: 760,
         }
     }
 }
@@ -256,6 +260,8 @@ impl UiLayout {
         self.window_height = self.window_height.max(580);
         self.sidebar_width = self.sidebar_width.clamp(184, 800);
         self.detail_width = self.detail_width.clamp(320, 2048);
+        self.worktrees_window_width = self.worktrees_window_width.clamp(640, 2400);
+        self.worktrees_window_height = self.worktrees_window_height.clamp(480, 1600);
         self
     }
 }
@@ -410,6 +416,20 @@ mod tests {
             category: None, workflow_order: None,
         }
     }
+    #[test]
+    fn worktrees_window_size_defaults_and_clamps() {
+        let defaults = UiLayout::default();
+        assert_eq!((defaults.worktrees_window_width, defaults.worktrees_window_height), (980, 760));
+        let invalid = UiLayout {
+            worktrees_window_width: 0,
+            worktrees_window_height: 5000,
+            ..UiLayout::default()
+        };
+        let corrected = invalid.sanitized();
+        assert_eq!(corrected.worktrees_window_width, 640);
+        assert_eq!(corrected.worktrees_window_height, 1600);
+    }
+
     #[test]
     fn first_load_uses_real_workflow_order_independent_of_names() {
         let mut board = BoardSettings {
