@@ -301,7 +301,7 @@ impl DevelopmentPanel {
     }
 
     fn manage_button(&self, site: &str, key: &str, summary: &str) -> gtk::Button {
-        self.manager_button("Manage worktrees…", site, key, summary)
+        self.manager_button("Manage worktree…", site, key, summary)
     }
 
     fn manager(&self, site: &str, key: &str, summary: &str) {
@@ -383,7 +383,7 @@ impl DevelopmentPanel {
             Ok(Snapshot::Existing { editor, worktrees }) => {
                 if worktrees.len() == 1 {
                     let tree = &worktrees[0];
-                    self.set_state("Exists", Some("ticket-development-good"));
+                    self.set_state("Created", Some("ticket-development-good"));
                     self.set_git_status(Some(match tree.dirty {
                         Some(false) => "Clean",
                         Some(true) => "Uncommitted changes",
@@ -393,9 +393,11 @@ impl DevelopmentPanel {
                         &tree.repository, &tree.branch,
                     ));
                     self.body.append(&self.path_row(&tree.path.to_string_lossy()));
-                    let open = self.editor_button(&editor, &tree.path);
+                    // Worktree management is the primary action. Editor launch is
+                    // secondary and never creates or changes a worktree.
                     let manage = self.manage_button(site, key, summary);
-                    self.body.append(&Self::actions_row(&open, Some(&manage)));
+                    let open = self.editor_button(&editor, &tree.path);
+                    self.body.append(&Self::actions_row(&manage, Some(&open)));
                 } else {
                     self.set_state(&format!("{} worktrees", worktrees.len()), Some("ticket-development-good"));
                     for tree in &worktrees {
