@@ -895,11 +895,20 @@ fn build_ui(app: &adw::Application) {
     ui.window.present();
 }
 
+/// Reuse in-app issue navigation, including Jira loading for tickets that
+/// are not currently cached on the board.
+fn show_all_worktrees(ui: &Ui) {
+    let events = ui.events.clone();
+    crate::all_worktrees::show(&ui.window, &ui.toast, Rc::new(move |key| {
+        let _ = events.send(Event::OpenLinkedIssue(key));
+    }));
+}
+
 fn wire_actions(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>) {
     {
         let ui = ui.clone();
         ui.worktrees_button.clone().connect_clicked(move |_| {
-            crate::all_worktrees::show(&ui.window, &ui.toast);
+            show_all_worktrees(&ui);
         });
     }
     {
@@ -3184,7 +3193,7 @@ fn show_command_palette(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Eve
                 }
             }
             PaletteCommand::AllWorktrees => {
-                crate::all_worktrees::show(&ui_for_action.window, &ui_for_action.toast);
+                show_all_worktrees(&ui_for_action);
             }
             PaletteCommand::FocusBoardSearch => {
                 ui_for_action.search.grab_focus();
