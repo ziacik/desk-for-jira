@@ -3182,7 +3182,7 @@ fn show_command_palette(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Eve
                     let summary = issue.summary;
                     let selected = ui_for_action.selected_issue.clone();
                     dialog.connect_close_request(move |_| {
-                        if selected.borrow().as_deref() == Some(&key) {
+                        if selected.borrow().as_deref() == Some(key.as_str()) {
                             panel.refresh(&site, &key, &summary);
                         }
                         glib::Propagation::Proceed
