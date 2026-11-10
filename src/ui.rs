@@ -2934,13 +2934,6 @@ fn render_board(ui: &Ui, state: &State) {
     }
 }
 
-// Fixed FNV-1a hashing keeps an Epic's accent stable across launches and scopes.
-fn epic_color_index(key: &str) -> u32 {
-    key.bytes().fold(0x811c9dc5_u32, |hash, byte| {
-        (hash ^ u32::from(byte)).wrapping_mul(0x01000193)
-    }) % 8
-}
-
 // The Epic label is inside a ticket card, but it navigates independently:
 // never let GTK's default hyperlink handler launch the browser.
 fn connect_epic_card_navigation(label: &gtk::Label, key: &str, events: &Sender<Event>) {
