@@ -53,6 +53,7 @@ fn selected_index(dropdown: &gtk::DropDown) -> Option<usize> {
 fn report(info: &gtk::Label, message: &str) {
     info.set_text(message);
     info.set_tooltip_text(Some(message));
+    info.set_visible(!message.is_empty());
 }
 
 fn poll<T: 'static>(receiver: Receiver<T>, done: impl Fn(T) + 'static) {
@@ -497,39 +498,83 @@ pub fn show(parent: &adw::ApplicationWindow, site: &str, key: &str, summary: &st
         }
     };
     let dialog = gtk::Window::builder().title(format!("Development · {key}"))
-        .transient_for(parent).modal(true).default_width(540)
-        .default_height(580).build();
-    let main = gtk::Box::new(gtk::Orientation::Vertical, 12);
-    main.set_margin_start(20);
-    main.set_margin_end(20);
-    main.set_margin_top(18);
-    main.set_margin_bottom(18);
-    let heading = label(summary);
-    heading.add_css_class("title-4");
-    main.append(&heading);
+        .transient_for(parent).modal(true).default_width(500)
+        .default_height(480).build();
+    dialog.add_css_class("git-worktree-dialog");
 
-    let controls = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    // The title and all routine controls stay compact. Rarely used repository
+    // registration and setup configuration belong in disclosure menus.
+    let surface = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    let scroll = gtk::ScrolledWindow::new();
+    scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
+    scroll.set_vexpand(true);
+    let main = gtk::Box::new(gtk::Orientation::Vertical, 14);
+    main.add_css_class("git-dialog-content");
+    scroll.set_child(Some(&main));
+    surface.append(&scroll);
+
+    let hero = gtk::Box::new(gtk::Orientation::Vertical, 4);
+    let eyebrow = label(&format!("{key} · DEVELOPMENT"));
+    eyebrow.add_css_class("git-dialog-eyebrow");
+    hero.append(&eyebrow);
+    let heading = label(summary);
+    heading.add_css_class("git-dialog-title");
+    heading.set_wrap(true);
+    heading.set_lines(2);
+    heading.set_ellipsize(gtk::pango::EllipsizeMode::End);
+    hero.append(&heading);
+    main.append(&hero);
+
+    let section = gtk::Box::new(gtk::Orientation::Vertical, 12);
+    section.add_css_class("git-dialog-section");
+    main.append(&section);
+    let controls = gtk::Box::new(gtk::Orientation::Horizontal, 7);
     let repository = gtk::DropDown::from_strings(&[]);
     repository.set_hexpand(true);
-    let add = gtk::Button::with_label("Add folder");
-    let scan = gtk::Button::with_label("Scan…");
+    repository.add_css_class("git-repository-choice");
+    let manage = gtk::MenuButton::new();
+    manage.set_icon_name("emblem-system-symbolic");
+    manage.add_css_class("flat");
+    manage.add_css_class("git-small-action");
+    manage.set_tooltip_text(Some("Add or scan repositories"));
+    let add = gtk::Button::with_label("Add folder…");
+    let scan = gtk::Button::with_label("Scan folder…");
+    let repo_menu = gtk::Popover::new();
+    let repo_actions = gtk::Box::new(gtk::Orientation::Vertical, 4);
+    repo_actions.add_css_class("git-menu-actions");
+    for button in [&add, &scan] {
+        button.set_halign(gtk::Align::Fill);
+        button.add_css_class("flat");
+        repo_actions.append(button);
+    }
+    repo_menu.set_child(Some(&repo_actions));
+    manage.set_popover(Some(&repo_menu));
     controls.append(&repository);
-    controls.append(&add);
-    controls.append(&scan);
-    main.append(&field("Repository", &controls));
+    controls.append(&manage);
+    section.append(&field("Repository", &controls));
 
+    let summary_label = label("");
+    summary_label.add_css_class("git-dialog-status");
+    summary_label.set_visible(false);
+    section.append(&summary_label);
+
+    let new_box = gtk::Box::new(gtk::Orientation::Vertical, 12);
     let base = gtk::DropDown::from_strings(&[]);
     base.set_hexpand(true);
-    main.append(&field("Base branch (also used for safe cleanup)", &base));
+    new_box.append(&field("Starting point", &base));
+
     let branch = gtk::Entry::new();
     branch.set_hexpand(true);
     branch.set_text(&issue_detail::suggested_branch_name(key, summary));
-    let branch_actions = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    branch.set_tooltip_text(Some(&issue_detail::suggested_branch_name(key, summary)));
+    let branch_actions = gtk::Box::new(gtk::Orientation::Horizontal, 7);
     branch_actions.append(&branch);
     let copy_branch = gtk::Button::from_icon_name("edit-copy-symbolic");
+    copy_branch.add_css_class("flat");
+    copy_branch.add_css_class("git-small-action");
     copy_branch.set_tooltip_text(Some("Copy branch name"));
     branch_actions.append(&copy_branch);
-    main.append(&field("Branch", &branch_actions));
+    new_box.append(&field("New branch", &branch_actions));
     {
         let branch = branch.clone();
         copy_branch.connect_clicked(move |_| {
@@ -538,41 +583,88 @@ pub fn show(parent: &adw::ApplicationWindow, site: &str, key: &str, summary: &st
             }
         });
     }
+    section.append(&new_box);
 
-    let root = gtk::Entry::new();
-    root.set_text(&settings.worktree_root);
-    main.append(&field("Worktree root (~/Worktrees/<repo>/<ticket>)", &root));
+    // Existing worktrees have their own focused state, never the create form.
+    let existing_box = gtk::Box::new(gtk::Orientation::Vertical, 8);
+    existing_box.set_visible(false);
+    let existing_caption = label("EXISTING WORKTREE");
+    existing_caption.add_css_class("git-dialog-eyebrow");
+    existing_box.append(&existing_caption);
+    let tree_picker = gtk::DropDown::from_strings(&[]);
+    tree_picker.set_hexpand(true);
+    tree_picker.set_visible(false);
+    existing_box.append(&tree_picker);
+    let existing_branch = label("");
+    existing_branch.set_selectable(true);
+    existing_branch.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
+    existing_branch.add_css_class("git-branch-name");
+    existing_box.append(&existing_branch);
+    section.append(&existing_box);
+
+    let destination = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    destination.add_css_class("git-dialog-destination");
+    let location_icon = gtk::Image::from_icon_name("folder-symbolic");
+    location_icon.add_css_class("git-destination-icon");
+    destination.append(&location_icon);
     let path = label("");
+    path.set_wrap(false);
+    path.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
+    path.set_hexpand(true);
     path.set_selectable(true);
-    path.add_css_class("dim-label");
-    main.append(&path);
+    path.add_css_class("git-dialog-path");
+    destination.append(&path);
+    let copy_path = gtk::Button::from_icon_name("edit-copy-symbolic");
+    copy_path.add_css_class("flat");
+    copy_path.add_css_class("git-small-action");
+    copy_path.set_tooltip_text(Some("Copy worktree directory"));
+    destination.append(&copy_path);
+    {
+        let path = path.clone();
+        copy_path.connect_clicked(move |_| {
+            if let Some(display) = gtk::gdk::Display::default() {
+                display.clipboard().set_text(&path.text());
+            }
+        });
+    }
+    section.append(&destination);
+
     let fetch = gtk::CheckButton::with_label("Fetch remote refs before creating");
     fetch.set_active(settings.fetch_before_create);
-    main.append(&fetch);
+    new_box.append(&fetch);
 
+    let run_setup = gtk::CheckButton::with_label("Run repository setup once after creating");
+    new_box.append(&run_setup);
+
+    let options = gtk::Expander::new(Some("Advanced options"));
+    options.add_css_class("git-dialog-options");
+    let advanced = gtk::Box::new(gtk::Orientation::Vertical, 12);
+    advanced.add_css_class("git-dialog-advanced");
     let setup = gtk::Entry::new();
-    setup.set_placeholder_text(Some("npm install / pnpm install / other command"));
-    main.append(&field("Setup command (runs once after creation)", &setup));
-    let run_setup = gtk::CheckButton::with_label("Run setup after creating");
-    main.append(&run_setup);
+    setup.set_placeholder_text(Some("e.g. npm install"));
+    advanced.append(&field("Setup command", &setup));
+    let root = gtk::Entry::new();
+    root.set_text(&settings.worktree_root);
+    advanced.append(&field("Worktree root (~/Worktrees/<repo>/<ticket>)", &root));
     let editor = gtk::DropDown::from_strings(&["code", "codium"]);
     editor.set_selected(if settings.editor == "codium" { 1 } else { 0 });
-    main.append(&field("Editor", &editor));
+    advanced.append(&field("Editor", &editor));
     let after_open = gtk::CheckButton::with_label("Open in editor after creation");
     after_open.set_active(true);
-    main.append(&after_open);
+    advanced.append(&after_open);
+    options.set_child(Some(&advanced));
+    main.append(&options);
 
-    let summary_label = label("");
-    summary_label.add_css_class("dim-label");
-    main.append(&summary_label);
     let info = label("");
     info.set_selectable(true);
-    info.set_wrap(true);
+    info.set_visible(false);
+    info.add_css_class("git-dialog-message");
     main.append(&info);
     let log_scroller = gtk::ScrolledWindow::new();
-    log_scroller.set_min_content_height(90);
-    log_scroller.set_max_content_height(160);
+    log_scroller.set_min_content_height(100);
+    log_scroller.set_max_content_height(155);
     log_scroller.set_visible(false);
+    log_scroller.add_css_class("git-dialog-log");
     let log = gtk::TextView::new();
     log.set_monospace(true);
     log.set_editable(false);
@@ -581,26 +673,61 @@ pub fn show(parent: &adw::ApplicationWindow, site: &str, key: &str, summary: &st
     log_scroller.set_child(Some(&log));
     main.append(&log_scroller);
 
-    let actions = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-    actions.set_halign(gtk::Align::End);
-    let create = gtk::Button::with_label("Create worktree");
-    create.add_css_class("suggested-action");
-    let open = gtk::Button::with_label("Open in editor");
+    // Footer stays visible when the log or advanced settings grow vertically.
+    let footer = gtk::Box::new(gtk::Orientation::Horizontal, 9);
+    footer.add_css_class("git-dialog-footer");
+    let cancel = gtk::Button::with_label("Cancel");
+    cancel.add_css_class("flat");
+    footer.append(&cancel);
+    let spacer = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    spacer.set_hexpand(true);
+    footer.append(&spacer);
+    let more = gtk::MenuButton::new();
+    more.set_icon_name("view-more-symbolic");
+    more.set_tooltip_text(Some("More worktree actions"));
+    more.set_visible(false);
+    let actions = gtk::Box::new(gtk::Orientation::Vertical, 4);
+    actions.add_css_class("git-menu-actions");
+    let retry = gtk::Button::with_label("Run setup again");
+    let terminal = gtk::Button::with_label("Open terminal");
+    let remove = gtk::Button::with_label("Remove worktree…");
+    for action in [&terminal, &retry, &remove] {
+        action.add_css_class("flat");
+        action.set_halign(gtk::Align::Fill);
+        actions.append(action);
+    }
+    let actions_popover = gtk::Popover::new();
+    actions_popover.set_child(Some(&actions));
+    more.set_popover(Some(&actions_popover));
+    footer.append(&more);
+    let open = gtk::Button::with_label("Open in VS Code");
     open.add_css_class("suggested-action");
-    let retry = gtk::Button::with_label("Run setup");
-    let terminal = gtk::Button::with_label("Terminal");
-    let remove = gtk::Button::with_label("Remove…");
-    actions.append(&remove);
-    actions.append(&retry);
-    actions.append(&terminal);
-    actions.append(&open);
-    actions.append(&create);
-    main.append(&actions);
-    let scroll = gtk::ScrolledWindow::new();
-    scroll.set_vexpand(true);
-    scroll.set_child(Some(&main));
-    dialog.set_child(Some(&scroll));
-
+    let create = gtk::Button::with_label("Create & Open");
+    create.add_css_class("suggested-action");
+    footer.append(&open);
+    footer.append(&create);
+    surface.append(&footer);
+    dialog.set_child(Some(&surface));
+    {
+        let dialog = dialog.clone();
+        cancel.connect_clicked(move |_| dialog.close());
+    }
+    {
+        let create = create.clone();
+        after_open.connect_toggled(move |check| {
+            create.set_label(if check.is_active() { "Create & Open" } else { "Create worktree" });
+        });
+    }
+    {
+        let open = open.clone();
+        editor.connect_selected_notify(move |dropdown| {
+            open.set_label(if selected_text(dropdown).as_deref() == Some("codium") {
+                "Open in VSCodium"
+            } else {
+                "Open in VS Code"
+            });
+        });
+    }
     let preferred = settings.repositories.iter().position(|repo| {
         git::matching_worktrees(Path::new(&repo.path), key)
             .is_ok_and(|trees| !trees.is_empty())
@@ -611,8 +738,9 @@ pub fn show(parent: &adw::ApplicationWindow, site: &str, key: &str, summary: &st
         suggested_branch: issue_detail::suggested_branch_name(key, summary),
         repository: repository.clone(),
         base, branch, root, editor, setup, run_setup, fetch, after_open,
-        summary: summary_label, path, info, log, log_scroller,
-        create, open, retry, terminal, remove,
+        summary: summary_label, path, existing_branch, existing_box, new_box,
+        tree_picker, trees: Rc::new(RefCell::new(Vec::new())), more,
+        info, log, log_scroller, create, open, retry, terminal, remove,
         active_tree: Rc::new(RefCell::new(None)),
     });
     {
