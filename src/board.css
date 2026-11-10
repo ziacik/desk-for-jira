@@ -1044,11 +1044,22 @@ button.git-small-action:hover {
   color: alpha(@window_fg_color, 0.64);
   font-size: 0.82em;
 }
-.ticket-development button.ticket-development-primary {
-  min-height: 36px;
-  margin-top: 3px;
-  border-radius: 9px;
+.ticket-development-row {
+  min-height: 40px;
+}
+.ticket-development button.ticket-development-action {
+  min-height: 32px;
+  padding: 5px 12px;
+  border: 1px solid alpha(@window_fg_color, 0.17);
+  border-radius: 8px;
+  background-color: @card_bg_color;
+  color: @window_fg_color;
   font-weight: 650;
+  box-shadow: none;
+}
+.ticket-development button.ticket-development-action:hover {
+  border-color: alpha(@accent_color, 0.45);
+  background-color: alpha(@accent_bg_color, 0.09);
 }
 .ticket-development-entry {
   padding: 8px 0 10px;
