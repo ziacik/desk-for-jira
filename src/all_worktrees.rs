@@ -1,7 +1,7 @@
 //! Repository-wide worktree browser, independent of the selected Jira ticket.
 use std::{
     cell::{Cell, RefCell},
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     path::Path,
     rc::Rc,
     sync::mpsc::{self, Receiver, TryRecvError},
@@ -14,6 +14,7 @@ use gtk::glib;
 
 use crate::{
     git::{self, Worktree},
+    jira::{Credentials, JiraClient},
     preferences::{self, GitRepository},
 };
 
@@ -181,10 +182,16 @@ struct Manager {
     sections: RefCell<Vec<Section>>,
     toast: adw::ToastOverlay,
     open_issue: Rc<dyn Fn(String)>,
+    account: Option<Credentials>,
+    ticket_badges: RefCell<HashMap<String, Vec<gtk::Label>>>,
+    ticket_request: Cell<u64>,
 }
 
 impl Manager {
     fn refresh(self: &Rc<Self>) {
+        // A new refresh invalidates pending Jira results from the previous view.
+        self.ticket_request.set(self.ticket_request.get().wrapping_add(1));
+        self.ticket_badges.borrow_mut().clear();
         clear(&self.content);
         self.sections.borrow_mut().clear();
         self.message.set_text("Checking local Git worktrees…");
@@ -196,8 +203,56 @@ impl Manager {
         poll(rx, move |result| {
             manager.spinner.stop();
             match result {
-                Ok((editor, snapshots)) => manager.show_snapshots(&editor, snapshots),
+                Ok((editor, snapshots)) => {
+                    manager.show_snapshots(&editor, snapshots);
+                    manager.load_ticket_statuses();
+                }
                 Err(error) => manager.message.set_text(&error),
+            }
+        });
+    }
+
+    /// Load current Jira workflow statuses once per window refresh. The
+    /// registered worktrees can reference tickets not present on any board.
+    /// Never block GTK or infer a status from a Git branch.
+    fn load_ticket_statuses(self: &Rc<Self>) {
+        let keys: Vec<String> = self.ticket_badges.borrow().keys().cloned().collect();
+        if keys.is_empty() { return; }
+        let Some(account) = self.account.clone() else {
+            for badges in self.ticket_badges.borrow().values() {
+                for badge in badges {
+                    badge.set_text("Jira: Disconnected");
+                    badge.set_tooltip_text(Some("Connect to Jira to see ticket status"));
+                }
+            }
+            return;
+        };
+        let generation = self.ticket_request.get();
+        let (tx, rx) = mpsc::channel();
+        thread::spawn(move || {
+            let result = JiraClient::new(account)
+                .and_then(|client| client.issue_statuses_by_keys(&keys))
+                .map_err(|error| error.to_string());
+            let _ = tx.send(result);
+        });
+        let manager = self.clone();
+        poll(rx, move |result| {
+            if manager.ticket_request.get() != generation { return; }
+            let badges = manager.ticket_badges.borrow();
+            for (key, labels) in badges.iter() {
+                let (display, tooltip) = match &result {
+                    Ok(statuses) => match statuses.get(key) {
+                        Some(status) => (format!("Jira: {status}"), format!("{key} · {status}")),
+                        None => ("Jira: Unavailable".to_owned(),
+                            format!("{key} not found or not accessible in Jira")),
+                    },
+                    Err(error) => ("Jira: Unavailable".to_owned(),
+                        format!("Unable to read {key}: {error}")),
+                };
+                for label in labels {
+                    label.set_text(&display);
+                    label.set_tooltip_text(Some(&tooltip));
+                }
             }
         });
     }
@@ -340,6 +395,16 @@ impl Manager {
                 open_issue(key.clone());
             });
             top.append(&ticket);
+            let jira_status = label("Jira: Loading…", "worktree-global-ticket-status");
+            jira_status.set_max_width_chars(26);
+            jira_status.set_ellipsize(gtk::pango::EllipsizeMode::End);
+            jira_status.set_tooltip_text(Some("Loading current workflow state from Jira"));
+            top.append(&jira_status);
+            self.ticket_badges.borrow_mut().entry(
+                snapshot.tree.branch.as_deref()
+                    .and_then(git::ticket_key_from_branch)
+                    .expect("ticket key checked above"),
+            ).or_default().push(jira_status);
         }
         let status = if !snapshot.tree.path.exists() {
             "Missing"
@@ -538,6 +603,7 @@ pub fn show(
     toast: &adw::ToastOverlay,
     open_issue: Rc<dyn Fn(String)>,
     layout_settings: Rc<RefCell<preferences::UiLayout>>,
+    account: Option<Credentials>,
 ) {
     let (width, height) = {
         let settings = layout_settings.borrow();
@@ -596,7 +662,9 @@ pub fn show(
     let manager = Rc::new(Manager {
         window: window.clone(), content, message, total: count,
         spinner, search: search.clone(), sections: RefCell::new(Vec::new()),
-        toast: toast.clone(), open_issue,
+        toast: toast.clone(), open_issue, account,
+        ticket_badges: RefCell::new(HashMap::new()),
+        ticket_request: Cell::new(0),
     });
     {
         let manager = manager.clone();
