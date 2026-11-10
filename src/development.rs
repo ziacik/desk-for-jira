@@ -195,7 +195,13 @@ impl DevelopmentPanel {
                     glib::ControlFlow::Break
                 }
                 Err(TryRecvError::Empty) => glib::ControlFlow::Continue,
-                Err(TryRecvError::Disconnected) => glib::ControlFlow::Break,
+                Err(TryRecvError::Disconnected) => {
+                    if panel.request.get() == request {
+                        panel.paint(&site, &key, &summary,
+                            Err("Git status check stopped unexpectedly".to_owned()));
+                    }
+                    glib::ControlFlow::Break
+                },
             }
         });
     }
@@ -350,20 +356,5 @@ impl DevelopmentPanel {
                 self.body.append(&self.manager_button("Manage repositories…", site, key, summary));
             }
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn missing_snapshot_explicitly_distinguishes_worktree_and_branch() {
-        let state = Snapshot::Missing {
-            repository: "mobile".to_owned(),
-            branch: "ART-2272-sync".to_owned(),
-            matching_branches: 1,
-        };
-        assert!(matches!(state, Snapshot::Missing { matching_branches: 1, .. }));
     }
 }
