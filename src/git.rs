@@ -126,6 +126,37 @@ pub fn matching_branches(repository: &Path, key: &str) -> Result<Vec<String>> {
         .map(str::to_owned).collect())
 }
 
+/// Whether a branch tip is reachable from an explicit integration ref.
+/// This checks commit ancestry, not a Jira/PR state; squash/rebase merges
+/// cannot be proven this way without consulting additional evidence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MergeStatus {
+    Merged,
+    NotConfirmed,
+}
+
+pub fn merge_status(repository: &Path, branch: &str, target: &str) -> Result<MergeStatus> {
+    if branch.trim().is_empty() || target.trim().is_empty() || target == "HEAD" {
+        bail!("Select a valid integration branch to check merge status");
+    }
+    if branch == target || target == format!("refs/heads/{branch}") {
+        bail!("Cannot compare a branch against itself");
+    }
+    // Disallow a vacuous 'merged' result from an invalid or stale ref.
+    let source = format!("refs/heads/{branch}");
+    output(repository, &["rev-parse", "--verify", "--quiet", &format!("{source}^{{commit}}")])
+        .with_context(|| format!("Branch is unavailable: {branch}"))?;
+    output(repository, &["rev-parse", "--verify", "--quiet", &format!("{target}^{{commit}}")])
+        .with_context(|| format!("Integration branch is unavailable: {target}"))?;
+    let check = command(repository, &["merge-base", "--is-ancestor", &source, target])?;
+    match check.status.code() {
+        Some(0) => Ok(MergeStatus::Merged),
+        Some(1) => Ok(MergeStatus::NotConfirmed),
+        _ => bail!("Could not check merge status: {}",
+            String::from_utf8_lossy(&check.stderr).trim()),
+    }
+}
+
 pub fn available_bases(repository: &Path) -> Result<Vec<String>> {
     let refs = output(repository, &["for-each-ref", "--format=%(refname:short)",
         "refs/heads", "refs/remotes"])?;
@@ -325,6 +356,43 @@ mod tests {
         assert!(Command::new("git").args(["-c", "user.name=Test", "-c", "user.email=test@example.org",
             "commit", "-m", "init"]).current_dir(&root).output().unwrap().status.success());
         root
+    }
+
+    #[test]
+    fn merge_status_tracks_commit_reachability_without_false_claims() {
+        let root = temporary_repo();
+        let path = root.parent().unwrap().join(
+            format!("{}-linked", root.file_name().unwrap().to_string_lossy()));
+        create(&CreateWorktree { repository: &root, destination: &path,
+            branch: "ART-2272-feature", base: "main", fetch: false }).unwrap();
+
+        // Identical tips are already reachable, even before a new commit.
+        assert_eq!(merge_status(&root, "ART-2272-feature", "main").unwrap(), MergeStatus::Merged);
+
+        fs::write(path.join("feature.txt"), "new feature").unwrap();
+        output(&path, &["add", "feature.txt"]).unwrap();
+        output(&path, &["-c", "user.name=Test", "-c", "user.email=test@example.org",
+            "commit", "-m", "feature"]).unwrap();
+        assert_eq!(merge_status(&root, "ART-2272-feature", "main").unwrap(),
+            MergeStatus::NotConfirmed);
+
+        // Merge the commit in the original checkout.
+        output(&root, &["-c", "user.name=Test", "-c", "user.email=test@example.org",
+            "merge", "--no-ff", "-m", "merge feature", "ART-2272-feature"]).unwrap();
+        assert_eq!(merge_status(&root, "ART-2272-feature", "main").unwrap(), MergeStatus::Merged);
+
+        // Any new commit on the worktree makes the tip not reachable again.
+        output(&path, &["-c", "user.name=Test", "-c", "user.email=test@example.org",
+            "commit", "--allow-empty", "-m", "more work"]).unwrap();
+        assert_eq!(merge_status(&root, "ART-2272-feature", "main").unwrap(),
+            MergeStatus::NotConfirmed);
+
+        // A missing ref and self-comparison must never report merged.
+        assert!(merge_status(&root, "ART-2272-feature", "missing").is_err());
+        assert!(merge_status(&root, "ART-2272-feature", "ART-2272-feature").is_err());
+
+        output(&root, &["worktree", "remove", "--", path.to_str().unwrap()]).unwrap();
+        fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
