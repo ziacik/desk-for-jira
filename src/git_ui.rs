@@ -519,7 +519,9 @@ pub fn show(parent: &adw::ApplicationWindow, site: &str, key: &str, summary: &st
     };
     let dialog = gtk::Window::builder().title(format!("Development · {key}"))
         .transient_for(parent).modal(true).default_width(500)
-        .default_height(480).build();
+        // Tall enough to show the normal create/existing-worktree form without scrolling.
+        // Smaller displays can still scroll the content with the footer always visible.
+        .default_height(650).build();
     dialog.add_css_class("git-worktree-dialog");
 
     // The title and all routine controls stay compact. Rarely used repository
