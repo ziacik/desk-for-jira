@@ -197,10 +197,12 @@ impl Manager {
         self.message.set_text("Checking local Git worktrees…");
         self.total.set_text("");
         self.spinner.start();
+        let generation = self.ticket_request.get();
         let (tx, rx) = mpsc::channel();
         thread::spawn(move || { let _ = tx.send(inspect_repositories()); });
         let manager = self.clone();
         poll(rx, move |result| {
+            if manager.ticket_request.get() != generation { return; }
             manager.spinner.stop();
             match result {
                 Ok((editor, snapshots)) => {
