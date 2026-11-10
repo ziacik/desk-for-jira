@@ -59,6 +59,7 @@ pub fn discover(root: &Path, depth: usize) -> Vec<PathBuf> {
             if matches!(name.as_ref(), ".git" | ".cache" | ".local" | "node_modules"
                 | "target" | "dist" | "build" | ".venv" | "vendor" | ".next"
                 | "Worktrees" | ".worktrees")
+                || name.ends_with(".worktrees")
             { continue; }
             pending.push((entry.path(), level + 1));
         }
