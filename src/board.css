@@ -1001,3 +1001,62 @@ button.git-small-action:hover {
 .git-menu-actions button:hover {
   background-color: alpha(@window_fg_color, 0.06);
 }
+
+
+/* Development is a first-class ticket surface, not an undiscoverable toolbar icon.
+   A visible status always precedes an action, including while Git is loading. */
+.ticket-development {
+  padding: 16px 22px 17px;
+  border-bottom: 1px solid alpha(@window_fg_color, 0.09);
+  background-color: alpha(@accent_bg_color, 0.035);
+}
+.ticket-development-icon {
+  color: @accent_color;
+  -gtk-icon-size: 17px;
+}
+.ticket-development-title {
+  color: @window_fg_color;
+  font-size: 1.0em;
+  font-weight: 750;
+}
+.ticket-development-badge {
+  color: alpha(@window_fg_color, 0.72);
+  border-radius: 999px;
+  background-color: alpha(@window_fg_color, 0.065);
+  padding: 4px 9px;
+  font-size: 0.78em;
+  font-weight: 700;
+}
+.ticket-development-badge.ticket-development-good {
+  color: #27805e;
+  background-color: alpha(#2ea378, 0.12);
+}
+.ticket-development-badge.ticket-development-warning {
+  color: #b27628;
+  background-color: alpha(#d39435, 0.14);
+}
+.ticket-development-value {
+  color: @window_fg_color;
+  font-size: 0.92em;
+  font-weight: 650;
+}
+.ticket-development-muted {
+  color: alpha(@window_fg_color, 0.64);
+  font-size: 0.82em;
+}
+.ticket-development button.ticket-development-primary {
+  min-height: 36px;
+  margin-top: 3px;
+  border-radius: 9px;
+  font-weight: 650;
+}
+.ticket-development-entry {
+  padding: 8px 0 10px;
+  border-bottom: 1px solid alpha(@window_fg_color, 0.075);
+}
+button.ticket-development-manage {
+  min-height: 30px;
+  padding: 4px 0;
+  color: @accent_color;
+  font-size: 0.84em;
+}
