@@ -118,6 +118,7 @@ fn wipe(container: &gtk::Box) {
 pub struct DevelopmentPanel {
     root: gtk::Box,
     state: gtk::Label,
+    git_status: gtk::Label,
     body: gtk::Box,
     request: Rc<Cell<u64>>,
     context: Rc<RefCell<Option<(String, String, String)>>>,
@@ -134,11 +135,14 @@ impl DevelopmentPanel {
         let icon = gtk::Image::from_icon_name("folder-symbolic");
         icon.add_css_class("ticket-development-icon");
         heading.append(&icon);
-        let title = text("Development", "ticket-development-title");
+        let title = text("Git worktree", "ticket-development-title");
         title.set_hexpand(true);
         heading.append(&title);
-        let state = text("Checking Git…", "ticket-development-badge");
+        let state = text("Checking…", "ticket-development-badge");
         heading.append(&state);
+        let git_status = text("", "ticket-development-git-status");
+        git_status.set_visible(false);
+        heading.append(&git_status);
         let refresh = gtk::Button::from_icon_name("view-refresh-symbolic");
         refresh.add_css_class("flat");
         refresh.add_css_class("ticket-development-icon-button");
@@ -150,7 +154,7 @@ impl DevelopmentPanel {
         root.append(&body);
 
         let panel = Self {
-            root, state, body,
+            root, state, git_status, body,
             request: Rc::new(Cell::new(0)),
             context: Rc::new(RefCell::new(None)),
             window: window.clone(),
@@ -176,6 +180,7 @@ impl DevelopmentPanel {
         *self.context.borrow_mut() = Some((site.to_owned(), key.to_owned(), summary.to_owned()));
         wipe(&self.body);
         self.set_state("Checking…", None);
+        self.set_git_status(None);
         self.body.append(&text("Checking local worktrees…", "ticket-development-muted"));
 
         let site = site.to_owned();
@@ -219,6 +224,11 @@ impl DevelopmentPanel {
             self.state.add_css_class(class);
         }
         self.state.set_text(value);
+    }
+
+    fn set_git_status(&self, status: Option<&str>) {
+        self.git_status.set_visible(status.is_some());
+        self.git_status.set_text(status.unwrap_or(""));
     }
 
     fn info(title: &str, subtitle: &str) -> gtk::Box {
@@ -326,11 +336,12 @@ impl DevelopmentPanel {
     fn editor_button(&self, editor: &str, path: &Path) -> gtk::Button {
         let editor = if editor == "codium" { "codium" } else { "code" };
         let button = gtk::Button::with_label(if editor == "codium" {
-            "Open in VSCodium"
+            "Open worktree in VSCodium"
         } else {
-            "Open in VS Code"
+            "Open worktree in VS Code"
         });
         button.add_css_class("transition-action");
+        button.add_css_class("ticket-development-editor-action");
         let path = path.to_path_buf();
         let toast = self.toast.clone();
         button.connect_clicked(move |_| {
@@ -354,7 +365,7 @@ impl DevelopmentPanel {
             Ok(Snapshot::Missing {
                 repository, branch, destination, base, matching_branches,
             }) => {
-                self.set_state("No worktree", None);
+                self.set_state("Not created", None);
                 self.body.append(&Self::repository_branch(&repository, &branch));
                 self.body.append(&self.path_row(&destination));
                 let note = if matching_branches > 1 {
@@ -372,15 +383,12 @@ impl DevelopmentPanel {
             Ok(Snapshot::Existing { editor, worktrees }) => {
                 if worktrees.len() == 1 {
                     let tree = &worktrees[0];
-                    self.set_state(match tree.dirty {
+                    self.set_state("Exists", Some("ticket-development-good"));
+                    self.set_git_status(Some(match tree.dirty {
                         Some(false) => "Clean",
                         Some(true) => "Uncommitted changes",
-                        None => "Status unavailable",
-                    }, match tree.dirty {
-                        Some(false) => Some("ticket-development-good"),
-                        Some(true) => Some("ticket-development-warning"),
-                        None => None,
-                    });
+                        None => "Status unknown",
+                    }));
                     self.body.append(&Self::repository_branch(
                         &tree.repository, &tree.branch,
                     ));
@@ -389,7 +397,7 @@ impl DevelopmentPanel {
                     let manage = self.manage_button(site, key, summary);
                     self.body.append(&Self::actions_row(&open, Some(&manage)));
                 } else {
-                    self.set_state(&format!("{} worktrees", worktrees.len()), None);
+                    self.set_state(&format!("{} worktrees", worktrees.len()), Some("ticket-development-good"));
                     for tree in &worktrees {
                         let item = gtk::Box::new(gtk::Orientation::Vertical, 8);
                         item.add_css_class("ticket-development-entry");
