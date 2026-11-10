@@ -1060,3 +1060,15 @@ button.ticket-development-manage {
   color: @accent_color;
   font-size: 0.84em;
 }
+
+button.ticket-development-refresh {
+  min-width: 28px;
+  min-height: 28px;
+  padding: 4px;
+  color: alpha(@window_fg_color, 0.6);
+  border-radius: 7px;
+}
+button.ticket-development-refresh:hover {
+  color: @window_fg_color;
+  background-color: alpha(@window_fg_color, 0.08);
+}
