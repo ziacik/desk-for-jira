@@ -3077,6 +3077,8 @@ fn show_command_palette(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Eve
                 "view-grid-symbolic", true, PaletteCommand::ChooseProjects),
             PaletteItem::new("Search on board", "Focus the board's local search field", "Command",
                 "system-search-symbolic", false, PaletteCommand::FocusBoardSearch),
+            PaletteItem::new("All worktrees", "Manage Git worktrees in all local repositories",
+                "Command", "folder-symbolic", true, PaletteCommand::AllWorktrees),
         ];
         if !s.statuses.is_empty() {
             items.push(PaletteItem::new("Edit columns", "Reorder and configure workflow columns",
@@ -3180,6 +3182,9 @@ fn show_command_palette(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Eve
                 } else {
                     show_login(&ui_for_action, &state_for_action, &sender_for_action);
                 }
+            }
+            PaletteCommand::AllWorktrees => {
+                crate::all_worktrees::show(&ui_for_action.window, &ui_for_action.toast);
             }
             PaletteCommand::FocusBoardSearch => {
                 ui_for_action.search.grab_focus();
