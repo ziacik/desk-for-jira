@@ -95,6 +95,25 @@ pub fn branch_matches_issue(branch: &str, key: &str) -> bool {
             && branch.as_bytes().get(key.len()) == Some(&b'-')
 }
 
+/// Extracts the Jira key from the same leading branch convention used to
+/// match tickets (e.g. feature/ART-2921-description). This is a suggestion,
+/// not a persisted association and does not query Jira.
+pub fn ticket_key_from_branch(branch: &str) -> Option<String> {
+    let name = branch.rsplit('/').next()?;
+    let (project, rest) = name.split_once('-')?;
+    let number = rest.split('-').next()?;
+    if project.is_empty()
+        || !project.as_bytes()[0].is_ascii_alphabetic()
+        || !project.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_')
+        || number.is_empty()
+        || !number.bytes().all(|c| c.is_ascii_digit())
+    {
+        return None;
+    }
+    let key = format!("{}-{number}", project.to_ascii_uppercase());
+    branch_matches_issue(branch, &key).then_some(key)
+}
+
 pub fn matching_worktrees(repository: &Path, key: &str) -> Result<Vec<Worktree>> {
     Ok(worktrees(repository)?.into_iter()
         .filter(|tree| tree.branch.as_deref().is_some_and(|b| branch_matches_issue(b, key)))
@@ -267,6 +286,23 @@ mod tests {
         assert!(!path.exists());
         assert!(open_editor(&path, "code").is_err());
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn extracts_issue_keys_from_existing_branch_naming_convention() {
+        assert_eq!(ticket_key_from_branch("feature/ART-2921-copy-path"),
+            Some("ART-2921".to_owned()));
+        assert_eq!(ticket_key_from_branch("art-2921"),
+            Some("ART-2921".to_owned()));
+        assert_eq!(ticket_key_from_branch("AFB-2272-nqp"),
+            Some("AFB-2272".to_owned()));
+        assert_eq!(ticket_key_from_branch("bugfix/AFB_2-27-text"),
+            Some("AFB_2-27".to_owned()));
+        assert_eq!(ticket_key_from_branch("main"), None);
+        assert_eq!(ticket_key_from_branch("feature/fix-ART-2921"), None);
+        assert_eq!(ticket_key_from_branch("ART-2921other"), None);
+        assert_eq!(ticket_key_from_branch("ART-"), None);
+        assert_eq!(ticket_key_from_branch("123-2921"), None);
     }
 
     #[test]
