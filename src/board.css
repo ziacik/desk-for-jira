@@ -1008,7 +1008,9 @@ button.git-small-action:hover {
 .ticket-development {
   padding: 17px 22px 18px;
   border-bottom: 1px solid alpha(@window_fg_color, 0.095);
-  background-color: @card_bg_color;
+  /* Distinct from the white ticket hero, with the same restrained accent
+     already used elsewhere in the app. */
+  background-color: alpha(@accent_bg_color, 0.065);
 }
 .ticket-development-icon {
   color: alpha(@window_fg_color, 0.68);
