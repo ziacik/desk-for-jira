@@ -134,18 +134,31 @@ impl DevelopmentPanel {
         heading.append(&title);
         let state = text("Checking Git…", "ticket-development-badge");
         heading.append(&state);
+        let refresh = gtk::Button::from_icon_name("view-refresh-symbolic");
+        refresh.add_css_class("flat");
+        refresh.add_css_class("ticket-development-refresh");
+        refresh.set_tooltip_text(Some("Refresh local worktree status"));
+        heading.append(&refresh);
         root.append(&heading);
 
         let body = gtk::Box::new(gtk::Orientation::Vertical, 8);
         root.append(&body);
 
-        Self {
+        let panel = Self {
             root, state, body,
             request: Rc::new(Cell::new(0)),
             context: Rc::new(RefCell::new(None)),
             window: window.clone(),
             toast: toast.clone(),
-        }
+        };
+        let panel_for_refresh = panel.clone();
+        refresh.connect_clicked(move |_| {
+            let context = panel_for_refresh.context.borrow().clone();
+            if let Some((site, key, summary)) = context {
+                panel_for_refresh.refresh(&site, &key, &summary);
+            }
+        });
+        panel
     }
 
     pub fn widget(&self) -> &gtk::Box {
