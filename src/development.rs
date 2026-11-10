@@ -235,6 +235,22 @@ impl DevelopmentPanel {
         info
     }
 
+    fn repository_branch(repository: &str, branch: &str) -> gtk::Box {
+        let row = gtk::Box::new(gtk::Orientation::Horizontal, 9);
+        row.add_css_class("ticket-development-repository-row");
+        let name = text(repository, "ticket-development-value");
+        name.set_max_width_chars(28);
+        name.set_tooltip_text(Some(repository));
+        row.append(&name);
+        let separator = text("·", "ticket-development-muted");
+        row.append(&separator);
+        let branch_label = text(branch, "ticket-development-branch");
+        branch_label.set_hexpand(true);
+        branch_label.set_tooltip_text(Some(branch));
+        row.append(&branch_label);
+        row
+    }
+
     /// A path is an actual first-class value, not a faint caption. It remains
     /// selectable, can be copied in one click, and exposes its full value.
     fn path_row(&self, path: &str) -> gtk::Box {
@@ -339,7 +355,7 @@ impl DevelopmentPanel {
                 repository, branch, destination, base, matching_branches,
             }) => {
                 self.set_state("No worktree", None);
-                self.body.append(&Self::info(&format!("{repository} · {branch}"), ""));
+                self.body.append(&Self::repository_branch(&repository, &branch));
                 self.body.append(&self.path_row(&destination));
                 let note = if matching_branches > 1 {
                     "Several matching branches — choose one when creating"
@@ -365,8 +381,8 @@ impl DevelopmentPanel {
                         Some(true) => Some("ticket-development-warning"),
                         None => None,
                     });
-                    self.body.append(&Self::info(
-                        &format!("{} · {}", tree.repository, tree.branch), "",
+                    self.body.append(&Self::repository_branch(
+                        &tree.repository, &tree.branch,
                     ));
                     self.body.append(&self.path_row(&tree.path.to_string_lossy()));
                     let open = self.editor_button(&editor, &tree.path);
@@ -382,9 +398,10 @@ impl DevelopmentPanel {
                             Some(true) => "Uncommitted changes",
                             None => "Git status unavailable",
                         };
-                        item.append(&Self::info(
-                            &format!("{} · {}", tree.repository, tree.branch), status,
+                        item.append(&Self::repository_branch(
+                            &tree.repository, &tree.branch,
                         ));
+                        item.append(&text(status, "ticket-development-muted"));
                         item.append(&self.path_row(&tree.path.to_string_lossy()));
                         let open = self.editor_button(&editor, &tree.path);
                         item.append(&Self::actions_row(&open, None));
