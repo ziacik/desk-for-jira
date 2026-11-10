@@ -1,6 +1,6 @@
 //! Repository-wide worktree browser, independent of the selected Jira ticket.
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     collections::HashSet,
     path::Path,
     rc::Rc,
@@ -27,6 +27,8 @@ struct RepositorySnapshot {
     repository: GitRepository,
     trees: Vec<TreeSnapshot>,
     error: Option<String>,
+    available_bases: Vec<String>,
+    recommended_base: String,
 }
 
 fn inspect_repositories() -> Result<(String, Vec<RepositorySnapshot>), String> {
@@ -46,12 +48,18 @@ fn inspect_repositories() -> Result<(String, Vec<RepositorySnapshot>), String> {
                         Some(TreeSnapshot { tree, primary: index == 0, dirty })
                     })
                     .collect();
+                // Resolve merge targets off the GTK thread; never fetch or
+                // modify the repository merely to display merge status.
+                let available_bases = git::available_bases(path).unwrap_or_default()
+                    .into_iter().filter(|base| base != "HEAD").collect();
+                let recommended_base = git::recommended_base(path);
                 snapshots.push(RepositorySnapshot {
-                    repository, trees, error: None,
+                    repository, trees, error: None, available_bases, recommended_base,
                 });
             }
             Err(error) => snapshots.push(RepositorySnapshot {
                 repository, trees: Vec::new(), error: Some(error.to_string()),
+                available_bases: Vec::new(), recommended_base: String::new(),
             }),
         }
     }
@@ -78,6 +86,82 @@ fn poll<T: 'static>(receiver: Receiver<T>, done: impl Fn(T) + 'static) {
             Ok(value) => { done(value); glib::ControlFlow::Break }
             Err(TryRecvError::Empty) => glib::ControlFlow::Continue,
             Err(TryRecvError::Disconnected) => glib::ControlFlow::Break,
+        }
+    });
+}
+
+/// Update merge badges without blocking GTK. Results from a stale
+/// comparison selection must not replace a newer comparison.
+fn update_merge_badge(
+    indicator: &gtk::Label,
+    result: Result<git::MergeStatus, String>,
+    target: &str,
+) {
+    indicator.remove_css_class("worktree-global-merged");
+    indicator.remove_css_class("worktree-global-unconfirmed");
+    match result {
+        Ok(git::MergeStatus::Merged) => {
+            indicator.set_text("Merged");
+            indicator.add_css_class("worktree-global-merged");
+            indicator.set_tooltip_text(Some(&format!(
+                "The branch tip is an ancestor of {target} in local Git history."
+            )));
+        }
+        Ok(git::MergeStatus::NotConfirmed) => {
+            indicator.set_text("Not confirmed");
+            indicator.add_css_class("worktree-global-unconfirmed");
+            indicator.set_tooltip_text(Some(&format!(
+                "The branch tip is not an ancestor of {target}. A squash or rebase merge may still have incorporated its changes."
+            )));
+        }
+        Err(error) => {
+            indicator.set_text("Unavailable");
+            indicator.set_tooltip_text(Some(&error));
+        }
+    }
+}
+
+fn check_merge_statuses(
+    repository: &str,
+    base: Option<&str>,
+    badges: &Rc<Vec<(gtk::Label, String)>>,
+    revision: &Rc<Cell<u64>>,
+) {
+    let current = revision.get().wrapping_add(1);
+    revision.set(current);
+    let Some(base) = base else {
+        for (badge, _) in badges.iter() {
+            badge.set_text("Choose base");
+            badge.set_tooltip_text(Some("Choose a branch above to check which commits are merged"));
+            badge.remove_css_class("worktree-global-merged");
+            badge.remove_css_class("worktree-global-unconfirmed");
+        }
+        return;
+    };
+    for (badge, _) in badges.iter() {
+        badge.set_text("Checking…");
+        badge.set_tooltip_text(Some("Checking local commit ancestry"));
+        badge.remove_css_class("worktree-global-merged");
+        badge.remove_css_class("worktree-global-unconfirmed");
+    }
+    let path = repository.to_owned();
+    let base_name = base.to_owned();
+    let branches: Vec<String> = badges.iter().map(|(_, branch)| branch.clone()).collect();
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        let results = branches.iter().map(|branch| {
+            git::merge_status(Path::new(&path), branch, &base_name)
+                .map_err(|error| error.to_string())
+        }).collect::<Vec<_>>();
+        let _ = tx.send(results);
+    });
+    let badges = badges.clone();
+    let revision = revision.clone();
+    let base = base.to_owned();
+    poll(rx, move |results| {
+        if revision.get() != current { return; }
+        for ((badge, _), result) in badges.iter().zip(results) {
+            update_merge_badge(badge, result, &base);
         }
     });
 }
@@ -148,20 +232,62 @@ impl Manager {
             header.append(&number);
             section.append(&header);
 
+            let compare_row = gtk::Box::new(gtk::Orientation::Horizontal, 9);
+            compare_row.add_css_class("worktree-global-merge-control");
+            let compare_caption = label("Merge status vs", "dim-label");
+            compare_caption.set_tooltip_text(Some(
+                "Checks local Git commit ancestry. Fetch the repository to update remote-tracking branches."
+            ));
+            compare_row.append(&compare_caption);
+            let mut choices = vec!["Choose branch…".to_owned()];
+            choices.extend(snapshot.available_bases.iter().cloned());
+            let select_base = gtk::DropDown::from_strings(
+                &choices.iter().map(String::as_str).collect::<Vec<_>>());
+            let selected = snapshot.available_bases.iter()
+                .position(|name| name == &snapshot.recommended_base)
+                .map(|index| index as u32 + 1).unwrap_or(0);
+            select_base.set_selected(selected);
+            select_base.set_sensitive(!snapshot.available_bases.is_empty());
+            select_base.add_css_class("worktree-global-base-selector");
+            compare_row.append(&select_base);
+            section.append(&compare_row);
+
             if let Some(error) = snapshot.error {
                 let note = label(&error, "worktree-global-error");
                 note.set_wrap(true);
                 section.append(&note);
             }
             let mut rows = Vec::new();
+            let mut badges = Vec::new();
             for tree in snapshot.trees {
                 let search_value = format!("{} {} {}",
                     snapshot.repository.name, tree.tree.branch.as_deref().unwrap_or(""),
                     tree.tree.path.display()).to_lowercase();
-                let row = self.tree_row(&snapshot.repository, editor, tree);
+                let (row, merge_badge) = self.tree_row(&snapshot.repository, editor, tree);
+                if let Some(badge) = merge_badge {
+                    badges.push(badge);
+                }
                 section.append(&row);
                 rows.push((row, search_value));
             }
+            let badges = Rc::new(badges);
+            let revision = Rc::new(Cell::new(0_u64));
+            let repository_path = snapshot.repository.path.clone();
+            let bases = snapshot.available_bases;
+            {
+                let badges = badges.clone();
+                let revision = revision.clone();
+                select_base.connect_selected_notify(move |dropdown| {
+                    let base = (dropdown.selected() as usize).checked_sub(1)
+                        .and_then(|index| bases.get(index));
+                    check_merge_statuses(&repository_path, base.map(String::as_str),
+                        &badges, &revision);
+                });
+            }
+            let base = (select_base.selected() as usize).checked_sub(1)
+                .and_then(|index| choices.get(index + 1));
+            check_merge_statuses(&snapshot.repository.path, base.map(String::as_str),
+                &badges, &revision);
             self.content.append(&section);
             sections.push(Section { widget: section, rows });
         }
@@ -182,7 +308,9 @@ impl Manager {
         }
     }
 
-    fn tree_row(self: &Rc<Self>, repo: &GitRepository, editor: &str, snapshot: TreeSnapshot) -> gtk::Box {
+    fn tree_row(
+        self: &Rc<Self>, repo: &GitRepository, editor: &str, snapshot: TreeSnapshot,
+    ) -> (gtk::Box, Option<(gtk::Label, String)>) {
         let row = gtk::Box::new(gtk::Orientation::Vertical, 7);
         row.add_css_class("worktree-global-entry");
 
@@ -225,6 +353,16 @@ impl Manager {
         let indicator = label(status, "worktree-global-status");
         if snapshot.dirty == Some(true) { indicator.add_css_class("worktree-global-dirty"); }
         top.append(&indicator);
+        let merge_badge = if !snapshot.primary {
+            snapshot.tree.branch.as_ref().map(|branch| {
+                let badge = label("Checking…", "worktree-global-merge-status");
+                badge.set_tooltip_text(Some("Checking local Git commit ancestry"));
+                top.append(&badge);
+                (badge, branch.clone())
+            })
+        } else {
+            None
+        };
         row.append(&top);
 
         let path_row = gtk::Box::new(gtk::Orientation::Horizontal, 7);
@@ -291,7 +429,7 @@ impl Manager {
             buttons.append(&remove);
         }
         row.append(&buttons);
-        row
+        (row, merge_badge)
     }
 
     fn confirm_removal(self: &Rc<Self>, repo: GitRepository, tree: Worktree) {
