@@ -1008,9 +1008,9 @@ button.git-small-action:hover {
 .ticket-development {
   padding: 17px 22px 18px;
   border-bottom: 1px solid alpha(@window_fg_color, 0.095);
-  /* Distinct from the white ticket hero, with the same restrained accent
-     already used elsewhere in the app. */
-  background-color: alpha(@accent_bg_color, 0.065);
+  /* A subtle cool-blue surface distinguishes worktree information from
+     ticket content without inheriting an error-like red application accent. */
+  background-color: alpha(#4e91b5, 0.13);
 }
 .ticket-development-icon {
   color: alpha(@window_fg_color, 0.68);
