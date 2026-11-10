@@ -336,9 +336,9 @@ impl DevelopmentPanel {
     fn editor_button(&self, editor: &str, path: &Path) -> gtk::Button {
         let editor = if editor == "codium" { "codium" } else { "code" };
         let button = gtk::Button::with_label(if editor == "codium" {
-            "Open worktree in VSCodium"
+            "Open in VSCodium"
         } else {
-            "Open worktree in VS Code"
+            "Open in VS Code"
         });
         button.add_css_class("transition-action");
         button.add_css_class("ticket-development-editor-action");
