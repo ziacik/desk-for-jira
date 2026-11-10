@@ -39,6 +39,7 @@ struct Ui {
     manage_projects_button: gtk::Button,
     manage_columns_button: gtk::Button,
     palette_button: gtk::Button,
+    worktrees_button: gtk::Button,
     palette_window: Rc<RefCell<Option<gtk::Window>>>,
     pending_direct_issue: Rc<RefCell<Option<String>>>,
     search: gtk::SearchEntry,
@@ -361,12 +362,21 @@ fn build_ui(app: &adw::Application) {
         .tooltip_text("Command palette (Ctrl+K)")
         .build();
     palette_button.add_css_class("flat");
+    let worktrees_button = gtk::Button::new();
+    let worktrees_label = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    worktrees_label.append(&gtk::Image::from_icon_name("folder-symbolic"));
+    worktrees_label.append(&gtk::Label::new(Some("Worktrees")));
+    worktrees_button.set_child(Some(&worktrees_label));
+    worktrees_button.add_css_class("flat");
+    worktrees_button.add_css_class("header-worktrees-action");
+    worktrees_button.set_tooltip_text(Some("Manage local Git worktrees across all repositories"));
     let spinner = gtk::Spinner::new();
     spinner.set_visible(false);
     header.pack_start(&sidebar_toggle);
     header.pack_end(&disconnect_button);
     header.pack_end(&refresh_button);
     header.pack_end(&palette_button);
+    header.pack_end(&worktrees_button);
     header.pack_end(&spinner);
 
 
@@ -707,7 +717,7 @@ fn build_ui(app: &adw::Application) {
         window, toast, header_title, spinner, status, projects_label, sidebar_projects,
         project_filter: Rc::new(RefCell::new(None)),
         connect_button, disconnect_button, refresh_button,
-        manage_projects_button, manage_columns_button, palette_button,
+        manage_projects_button, manage_columns_button, palette_button, worktrees_button,
         palette_window: Rc::new(RefCell::new(None)),
         pending_direct_issue: Rc::new(RefCell::new(None)),
         search, center_title,
@@ -886,6 +896,12 @@ fn build_ui(app: &adw::Application) {
 }
 
 fn wire_actions(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>) {
+    {
+        let ui = ui.clone();
+        ui.worktrees_button.clone().connect_clicked(move |_| {
+            crate::all_worktrees::show(&ui.window, &ui.toast);
+        });
+    }
     {
         let ui = ui.clone();
         let state = state.clone();
