@@ -122,6 +122,12 @@ struct View {
     after_open: gtk::CheckButton,
     summary: gtk::Label,
     path: gtk::Label,
+    existing_branch: gtk::Label,
+    existing_box: gtk::Box,
+    new_box: gtk::Box,
+    tree_picker: gtk::DropDown,
+    trees: Rc<RefCell<Vec<Worktree>>>,
+    more: gtk::MenuButton,
     info: gtk::Label,
     log: gtk::TextView,
     log_scroller: gtk::ScrolledWindow,
@@ -154,11 +160,12 @@ impl View {
     fn refresh(&self) {
         let Some(repo) = self.selected() else {
             self.create.set_sensitive(false);
+            self.new_box.set_visible(false);
+            self.existing_box.set_visible(false);
             self.open.set_visible(false);
-            self.retry.set_visible(false);
-            self.terminal.set_visible(false);
-            self.remove.set_visible(false);
-            self.summary.set_text("Register a local repository to begin.");
+            self.more.set_visible(false);
+            self.summary.set_text("Add a local Git repository to get started.");
+            self.summary.set_visible(true);
             *self.active_tree.borrow_mut() = None;
             return;
         };
@@ -168,45 +175,62 @@ impl View {
         let index = bases.iter().position(|b| b == &recommended).unwrap_or(0);
         set_choices(&self.base, &bases, index);
 
-        let trees = git::matching_worktrees(path, &self.key).unwrap_or_default();
-        let tree = trees.first().cloned();
-        *self.active_tree.borrow_mut() = tree.clone();
-        if let Some(tree) = tree {
-            self.branch.set_text(tree.branch.as_deref().unwrap_or(""));
-            let dirty = git::status(&tree.path).map(|s| !s.is_empty());
-            self.summary.set_text(match dirty {
-                Ok(true) => "Existing worktree · uncommitted changes",
-                Ok(false) => "Existing worktree · clean",
-                Err(_) => "Existing worktree · Git status unavailable",
-            });
-            self.path.set_text(&tree.path.to_string_lossy());
-            self.create.set_visible(false);
-            self.open.set_visible(true);
-            self.retry.set_visible(true);
-            self.terminal.set_visible(true);
-            self.remove.set_visible(true);
-        } else {
+        let found = git::matching_worktrees(path, &self.key).unwrap_or_default();
+        *self.trees.borrow_mut() = found.clone();
+        let names: Vec<String> = found.iter().map(|tree|
+            tree.branch.as_deref().unwrap_or("Detached HEAD").to_owned()).collect();
+        set_choices(&self.tree_picker, &names, 0);
+        self.tree_picker.set_visible(found.len() > 1);
+
+        if found.is_empty() {
+            *self.active_tree.borrow_mut() = None;
             let existing = git::matching_branches(path, &self.key).unwrap_or_default();
             if let Some(branch) = existing.first() {
                 self.branch.set_text(branch);
                 self.summary.set_text("Existing branch · a new worktree will check it out");
             } else {
                 self.branch.set_text(&self.suggested_branch);
-                self.summary.set_text("New worktree and branch");
+                self.summary.set_text("");
             }
+            self.summary.set_visible(!existing.is_empty());
+            self.new_box.set_visible(true);
+            self.existing_box.set_visible(false);
             self.create.set_visible(true);
             self.create.set_sensitive(true);
             self.open.set_visible(false);
-            self.retry.set_visible(false);
-            self.terminal.set_visible(false);
-            self.remove.set_visible(false);
+            self.more.set_visible(false);
             self.update_path();
+        } else {
+            self.choose_tree();
         }
         self.setup.set_text(if repo.setup.is_empty() {
             suggested_setup(path)
         } else { &repo.setup });
-        // Auto-suggested scripts require explicit opt-in the first time.
+        // An auto-detected setup command must be opted into by the user.
         self.run_setup.set_active(!repo.setup.trim().is_empty());
+    }
+
+    fn choose_tree(&self) {
+        let tree = selected_index(&self.tree_picker)
+            .and_then(|index| self.trees.borrow().get(index).cloned())
+            .or_else(|| self.trees.borrow().first().cloned());
+        *self.active_tree.borrow_mut() = tree.clone();
+        let Some(tree) = tree else { return; };
+        self.existing_branch.set_text(tree.branch.as_deref().unwrap_or("Detached HEAD"));
+        let status = git::status(&tree.path);
+        self.summary.set_text(match status {
+            Ok(ref value) if value.is_empty() => "Clean worktree",
+            Ok(_) => "Uncommitted changes",
+            Err(_) => "Git status unavailable",
+        });
+        self.summary.set_visible(true);
+        self.path.set_text(&tree.path.to_string_lossy());
+        self.path.set_tooltip_text(Some(&tree.path.to_string_lossy()));
+        self.new_box.set_visible(false);
+        self.existing_box.set_visible(true);
+        self.create.set_visible(false);
+        self.open.set_visible(true);
+        self.more.set_visible(true);
     }
 
     fn update_path(&self) {
@@ -215,6 +239,7 @@ impl View {
         let root = expand_home(&self.root.text());
         let dest = root.join(repo.name).join(&self.key);
         self.path.set_text(&dest.to_string_lossy());
+        self.path.set_tooltip_text(Some(&dest.to_string_lossy()));
     }
 
     fn store_preferences(&self) -> Result<(), String> {
@@ -593,6 +618,10 @@ pub fn show(parent: &adw::ApplicationWindow, site: &str, key: &str, summary: &st
     {
         let view = view.clone();
         repository.connect_selected_notify(move |_| view.refresh());
+    }
+    {
+        let view = view.clone();
+        view.tree_picker.clone().connect_selected_notify(move |_| view.choose_tree());
     }
     {
         let view = view.clone();
