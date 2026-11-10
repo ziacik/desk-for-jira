@@ -114,6 +114,7 @@ struct View {
     suggested_branch: String,
     repository: gtk::DropDown,
     base: gtk::DropDown,
+    cleanup_target: gtk::DropDown,
     branch: gtk::Entry,
     root: gtk::Entry,
     editor: gtk::DropDown,
@@ -175,6 +176,7 @@ impl View {
         let recommended = git::recommended_base(path);
         let index = bases.iter().position(|b| b == &recommended).unwrap_or(0);
         set_choices(&self.base, &bases, index);
+        set_choices(&self.cleanup_target, &bases, index);
 
         let found = git::matching_worktrees(path, &self.key).unwrap_or_default();
         *self.trees.borrow_mut() = found.clone();
@@ -252,9 +254,11 @@ impl View {
         if let Some(index) = selected_index(&self.repository)
             && let Some(repo) = new.repositories.get_mut(index)
         {
-            repo.setup = if self.run_setup.is_active() {
-                self.setup.text().to_string()
-            } else { String::new() };
+            // Skipping setup for one worktree must not erase a saved
+            // per-repository command used by later tickets.
+            if self.run_setup.is_active() {
+                repo.setup = self.setup.text().to_string();
+            }
         }
         preferences::save_git(&new).map_err(|e| e.to_string())?;
         *self.settings.borrow_mut() = new;
@@ -359,7 +363,7 @@ impl View {
     fn confirm_remove(self: &Rc<Self>) {
         let Some(tree) = self.active_tree.borrow().clone() else { return; };
         let Some(repo) = self.selected() else { return; };
-        let Some(base) = selected_text(&self.base) else { return; };
+        let Some(base) = selected_text(&self.cleanup_target) else { return; };
         let confirmation = gtk::AlertDialog::builder()
             .message("Remove worktree and branch?")
             .detail(format!(
@@ -600,6 +604,9 @@ pub fn show(parent: &adw::ApplicationWindow, site: &str, key: &str, summary: &st
     existing_branch.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
     existing_branch.add_css_class("git-branch-name");
     existing_box.append(&existing_branch);
+    let cleanup_target = gtk::DropDown::from_strings(&[]);
+    cleanup_target.set_hexpand(true);
+    existing_box.append(&field("Merged into (required for safe removal)", &cleanup_target));
     section.append(&existing_box);
 
     let destination = gtk::Box::new(gtk::Orientation::Horizontal, 8);
@@ -737,7 +744,7 @@ pub fn show(parent: &adw::ApplicationWindow, site: &str, key: &str, summary: &st
         site: site.into(), key: key.into(),
         suggested_branch: issue_detail::suggested_branch_name(key, summary),
         repository: repository.clone(),
-        base, branch, root, editor, setup, run_setup, fetch, after_open,
+        base, cleanup_target, branch, root, editor, setup, run_setup, fetch, after_open,
         summary: summary_label, path, existing_branch, existing_box, new_box,
         tree_picker, trees: Rc::new(RefCell::new(Vec::new())), more,
         info, log, log_scroller, create, open, retry, terminal, remove,
