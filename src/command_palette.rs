@@ -24,6 +24,7 @@ pub(crate) enum PaletteCommand {
     FocusBoardSearch,
     TogglePin(Issue),
     ManageWorktree(Issue),
+    AllWorktrees,
     OpenInJira(Issue),
 }
 
