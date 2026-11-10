@@ -399,10 +399,28 @@ pub fn show(
     parent: &adw::ApplicationWindow,
     toast: &adw::ToastOverlay,
     open_issue: Rc<dyn Fn(String)>,
+    layout_settings: Rc<RefCell<preferences::UiLayout>>,
 ) {
+    let (width, height) = {
+        let settings = layout_settings.borrow();
+        (settings.worktrees_window_width, settings.worktrees_window_height)
+    };
     let window = gtk::Window::builder().title("Worktrees")
-        .transient_for(parent).default_width(760).default_height(620).build();
+        .transient_for(parent).default_width(width).default_height(height).build();
     window.add_css_class("worktree-global-window");
+    window.connect_close_request(move |window| {
+        // Save the actual allocated size (not the requested default size).
+        // Using the main UI layout state avoids later layout saves reverting it.
+        if !window.is_maximized() && window.width() >= 640 && window.height() >= 480 {
+            let mut settings = layout_settings.borrow_mut();
+            settings.worktrees_window_width = window.width();
+            settings.worktrees_window_height = window.height();
+            if let Err(error) = preferences::save_layout(&settings) {
+                eprintln!("Could not save Worktrees window size: {error}");
+            }
+        }
+        glib::Propagation::Proceed
+    });
 
     let layout = gtk::Box::new(gtk::Orientation::Vertical, 0);
     let toolbar = gtk::Box::new(gtk::Orientation::Horizontal, 12);
