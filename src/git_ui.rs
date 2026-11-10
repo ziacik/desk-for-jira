@@ -784,15 +784,25 @@ pub fn show(parent: &adw::ApplicationWindow, site: &str, key: &str, summary: &st
     }
     {
         let view = view.clone();
-        view.retry.clone().connect_clicked(move |_| view.setup_again());
+        let menu = actions_popover.clone();
+        view.retry.clone().connect_clicked(move |_| {
+            menu.popdown();
+            view.setup_again();
+        });
     }
     {
         let view = view.clone();
-        view.remove.clone().connect_clicked(move |_| view.confirm_remove());
+        let menu = actions_popover.clone();
+        view.remove.clone().connect_clicked(move |_| {
+            menu.popdown();
+            view.confirm_remove();
+        });
     }
     {
         let view = view.clone();
+        let menu = actions_popover.clone();
         view.terminal.clone().connect_clicked(move |_| {
+            menu.popdown();
             if let Some(tree) = view.active_tree.borrow().clone()
                 && let Err(error) = git::open_terminal(&tree.path)
             {
@@ -802,7 +812,9 @@ pub fn show(parent: &adw::ApplicationWindow, site: &str, key: &str, summary: &st
     }
     {
         let view = view.clone();
+        let menu = repo_menu.clone();
         add.connect_clicked(move |_| {
+            menu.popdown();
             let chooser = gtk::FileDialog::new();
             let view = view.clone();
             let parent = view.dialog.clone();
@@ -824,7 +836,9 @@ pub fn show(parent: &adw::ApplicationWindow, site: &str, key: &str, summary: &st
     }
     {
         let view = view.clone();
+        let menu = repo_menu.clone();
         scan.connect_clicked(move |_| {
+            menu.popdown();
             let chooser = gtk::FileDialog::new();
             let view = view.clone();
             let parent = view.dialog.clone();
