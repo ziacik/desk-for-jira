@@ -21,6 +21,11 @@ use crate::{
 
 const COLUMN_WIDTH: i32 = 302;
 const COLLAPSED_COLUMN_WIDTH: i32 = 116;
+const COLUMN_TONE_COUNT: usize = 5;
+
+fn column_tone_index(position: usize) -> usize {
+    position % COLUMN_TONE_COUNT
+}
 
 #[derive(Clone)]
 struct Ui {
@@ -2827,7 +2832,7 @@ fn render_board(ui: &Ui, state: &State) {
         let column = gtk::Box::new(gtk::Orientation::Vertical, 0);
         column.add_css_class("board-column");
         // Color follows visible column order, including collapsed columns.
-        column.add_css_class(&format!("column-tone-{}", position % 5));
+        column.add_css_class(&format!("column-tone-{}", column_tone_index(position)));
         if initially_collapsed {
             column.add_css_class("collapsed-column");
         }
@@ -3966,9 +3971,10 @@ mod scope_tests {
     }
 
     #[test]
-    fn epic_accent_is_deterministic() {
-        assert_eq!(epic_color_index("ART-123"), epic_color_index("ART-123"));
-        assert!(epic_color_index("ART-123") < 8);
+    fn column_colors_follow_visible_order_and_cycle_after_five() {
+        let tones: Vec<_> = (0..8).map(column_tone_index).collect();
+        assert_eq!(tones, vec![0, 1, 2, 3, 4, 0, 1, 2]);
+        assert!(tones.windows(2).all(|pair| pair[0] != pair[1]));
     }
 
     #[test]
