@@ -517,7 +517,7 @@ fn build_ui(app: &adw::Application) {
     )));
     copy_branch.add_css_class("flat");
     copy_branch.add_css_class("detail-header-action");
-    copy_branch.set_tooltip_text(Some("Open Git worktrees for this ticket"));
+    copy_branch.set_tooltip_text(Some("Open worktree (manage via Ctrl+K)"));
     copy_branch.set_visible(false);
     detail_header.pack_end(&copy_branch);
     let pin_detail = gtk::Button::from_icon_name("view-pin-symbolic");
@@ -777,7 +777,8 @@ fn build_ui(app: &adw::Application) {
                     .find(|issue| issue.key == key)
             });
             if let (Some(issue), Some(account)) = (issue, state.account.as_ref()) {
-                crate::git_ui::show(&ui.window, &account.base_url, &issue.key, &issue.summary);
+                crate::git_ui::open_or_manage(&ui.window, &ui.toast,
+                    &account.base_url, &issue.key, &issue.summary);
             }
         });
     }
