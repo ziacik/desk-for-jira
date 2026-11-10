@@ -243,6 +243,15 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
+    fn opening_editor_cannot_create_a_missing_worktree() {
+        let suffix = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        let path = std::env::temp_dir().join(format!("desk-for-jira-missing-{suffix}"));
+        assert!(!path.exists());
+        assert!(open_editor(&path, "code").is_err());
+        assert!(!path.exists());
+    }
+
+    #[test]
     fn matches_exact_ticket_not_neighbours() {
         assert!(branch_matches_issue("feature/ART-2272-sync", "ART-2272"));
         assert!(branch_matches_issue("ART-2272", "ART-2272"));
