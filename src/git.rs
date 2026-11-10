@@ -206,20 +206,32 @@ pub fn open_terminal(worktree: &Path) -> Result<()> {
     bail!("No supported terminal found (cosmic-term, kgx, gnome-terminal)")
 }
 
-/// Never deletes a branch merely because Jira says Done.
-/// Requires its tip to be an ancestor of the explicitly selected integration ref.
-pub fn remove_merged(repository: &Path, tree: &Worktree, target: &str, key: &str) -> Result<()> {
+/// True for the primary checkout. Git lists it first, even when called
+/// from a secondary worktree. It must never be removed by this application.
+pub fn is_primary_worktree(repository: &Path, tree: &Worktree) -> Result<bool> {
+    let trees = worktrees(repository)?;
+    let primary = trees.first().context("Git returned no worktrees")?;
+    Ok(primary.path == tree.path)
+}
+
+/// Removes a linked worktree and its local branch only when its tip is known
+/// to be merged into an explicitly selected integration ref. No forced
+/// removal of dirty or locked worktrees; no deletion of remote branches.
+pub fn remove_merged_worktree(repository: &Path, tree: &Worktree, target: &str) -> Result<()> {
     if !is_repository(repository) { bail!("Repository is missing"); }
+    if target.trim().is_empty() { bail!("Select the branch it was merged into"); }
     let branch = tree.branch.as_deref().context("Detached worktree cannot be removed here")?;
-    if !branch_matches_issue(branch, key) { bail!("Branch does not belong to this ticket"); }
-    // A branch is trivially an ancestor of itself. Never treat that as a merge.
-    if target == branch || target == format!("refs/heads/{branch}") {
-        bail!("The merge target cannot be the ticket branch itself");
+    let registered = worktrees(repository)?;
+    if registered.first().is_some_and(|primary| primary.path == tree.path) {
+        bail!("The primary checkout cannot be removed");
     }
-    if !tree.path.exists() { bail!("Worktree path is missing"); }
-    if !worktrees(repository)?.iter().any(|t| t.path == tree.path && t.branch == tree.branch) {
+    if !registered.iter().any(|t| t.path == tree.path && t.branch == tree.branch) {
         bail!("Worktree is no longer registered in this repository");
     }
+    if target == branch || target == format!("refs/heads/{branch}") {
+        bail!("The merge target cannot be the worktree branch itself");
+    }
+    if !tree.path.exists() { bail!("Worktree path is missing"); }
     if !status(&tree.path)?.is_empty() { bail!("Worktree has uncommitted changes"); }
     let target_exists = command(repository,
         &["rev-parse", "--verify", "--quiet", &format!("{}^{{commit}}", target)])?
@@ -231,10 +243,16 @@ pub fn remove_merged(repository: &Path, tree: &Worktree, target: &str, key: &str
     }
     let path = tree.path.to_str().context("Worktree path is not valid UTF-8")?;
     output(repository, &["worktree", "remove", "--", path])?;
-    // Deleting with -D is safe here because ancestry was explicitly verified above.
-    // -d would instead inspect the branch's *upstream*, which may be its old PR branch.
+    // -d checks upstream rather than our explicitly verified integration ref.
     output(repository, &["branch", "-D", "--", branch])?;
     Ok(())
+}
+
+/// Ticket-specific wrapper preserves the issue-key protection in ticket UI.
+pub fn remove_merged(repository: &Path, tree: &Worktree, target: &str, key: &str) -> Result<()> {
+    let branch = tree.branch.as_deref().context("Detached worktree cannot be removed here")?;
+    if !branch_matches_issue(branch, key) { bail!("Branch does not belong to this ticket"); }
+    remove_merged_worktree(repository, tree, target)
 }
 
 #[cfg(test)]
@@ -271,6 +289,17 @@ mod tests {
         assert!(Command::new("git").args(["-c", "user.name=Test", "-c", "user.email=test@example.org",
             "commit", "-m", "init"]).current_dir(&root).output().unwrap().status.success());
         root
+    }
+
+    #[test]
+    fn refuses_to_remove_primary_checkout() {
+        let root = temporary_repo();
+        let primary = worktrees(&root).unwrap().remove(0);
+        assert!(is_primary_worktree(&root, &primary).unwrap());
+        let error = remove_merged_worktree(&root, &primary, "main").unwrap_err();
+        assert!(error.to_string().contains("primary checkout"));
+        assert!(root.exists());
+        fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
