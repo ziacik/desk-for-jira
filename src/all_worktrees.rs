@@ -280,7 +280,7 @@ impl Manager {
         let confirm = gtk::Window::builder()
             .title("Remove worktree and local branch")
             .transient_for(&self.window).modal(true)
-            .default_width(480).default_height(260).build();
+            .default_width(480).default_height(340).build();
         let content = gtk::Box::new(gtk::Orientation::Vertical, 12);
         content.set_margin_start(18);
         content.set_margin_end(18);
