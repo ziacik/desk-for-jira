@@ -673,7 +673,7 @@ pub fn show(parent: &adw::ApplicationWindow, site: &str, key: &str, summary: &st
     let editor = gtk::DropDown::from_strings(&["code", "codium"]);
     editor.set_selected(if settings.editor == "codium" { 1 } else { 0 });
     advanced.append(&field("Editor", &editor));
-    let after_open = gtk::CheckButton::with_label("Open in editor after creation");
+    let after_open = gtk::CheckButton::with_label("Open in editor after worktree creation");
     after_open.set_active(true);
     advanced.append(&after_open);
     options.set_child(Some(&advanced));
@@ -724,9 +724,9 @@ pub fn show(parent: &adw::ApplicationWindow, site: &str, key: &str, summary: &st
     actions_popover.set_child(Some(&actions));
     more.set_popover(Some(&actions_popover));
     footer.append(&more);
-    let open = gtk::Button::with_label("Open in VS Code");
+    let open = gtk::Button::with_label("Open worktree in VS Code");
     open.add_css_class("suggested-action");
-    let create = gtk::Button::with_label("Create & Open");
+    let create = gtk::Button::with_label("Create worktree");
     create.add_css_class("suggested-action");
     footer.append(&open);
     footer.append(&create);
@@ -737,18 +737,12 @@ pub fn show(parent: &adw::ApplicationWindow, site: &str, key: &str, summary: &st
         cancel.connect_clicked(move |_| dialog.close());
     }
     {
-        let create = create.clone();
-        after_open.connect_toggled(move |check| {
-            create.set_label(if check.is_active() { "Create & Open" } else { "Create worktree" });
-        });
-    }
-    {
         let open = open.clone();
         editor.connect_selected_notify(move |dropdown| {
             open.set_label(if selected_text(dropdown).as_deref() == Some("codium") {
-                "Open in VSCodium"
+                "Open worktree in VSCodium"
             } else {
-                "Open in VS Code"
+                "Open worktree in VS Code"
             });
         });
     }
