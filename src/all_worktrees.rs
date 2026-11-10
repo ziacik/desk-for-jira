@@ -2,7 +2,7 @@
 use std::{
     cell::RefCell,
     collections::HashSet,
-    path::{Path, PathBuf},
+    path::Path,
     rc::Rc,
     sync::mpsc::{self, Receiver, TryRecvError},
     thread,
