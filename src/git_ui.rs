@@ -726,7 +726,7 @@ pub fn show(parent: &adw::ApplicationWindow, site: &str, key: &str, summary: &st
     actions_popover.set_child(Some(&actions));
     more.set_popover(Some(&actions_popover));
     footer.append(&more);
-    let open = gtk::Button::with_label("Open worktree in VS Code");
+    let open = gtk::Button::with_label("Open in VS Code");
     open.add_css_class("suggested-action");
     let create = gtk::Button::with_label("Create worktree");
     create.add_css_class("suggested-action");
@@ -742,9 +742,9 @@ pub fn show(parent: &adw::ApplicationWindow, site: &str, key: &str, summary: &st
         let open = open.clone();
         editor.connect_selected_notify(move |dropdown| {
             open.set_label(if selected_text(dropdown).as_deref() == Some("codium") {
-                "Open worktree in VSCodium"
+                "Open in VSCodium"
             } else {
-                "Open worktree in VS Code"
+                "Open in VS Code"
             });
         });
     }
