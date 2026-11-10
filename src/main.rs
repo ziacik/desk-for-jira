@@ -4,6 +4,7 @@ mod issue_links;
 mod jira;
 mod git;
 mod git_ui;
+mod development;
 mod preferences;
 mod secrets;
 mod transition_ui;
