@@ -382,6 +382,7 @@ impl Manager {
         // The link is inferred from the same Jira-key prefix convention as
         // the issue detail. There is no extra persisted mapping.
         if let Some(key) = snapshot.tree.branch.as_deref().and_then(git::ticket_key_from_branch) {
+            let key_for_status = key.clone();
             let ticket = gtk::Button::with_label(&key);
             ticket.add_css_class("flat");
             ticket.add_css_class("worktree-global-ticket-link");
@@ -400,11 +401,8 @@ impl Manager {
             jira_status.set_ellipsize(gtk::pango::EllipsizeMode::End);
             jira_status.set_tooltip_text(Some("Loading current workflow state from Jira"));
             top.append(&jira_status);
-            self.ticket_badges.borrow_mut().entry(
-                snapshot.tree.branch.as_deref()
-                    .and_then(git::ticket_key_from_branch)
-                    .expect("ticket key checked above"),
-            ).or_default().push(jira_status);
+            self.ticket_badges.borrow_mut().entry(key_for_status)
+                .or_default().push(jira_status);
         }
         let status = if !snapshot.tree.path.exists() {
             "Missing"
