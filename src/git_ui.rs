@@ -506,7 +506,7 @@ fn scan_dialog(view: &Rc<View>, root: PathBuf, results: Vec<PathBuf>) {
     window.present();
 }
 
-pub fn show(parent: &adw::ApplicationWindow, site: &str, key: &str, summary: &str) {
+pub fn show(parent: &adw::ApplicationWindow, site: &str, key: &str, summary: &str) -> gtk::Window {
     let settings = match preferences::load_git() {
         Ok(s) => s,
         Err(error) => {
@@ -514,7 +514,7 @@ pub fn show(parent: &adw::ApplicationWindow, site: &str, key: &str, summary: &st
                 .transient_for(parent).modal(true).default_width(420).build();
             dialog.set_child(Some(&label(&error.to_string())));
             dialog.present();
-            return;
+            return dialog;
         }
     };
     let dialog = gtk::Window::builder().title(format!("Development · {key}"))
@@ -871,6 +871,7 @@ pub fn show(parent: &adw::ApplicationWindow, site: &str, key: &str, summary: &st
     }
     view.reload_repositories(preferred);
     dialog.present();
+    dialog
 }
 
 
