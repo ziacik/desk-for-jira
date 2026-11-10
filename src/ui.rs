@@ -21,6 +21,11 @@ use crate::{
 
 const COLUMN_WIDTH: i32 = 302;
 const COLLAPSED_COLUMN_WIDTH: i32 = 116;
+const COLUMN_TONE_COUNT: usize = 5;
+
+fn column_tone_index(position: usize) -> usize {
+    position % COLUMN_TONE_COUNT
+}
 
 #[derive(Clone)]
 struct Ui {
@@ -2821,12 +2826,13 @@ fn render_board(ui: &Ui, state: &State) {
     }
 
     let url = state.account.as_ref().map(|a| a.base_url.as_str()).unwrap_or("");
-    for (name, issues) in groups {
+    for (position, (name, issues)) in groups.into_iter().enumerate() {
         let issue_count = issues.len();
         let initially_collapsed = ui.collapsed_columns.borrow().contains(&name);
         let column = gtk::Box::new(gtk::Orientation::Vertical, 0);
         column.add_css_class("board-column");
-        column.add_css_class(&format!("column-tone-{}", epic_color_index(&name) % 5));
+        // Color follows visible column order, including collapsed columns.
+        column.add_css_class(&format!("column-tone-{}", column_tone_index(position)));
         if initially_collapsed {
             column.add_css_class("collapsed-column");
         }
@@ -2931,13 +2937,6 @@ fn render_board(ui: &Ui, state: &State) {
         }
         ui.board_box.append(&column);
     }
-}
-
-// Fixed FNV-1a hashing keeps an Epic's accent stable across launches and scopes.
-fn epic_color_index(key: &str) -> u32 {
-    key.bytes().fold(0x811c9dc5_u32, |hash, byte| {
-        (hash ^ u32::from(byte)).wrapping_mul(0x01000193)
-    }) % 8
 }
 
 // The Epic label is inside a ticket card, but it navigates independently:
@@ -3972,9 +3971,10 @@ mod scope_tests {
     }
 
     #[test]
-    fn epic_accent_is_deterministic() {
-        assert_eq!(epic_color_index("ART-123"), epic_color_index("ART-123"));
-        assert!(epic_color_index("ART-123") < 8);
+    fn column_colors_follow_visible_order_and_cycle_after_five() {
+        let tones: Vec<_> = (0..8).map(column_tone_index).collect();
+        assert_eq!(tones, vec![0, 1, 2, 3, 4, 0, 1, 2]);
+        assert!(tones.windows(2).all(|pair| pair[0] != pair[1]));
     }
 
     #[test]
