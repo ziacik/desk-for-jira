@@ -1158,6 +1158,32 @@ button.worktree-global-ticket-link:hover {
   background-color: alpha(#c9903a, 0.13);
   color: #a66b25;
 }
+.worktree-global-merge-control {
+  margin-top: 3px;
+  margin-bottom: 2px;
+}
+.worktree-global-merge-control > label {
+  font-size: 0.88em;
+}
+.worktree-global-base-selector {
+  min-width: 170px;
+}
+.worktree-global-merge-status {
+  padding: 3px 9px;
+  border-radius: 999px;
+  background-color: alpha(@window_fg_color, 0.055);
+  color: alpha(@window_fg_color, 0.74);
+  font-size: 0.81em;
+  font-weight: 650;
+}
+.worktree-global-merge-status.worktree-global-merged {
+  background-color: alpha(#2c9b70, 0.12);
+  color: #27805e;
+}
+.worktree-global-merge-status.worktree-global-unconfirmed {
+  background-color: alpha(@window_fg_color, 0.065);
+  color: alpha(@window_fg_color, 0.79);
+}
 .worktree-global-actions {
   margin-top: 2px;
 }
