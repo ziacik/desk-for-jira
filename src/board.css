@@ -880,3 +880,124 @@ list.command-results {
 .command-navigation {
   color: alpha(@window_fg_color, 0.53);
 }
+
+
+/* Ticket worktree manager: compact, hierarchy-first, dark/light-theme aware. */
+window.git-worktree-dialog {
+  color: @window_fg_color;
+  background-color: @window_bg_color;
+}
+.git-dialog-content {
+  padding: 21px 22px 18px;
+}
+.git-dialog-eyebrow {
+  color: alpha(@window_fg_color, 0.54);
+  font-size: 0.77em;
+  font-weight: 750;
+  letter-spacing: 0.4px;
+}
+.git-dialog-title {
+  color: @window_fg_color;
+  font-size: 1.12em;
+  font-weight: 720;
+  line-height: 1.3;
+}
+.git-dialog-section {
+  padding: 15px;
+  background-color: @card_bg_color;
+  border: 1px solid alpha(@window_fg_color, 0.085);
+  border-radius: 13px;
+}
+.git-dialog-section .dim-label {
+  color: alpha(@window_fg_color, 0.66);
+  font-size: 0.84em;
+  font-weight: 550;
+}
+.git-dialog-section dropdown,
+.git-dialog-section entry {
+  min-height: 33px;
+  border-radius: 9px;
+}
+button.git-small-action {
+  min-height: 31px;
+  min-width: 31px;
+  padding: 5px;
+  border-radius: 8px;
+  color: alpha(@window_fg_color, 0.68);
+}
+button.git-small-action:hover {
+  color: @window_fg_color;
+  background-color: alpha(@window_fg_color, 0.075);
+}
+.git-dialog-destination {
+  min-height: 36px;
+  padding: 5px 8px;
+  border-radius: 9px;
+  background-color: alpha(@window_fg_color, 0.035);
+}
+.git-destination-icon {
+  color: alpha(@window_fg_color, 0.5);
+  -gtk-icon-size: 16px;
+}
+.git-dialog-path {
+  color: alpha(@window_fg_color, 0.69);
+  font-size: 0.83em;
+}
+.git-dialog-status {
+  color: alpha(@window_fg_color, 0.68);
+  font-size: 0.85em;
+}
+.git-dialog-status.git-status-clean {
+  color: #298362;
+}
+.git-dialog-status.git-status-dirty {
+  color: #ac6830;
+}
+.git-branch-name {
+  color: @window_fg_color;
+  font-weight: 680;
+  font-size: 0.94em;
+}
+.git-dialog-options {
+  color: alpha(@window_fg_color, 0.81);
+}
+.git-dialog-advanced {
+  padding-top: 10px;
+}
+.git-dialog-message {
+  color: @window_fg_color;
+  font-size: 0.85em;
+  padding: 10px 12px;
+  background-color: alpha(@accent_bg_color, 0.09);
+  border-radius: 9px;
+}
+.git-dialog-log {
+  border: 1px solid alpha(@window_fg_color, 0.10);
+  border-radius: 8px;
+}
+.git-dialog-log textview,
+.git-dialog-log textview text {
+  color: @window_fg_color;
+  background-color: alpha(@window_fg_color, 0.025);
+  font-size: 0.85em;
+}
+.git-dialog-footer {
+  padding: 12px 22px;
+  border-top: 1px solid alpha(@window_fg_color, 0.075);
+  background-color: @window_bg_color;
+}
+.git-dialog-footer button {
+  min-height: 36px;
+}
+.git-menu-actions {
+  padding: 6px;
+}
+.git-menu-actions button {
+  min-height: 34px;
+  padding: 6px 12px;
+  text-align: left;
+  border-radius: 7px;
+}
+.git-menu-actions button:hover {
+  background-color: alpha(@window_fg_color, 0.06);
+}
