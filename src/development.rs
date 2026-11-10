@@ -28,6 +28,8 @@ enum Snapshot {
     Missing {
         repository: String,
         branch: String,
+        destination: String,
+        base: String,
         matching_branches: usize,
     },
     Existing {
@@ -91,6 +93,9 @@ fn inspect(site: &str, key: &str, summary: &str) -> Result<Snapshot, String> {
         repository: repo.name.clone(),
         branch: branches.first().cloned()
             .unwrap_or_else(|| issue_detail::suggested_branch_name(key, summary)),
+        destination: Path::new(&settings.worktree_root).join(&repo.name).join(key)
+            .to_string_lossy().into_owned(),
+        base: git::recommended_base(Path::new(&repo.path)),
         matching_branches: branches.len(),
     })
 }
@@ -285,16 +290,24 @@ impl DevelopmentPanel {
                     "Add a local repository before creating a ticket worktree.");
                 self.body.append(&self.manager_button("Configure repositories…", site, key, summary));
             }
-            Ok(Snapshot::Missing { repository, branch, matching_branches }) => {
+            Ok(Snapshot::Missing {
+                repository, branch, destination, base, matching_branches,
+            }) => {
                 self.set_state("No worktree", None);
-                self.detail(&format!("Suggested repository · {repository}"), &format!("Branch · {branch}"));
+                self.detail(&format!("Suggested repository · {repository}"),
+                    &format!("Branch · {branch}"));
+                let destination_label = text(&format!("Destination · {destination}"),
+                    "ticket-development-muted");
+                destination_label.set_tooltip_text(Some(&destination));
+                self.body.append(&destination_label);
                 let note = if matching_branches > 1 {
-                    "Multiple matching branches exist. Choose one in the creation dialog."
+                    "Multiple matching branches. Choose one in the dialog."
                 } else if matching_branches == 1 {
-                    "Branch exists, but no worktree is checked out. Review before creating."
+                    "Existing branch. Review before creating the worktree."
                 } else {
-                    "Review the base branch, fetch and setup before creating."
+                    "Opens the creation dialog. Git is unchanged until confirmation."
                 };
+                self.body.append(&text(&format!("Starting point · {base}"), "ticket-development-muted"));
                 self.body.append(&text(note, "ticket-development-muted"));
                 self.body.append(&self.manager_button("Create worktree…", site, key, summary));
             }
