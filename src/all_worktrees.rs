@@ -96,6 +96,7 @@ struct Manager {
     search: gtk::SearchEntry,
     sections: RefCell<Vec<Section>>,
     toast: adw::ToastOverlay,
+    open_issue: Rc<dyn Fn(String)>,
 }
 
 impl Manager {
@@ -195,6 +196,23 @@ impl Manager {
         branch.set_hexpand(true);
         branch.set_tooltip_text(Some(&name));
         top.append(&branch);
+        // The link is inferred from the same Jira-key prefix convention as
+        // the issue detail. There is no extra persisted mapping.
+        if let Some(key) = snapshot.tree.branch.as_deref().and_then(git::ticket_key_from_branch) {
+            let ticket = gtk::Button::with_label(&key);
+            ticket.add_css_class("flat");
+            ticket.add_css_class("worktree-global-ticket-link");
+            ticket.set_tooltip_text(Some(&format!("Open {key} in Desk for Jira")));
+            let open_issue = self.open_issue.clone();
+            let window = self.window.downgrade();
+            ticket.connect_clicked(move |_| {
+                if let Some(window) = window.upgrade() {
+                    window.close();
+                }
+                open_issue(key.clone());
+            });
+            top.append(&ticket);
+        }
         let status = if !snapshot.tree.path.exists() {
             "Missing"
         } else {
@@ -377,7 +395,11 @@ impl Manager {
 /// Open a repository-wide overview from the main board header, regardless of
 /// the selected Jira ticket. This enumerates the configured repositories,
 /// not the currently loaded Jira issues.
-pub fn show(parent: &adw::ApplicationWindow, toast: &adw::ToastOverlay) {
+pub fn show(
+    parent: &adw::ApplicationWindow,
+    toast: &adw::ToastOverlay,
+    open_issue: Rc<dyn Fn(String)>,
+) {
     let window = gtk::Window::builder().title("Worktrees")
         .transient_for(parent).default_width(760).default_height(620).build();
     window.add_css_class("worktree-global-window");
@@ -418,7 +440,7 @@ pub fn show(parent: &adw::ApplicationWindow, toast: &adw::ToastOverlay) {
     let manager = Rc::new(Manager {
         window: window.clone(), content, message, total: count,
         spinner, search: search.clone(), sections: RefCell::new(Vec::new()),
-        toast: toast.clone(),
+        toast: toast.clone(), open_issue,
     });
     {
         let manager = manager.clone();
