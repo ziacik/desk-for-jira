@@ -901,7 +901,7 @@ fn show_all_worktrees(ui: &Ui) {
     let events = ui.events.clone();
     crate::all_worktrees::show(&ui.window, &ui.toast, Rc::new(move |key| {
         let _ = events.send(Event::OpenLinkedIssue(key));
-    }), ui.layout.clone());
+    }), ui.layout.clone(), ui.state.borrow().account.clone());
 }
 
 fn wire_actions(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>) {
