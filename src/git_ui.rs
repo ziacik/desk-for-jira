@@ -115,6 +115,9 @@ struct View {
     repository: gtk::DropDown,
     base: gtk::DropDown,
     cleanup_target: gtk::DropDown,
+    cleanup_summary: gtk::Label,
+    cleanup_choices: gtk::Box,
+    cleanup_change: gtk::Button,
     branch: gtk::Entry,
     root: gtk::Entry,
     root_field: gtk::Box,
@@ -179,7 +182,6 @@ impl View {
         let recommended = git::recommended_base(path);
         let index = bases.iter().position(|b| b == &recommended).unwrap_or(0);
         set_choices(&self.base, &bases, index);
-        set_choices(&self.cleanup_target, &bases, index);
 
         let found = git::matching_worktrees(path, &self.key).unwrap_or_default();
         *self.trees.borrow_mut() = found.clone();
@@ -225,6 +227,31 @@ impl View {
         *self.active_tree.borrow_mut() = tree.clone();
         let Some(tree) = tree else { return; };
         self.existing_branch.set_text(tree.branch.as_deref().unwrap_or("Detached HEAD"));
+        let repo = self.selected();
+        if let (Some(repo), Some(branch)) = (repo, tree.branch.as_deref()) {
+            let path = Path::new(&repo.path);
+            let origin = self.settings.borrow().worktree_origin(
+                &repo.path, &tree.path.to_string_lossy(), branch,
+            ).map(str::to_owned);
+            let suggestion = git::suggested_merge_target(path, branch, origin.as_deref());
+            let bases: Vec<String> = git::available_bases(path).unwrap_or_default()
+                .into_iter()
+                .filter(|base| base != "HEAD" && base != branch).collect();
+            let selected = suggestion.as_ref()
+                .and_then(|target| bases.iter().position(|b| b == &target.name))
+                .unwrap_or(0);
+            set_choices(&self.cleanup_target, &bases, selected);
+            if let Some(target) = suggestion {
+                self.cleanup_summary.set_text(&format!(
+                    "Verify merged into: {} ({})", target.name, target.source
+                ));
+            } else {
+                self.cleanup_summary.set_text("Verify merged into: Choose target");
+            }
+            self.cleanup_change.set_sensitive(!bases.is_empty());
+        }
+        self.cleanup_choices.set_visible(false);
+        self.cleanup_change.set_label("Change");
         let status = git::status(&tree.path);
         self.summary.remove_css_class("git-status-clean");
         self.summary.remove_css_class("git-status-dirty");
@@ -622,9 +649,22 @@ pub fn show(parent: &adw::ApplicationWindow, site: &str, key: &str, summary: &st
     existing_branch.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
     existing_branch.add_css_class("git-branch-name");
     existing_box.append(&existing_branch);
+    let cleanup_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let cleanup_summary = label("Verify merged into: Checking…");
+    cleanup_summary.set_wrap(false);
+    cleanup_summary.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
+    cleanup_summary.set_hexpand(true);
+    cleanup_row.append(&cleanup_summary);
+    let cleanup_change = gtk::Button::with_label("Change");
+    cleanup_change.add_css_class("flat");
+    cleanup_change.add_css_class("git-small-action");
+    cleanup_row.append(&cleanup_change);
+    existing_box.append(&cleanup_row);
     let cleanup_target = gtk::DropDown::from_strings(&[]);
     cleanup_target.set_hexpand(true);
-    existing_box.append(&field("Merged into (required for safe removal)", &cleanup_target));
+    let cleanup_choices = field("Check merge into", &cleanup_target);
+    cleanup_choices.set_visible(false);
+    existing_box.append(&cleanup_choices);
     section.append(&existing_box);
 
     let destination = gtk::Box::new(gtk::Orientation::Horizontal, 8);
@@ -759,7 +799,8 @@ pub fn show(parent: &adw::ApplicationWindow, site: &str, key: &str, summary: &st
         site: site.into(), key: key.into(),
         suggested_branch: issue_detail::suggested_branch_name(key, summary),
         repository: repository.clone(),
-        base, cleanup_target, branch, root, root_field, editor, setup, run_setup, fetch, after_open,
+        base, cleanup_target, cleanup_summary, cleanup_choices, cleanup_change,
+        branch, root, root_field, editor, setup, run_setup, fetch, after_open,
         summary: summary_label, path, existing_branch, existing_box, new_box,
         tree_picker, trees: Rc::new(RefCell::new(Vec::new())), more,
         info, log, log_scroller, create, open, retry, terminal, remove,
@@ -772,6 +813,22 @@ pub fn show(parent: &adw::ApplicationWindow, site: &str, key: &str, summary: &st
     {
         let view = view.clone();
         view.tree_picker.clone().connect_selected_notify(move |_| view.choose_tree());
+    }
+    {
+        let view = view.clone();
+        view.cleanup_change.clone().connect_clicked(move |_| {
+            let visible = !view.cleanup_choices.is_visible();
+            view.cleanup_choices.set_visible(visible);
+            view.cleanup_change.set_label(if visible { "Hide" } else { "Change" });
+        });
+    }
+    {
+        let view = view.clone();
+        view.cleanup_target.clone().connect_selected_notify(move |dropdown| {
+            if let Some(base) = selected_text(dropdown) {
+                view.cleanup_summary.set_text(&format!("Verify merged into: {base}"));
+            }
+        });
     }
     {
         let view = view.clone();
