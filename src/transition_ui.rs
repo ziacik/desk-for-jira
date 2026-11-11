@@ -849,9 +849,9 @@ mod tests {
         let context = workflow("progress", &[
             ("progress","done"),("progress","review"),("review","done")
         ],"done");
-        // Direct Close makes the shortest distance 1. Choosing that shortcut
-        // would be wrong, so the selector stays neutral rather than guess.
-        assert_eq!(primary_transition_index(&[close,next],true,None,Some(&context)),None);
+        // Direct Close makes the shortest distance 1. Instead of promoting
+        // that shortcut, use the last normally reachable stage as the goal.
+        assert_eq!(primary_transition_index(&[close,next],true,None,Some(&context)),Some(1));
     }
 
     #[test]
