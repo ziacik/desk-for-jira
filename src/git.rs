@@ -466,6 +466,7 @@ mod tests {
 
         // A remote tracking ref for the *same* branch must never be treated
         // as proof that the feature was integrated.
+        output(&root, &["remote", "add", "origin", "."]).unwrap();
         output(&root, &["update-ref", "refs/remotes/origin/ART-33-work",
             &output(&root, &["rev-parse", "ART-33-work"]).unwrap()]).unwrap();
         output(&root, &["branch", "--set-upstream-to=origin/ART-33-work", "ART-33-work"]).unwrap();
