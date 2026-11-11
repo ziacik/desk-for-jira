@@ -298,6 +298,8 @@ pub struct ProjectStatus {
     pub workflow_order: Option<usize>,
     /// Directed workflow definitions involving this status. Shared cheaply.
     pub workflows: Vec<Arc<WorkflowGraph>>,
+    /// Best-effort fetch outcome, for the in-app workflow diagnostics.
+    pub workflow_metadata_note: String,
 }
 
 /// Actual Jira workflow edges, separate from the board's total status order.
@@ -895,6 +897,7 @@ impl JiraClient {
                             category: status.get("statusCategory").and_then(parse_status_category),
                             workflow_order: None,
                             workflows: Vec::new(),
+                            workflow_metadata_note: "Not requested".into(),
                         });
                     }
                 }
@@ -927,7 +930,8 @@ impl JiraClient {
         }
         if self.account.mode == AuthMode::Cloud {
             for key in keys {
-                let (workflow_order, mut graphs) = self.project_workflow_metadata(key);
+                let (workflow_order, mut graphs, metadata_note) =
+                    self.project_workflow_metadata(key);
                 if let Some(issue_types) = issue_type_statuses.get(key) {
                     for graph in &mut graphs {
                         for (kind, expected_statuses) in issue_types {
@@ -943,7 +947,13 @@ impl JiraClient {
                     status.workflows = graphs.iter()
                         .filter(|graph| graph.status_ids.contains(&status.id))
                         .cloned().collect();
+                    status.workflow_metadata_note = metadata_note.clone();
                 }
+            }
+        } else {
+            for status in &mut statuses {
+                status.workflow_metadata_note =
+                    "Workflow graph lookup is only implemented for Jira Cloud".into();
             }
         }
         Ok(statuses)
@@ -953,18 +963,24 @@ impl JiraClient {
     // alongside the presentation ordering. Unavailable workflow metadata must
     // never block board rendering or trigger an extra request per issue.
     fn project_workflow_metadata(&self, key: &str) ->
-        (HashMap<String, usize>, Vec<WorkflowGraph>)
+        (HashMap<String, usize>, Vec<WorkflowGraph>, String)
     {
         let project = self.read_json(self.http.get(
             self.url(&format!("/rest/api/3/project/{key}"))
         ));
         let Some(project_id) = project.ok()
             .and_then(|p| p.get("id").and_then(Value::as_str).map(str::to_owned))
-        else { return (HashMap::new(), Vec::new()); };
+        else {
+            return (HashMap::new(), Vec::new(),
+                "Project ID lookup did not return an ID (workflow search not attempted)".into());
+        };
 
         let mut result = HashMap::new();
         let mut graphs = Vec::new();
         let mut start = 0usize;
+        let mut pages = 0usize;
+        let mut workflows_found = 0usize;
+        let mut failure = None;
         for _ in 0..10 {
             let page = self.read_json(self.http.get(
                 self.url("/rest/api/3/workflows/search")
@@ -974,7 +990,13 @@ impl JiraClient {
                 ("maxResults", "100"),
                 ("isActive", "true"),
             ]));
-            let Ok(page) = page else { break; };
+            let Ok(page) = page else {
+                failure = Some(format!("Workflow search failed at page offset {start}"));
+                break;
+            };
+            pages += 1;
+            workflows_found += page.get("values").and_then(Value::as_array)
+                .map_or(0, Vec::len);
             graphs.extend(parse_workflow_graphs(&page));
             for (id, position) in parse_workflow_status_order(&page) {
                 result.entry(id).and_modify(|old: &mut usize| {
@@ -988,7 +1010,11 @@ impl JiraClient {
             }
             start += count;
         }
-        (result, graphs)
+        let metadata_note = failure.unwrap_or_else(|| format!(
+            "Workflow search: {pages} page(s), {workflows_found} definition(s), {} graph(s) parsed",
+            graphs.len(),
+        ));
+        (result, graphs, metadata_note)
     }
 
     /// Download a Jira attachment using the stored credentials. Only the same
