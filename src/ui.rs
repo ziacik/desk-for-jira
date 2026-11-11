@@ -3406,11 +3406,10 @@ fn show_command_palette(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Eve
                     );
                     let panel = ui_for_action.development.clone();
                     let key = issue.key;
-                    let summary = issue.summary;
                     let selected = ui_for_action.selected_issue.clone();
                     dialog.connect_close_request(move |_| {
                         if selected.borrow().as_deref() == Some(key.as_str()) {
-                            panel.refresh(&site, &key, &summary);
+                            panel.refresh_current();
                         }
                         glib::Propagation::Proceed
                     });
@@ -3995,7 +3994,7 @@ mod workflow_error_tests {
         };
         let transition = IssueTransition {
             id: "121".into(), name: "Review".into(),
-            to_name: "In Review".into(), to_id: "10".into(),
+            to_name: "In Review".into(), to_id: "10".into(), to_category: None,
             fields: vec![], edit_fields: vec![],
         };
         assert!(!transition_error_needs_input(&error, &transition));
@@ -4367,11 +4366,12 @@ mod scope_tests {
         let mut history = IssueHistory::default();
         history.visit(&issue("ART-1", "1", "Older"));
         history.visit(&issue("ART-2", "2", "Later"));
-        history.update_status("ART-1", "Done", "3");
+        history.update_status("ART-1", "Done", "3", Some(StatusCategory::Done));
         let restored = history.back().unwrap();
         assert_eq!(restored.summary, "Older");
         assert_eq!(restored.status, "Done");
         assert_eq!(restored.status_id, "3");
+        assert_eq!(restored.status_category, Some(StatusCategory::Done));
     }
 
     #[test]
