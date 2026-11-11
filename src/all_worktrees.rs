@@ -557,7 +557,7 @@ impl Manager {
         let heading = label(&format!("Remove {branch}?"), "title-3");
         content.append(&heading);
         let explanation = label(
-            "This removes the linked worktree and its local branch, but only if the worktree is clean and the branch is provably merged. Ignored files (such as node_modules) may be deleted. Remote branches are never deleted.",
+            "This removes the linked worktree and its local branch after Git verifies the merge. Completed squash/rebase PRs may require your explicit confirmation instead. The worktree must always be clean. Ignored files (such as node_modules) may be deleted. Remote branches are never deleted.",
             "dim-label",
         );
         explanation.set_wrap(true);
