@@ -427,6 +427,20 @@ impl JiraClient {
         ).query(&[("fields", "summary")]))?;
         let id = issue.get("id").and_then(Value::as_str)
             .context("Jira did not return a numeric issue ID")?;
+        // Newer Jira Cloud instances expose the complete development detail
+        // without applicationType or dataType. Prefer this single request so
+        // third-party integration IDs need not be guessed.
+        if let Ok(payload) = self.read_json(self.http.get(
+            self.url("/rest/dev-status/latest/issue/details")
+        ).query(&[("issueId", id)])) {
+            let requests = parse_dev_pull_requests(&payload);
+            if !requests.is_empty() {
+                let mut unique = HashSet::new();
+                return Ok(requests.into_iter()
+                    .filter(|request| unique.insert(request.url.clone()))
+                    .collect());
+            }
+        }
         let summary = self.read_json(self.http.get(
             self.url("/rest/dev-status/latest/issue/summary")
         ).query(&[("issueId", id)]))?;
