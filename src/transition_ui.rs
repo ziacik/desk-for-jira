@@ -206,13 +206,9 @@ fn primary_transition_index(
         return local.first().copied();
     }
 
-    // A genuine tie in shortest-path distance may represent alternative
-    // workflow branches. Do not invent a primary from Jira's display order.
-    let min_sequence = local.iter()
-        .filter_map(|&index| transitions[index].opsbar_sequence).min()?;
-    let tied: Vec<_> = local.into_iter()
-        .filter(|&index| transitions[index].opsbar_sequence == Some(min_sequence)).collect();
-    (tied.len() == 1).then_some(tied[0])
+    // Equal shortest-path distances describe equally plausible branches.
+    // Jira's menu priority cannot establish a primary workflow direction.
+    None
 }
 
 fn action_button(
