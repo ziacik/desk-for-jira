@@ -14,6 +14,8 @@ use gtk::glib;
 
 use crate::{git, git_ui, issue_detail, preferences};
 
+type WorktreeContext = (String, String, String, bool);
+
 #[derive(Clone, Debug)]
 struct ExistingWorktree {
     repository: String,
@@ -128,7 +130,7 @@ pub struct DevelopmentPanel {
     git_status: gtk::Label,
     body: gtk::Box,
     request: Rc<Cell<u64>>,
-    context: Rc<RefCell<Option<(String, String, String, bool)>>>,
+    context: Rc<RefCell<Option<WorktreeContext>>>,
     window: adw::ApplicationWindow,
     toast: adw::ToastOverlay,
 }
