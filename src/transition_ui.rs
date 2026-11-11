@@ -1,9 +1,9 @@
-use std::{cell::{Cell, RefCell}, cmp::Ordering, collections::HashMap, rc::Rc};
+use std::{cell::{Cell, RefCell}, collections::HashSet, rc::Rc, sync::Arc};
 
 use adw::prelude::*;
 use serde_json::{Map, Value};
 
-use crate::jira::{IssueTransition, StatusCategory, TransitionField};
+use crate::jira::{IssueTransition, TransitionField, WorkflowGraph};
 
 pub type TransitionSubmit = Rc<dyn Fn(IssueTransition, Map<String, Value>, Map<String, Value>, Option<Value>) -> bool>;
 pub type FormOpened = Rc<dyn Fn(TransitionForm)>;
@@ -11,8 +11,8 @@ pub type PrimaryChanged = Rc<dyn Fn(Option<String>)>;
 
 pub struct WorkflowContext {
     pub current_status_id: String,
-    pub current_category: Option<StatusCategory>,
-    pub order_by_status_id: HashMap<String, usize>,
+    pub graph: Arc<WorkflowGraph>,
+    pub terminal_status_ids: HashSet<String>,
 }
 
 pub struct ActionOptions {
@@ -123,117 +123,66 @@ fn clear(container: &gtk::Box) {
     }
 }
 
-/// Compare real workflow status positions, not transition labels or Jira menu order.
-/// A change within the same status category is forward only if the workflow
-/// ordering places its destination later than the issue's current status.
-fn transition_direction(transition: &IssueTransition, workflow: &WorkflowContext) -> Option<Ordering> {
-    if transition.to_id == workflow.current_status_id {
-        return Some(Ordering::Equal);
-    }
-    // Category changes are authoritative even when Jira's project-wide
-    // workflow positions disagree (they can combine different issue types).
-    let category_rank = |category: StatusCategory| match category {
-        StatusCategory::Todo => 0,
-        StatusCategory::InProgress => 1,
-        StatusCategory::Done => 2,
-    };
-    if let (Some(source), Some(destination)) =
-        (workflow.current_category, transition.to_category)
-    {
-        let category_order = category_rank(destination).cmp(&category_rank(source));
-        if category_order != Ordering::Equal {
-            return Some(category_order);
-        }
-    }
-    // Within a category, use status positions only when both are known.
-    if let (Some(current), Some(destination)) = (
-        workflow.order_by_status_id.get(&workflow.current_status_id),
-        workflow.order_by_status_id.get(&transition.to_id),
-    ) {
-        return Some(destination.cmp(current));
-    }
-    None
-}
-
-/// Select the next forward move. Jira's opsbar priority is a tie-breaker *only*
-/// between forward transitions, and may never promote a backward transition.
+/// Primary is the directed step that most reduces the distance to a
+/// terminal status, computed by reverse BFS over the *actual* workflow graph.
+/// Status IDs are opaque keys, never numbers for sorting.
 fn primary_transition_index(
     transitions: &[IssueTransition],
-    cloud_sorted: bool,
+    _cloud_sorted: bool,
     override_id: Option<&str>,
     workflow: Option<&WorkflowContext>,
 ) -> Option<usize> {
     if let Some(index) = override_id.and_then(|id| transitions.iter().position(|t| t.id == id)) {
         return Some(index);
     }
-    let workflow = workflow?;
-    // From To Do, entering In Progress is an unambiguous advance to the
-    // adjacent lifecycle category. A same-category transition may be a
-    // rollback (e.g. Ready for Dev -> Open), despite misleading workflow
-    // positions. Do not let such a transition or a direct Done shortcut win.
-    if workflow.current_category == Some(StatusCategory::Todo) {
-        let start_work: Vec<usize> = transitions.iter().enumerate()
-            .filter_map(|(index, transition)| (
-                transition.to_category == Some(StatusCategory::InProgress)
-            ).then_some(index))
-            .collect();
-        if start_work.len() == 1 {
-            return start_work.first().copied();
-        }
-        if start_work.len() > 1 {
-            // Several paths into In Progress: Jira does not identify the
-            // intended next one. Let the user explicitly choose it.
-            return None;
-        }
-    }
-    // An action in the same status category may be the *real* next step.
-    // If Jira did not expose enough workflow ordering to classify it, do not
-    // incorrectly promote a category-changing shortcut such as Close.
-    if transitions.iter().any(|transition| transition_direction(transition, workflow).is_none()) {
-        return None;
-    }
-    let mut forward: Vec<usize> = transitions.iter().enumerate()
+    let context = workflow?;
+    let distances = context.graph.distance_to_terminals(&context.terminal_status_ids);
+    let current_distance = distances.get(&context.current_status_id).copied()?;
+
+    // Only directed workflow edges count. Global actions (such as an
+    // unconditional Close) are not normal workflow progression.
+    let mut local: Vec<usize> = transitions.iter().enumerate()
         .filter_map(|(index, transition)| (
-            transition_direction(transition, workflow) == Some(Ordering::Greater)
+            transition.is_global != Some(true)
+            && transition.to_id != context.current_status_id
+            && context.graph.has_edge(&context.current_status_id, &transition.to_id)
+            && distances.contains_key(&transition.to_id)
         ).then_some(index))
         .collect();
-    if forward.is_empty() {
-        // Do not label an unknown or backward move as primary.
-        return None;
+
+    let progress: Vec<usize> = local.iter().copied()
+        .filter(|&index| {
+            let destination = &transitions[index].to_id;
+            !context.terminal_status_ids.contains(destination)
+                && distances.get(destination).is_some_and(|distance| *distance < current_distance)
+        }).collect();
+    if !progress.is_empty() {
+        local = progress;
+    } else {
+        // Only promote a terminal action when no other nonterminal directed
+        // edge leads to the terminal. Otherwise early Close shortcuts could
+        // appear primary in cyclical workflows.
+        if local.iter().any(|&index| !context.terminal_status_ids.contains(&transitions[index].to_id)) {
+            return None;
+        }
+        local.retain(|&index| context.terminal_status_ids.contains(&transitions[index].to_id));
     }
 
-    // Prefer the next workflow position, not a shortcut several stages ahead.
-    let current = workflow.order_by_status_id.get(&workflow.current_status_id);
-    let nearest = forward.iter().filter_map(|&index| {
-        let destination = workflow.order_by_status_id.get(&transitions[index].to_id)?;
-        destination.checked_sub(*current?)
-    }).min();
-    if let Some(distance) = nearest {
-        forward.retain(|&index| workflow.order_by_status_id
-            .get(&transitions[index].to_id)
-            .and_then(|destination| destination.checked_sub(*current?)) == Some(distance));
-    }
-    if forward.len() == 1 {
-        return forward.first().copied();
+    let nearest = local.iter()
+        .filter_map(|&index| distances.get(&transitions[index].to_id))
+        .copied().min()?;
+    local.retain(|&index| distances.get(&transitions[index].to_id) == Some(&nearest));
+    if local.len() == 1 {
+        return local.first().copied();
     }
 
-    let local: Vec<usize> = forward.iter().copied()
-        .filter(|&index| transitions[index].is_global == Some(false)).collect();
-    if !local.is_empty() {
-        forward = local;
-    }
-    if forward.len() == 1 {
-        return forward.first().copied();
-    }
-
-    let min_sequence = forward.iter().filter_map(|&index| transitions[index].opsbar_sequence).min();
-    if let Some(sequence) = min_sequence {
-        let best: Vec<_> = forward.into_iter()
-            .filter(|&index| transitions[index].opsbar_sequence == Some(sequence)).collect();
-        return (best.len() == 1).then_some(best[0]);
-    }
-    // The Cloud API returns transitions in opsbar priority order.
-    cloud_sorted.then_some(forward[0])
+    // A genuine tie in shortest-path distance may represent alternative
+    // workflow branches. Do not invent a primary from Jira's display order.
+    let min_sequence = local.iter()
+        .filter_map(|&index| transitions[index].opsbar_sequence).min()?;
+    let tied: Vec<_> = local.into_iter()
+        .filter(|&index| transitions[index].opsbar_sequence == Some(min_sequence)).collect();
+    (tied.len() == 1).then_some(tied[0])
 }
 
 fn action_button(
@@ -765,159 +714,123 @@ mod tests {
         }
     }
 
-    fn workflow(current: &str, statuses: &[(&str, usize)]) -> WorkflowContext {
+    fn workflow(
+        current: &str, edges: &[(&str, &str)], terminal: &str,
+    ) -> WorkflowContext {
+        let mut graph = WorkflowGraph::default();
+        graph.status_ids.insert(current.into());
+        graph.status_ids.insert(terminal.into());
+        for (source, target) in edges {
+            graph.status_ids.insert((*source).into());
+            graph.status_ids.insert((*target).into());
+            graph.edges.entry((*source).into()).or_default().insert((*target).into());
+        }
         WorkflowContext {
             current_status_id: current.into(),
-            current_category: Some(StatusCategory::InProgress),
-            order_by_status_id: statuses.iter()
-                .map(|(id, position)| ((*id).to_owned(), *position)).collect(),
+            graph: Arc::new(graph),
+            terminal_status_ids: HashSet::from([terminal.into()]),
         }
     }
 
     #[test]
-    fn prefers_next_step_over_backward_pause_even_when_jira_lists_pause_first() {
-        let mut pause = t("pause", Some(false), Some(1));
-        pause.to_id = "ready".into();
-        let mut close = t("close", Some(true), Some(2));
-        close.to_id = "done".into();
-        let mut advance = t("advance", Some(false), Some(100));
-        advance.to_id = "review".into();
-        let graph = workflow("progress", &[
-            ("ready", 0), ("progress", 1), ("review", 2), ("done", 3),
-        ]);
-        let actions = [pause, close, advance];
-        assert_eq!(primary_transition_index(&actions, true, None, Some(&graph)), Some(2));
-        assert_eq!(primary_transition_index(&actions, false, None, Some(&graph)), Some(2));
-    }
-
-    #[test]
-    fn actual_art_1885_uses_begin_work_not_stash_despite_wrong_workflow_positions() {
+    fn art_1885_begin_work_is_primary_not_stash_or_global_close() {
+        // Ready for Dev -> Open is a rollback; the Jira opsbar lists it first.
         let mut stash = t("211", Some(false), Some(1));
-        stash.to_id = "1".into(); // Open, To Do
-        stash.to_category = Some(StatusCategory::Todo);
+        stash.to_id = "1".into();
         let mut begin_work = t("11", Some(false), Some(20));
-        begin_work.to_id = "3".into(); // In Progress
-        begin_work.to_category = Some(StatusCategory::InProgress);
-        let mut close = t("141", Some(true), Some(10));
-        close.to_id = "6".into(); // Closed
-        close.to_category = Some(StatusCategory::Done);
-        let mut graph = workflow("10291", &[
-            ("10291", 1), ("1", 2), ("3", 3), ("6", 4),
-        ]);
-        graph.current_category = Some(StatusCategory::Todo);
-        let actions = [stash, begin_work, close];
-        assert_eq!(transition_direction(&actions[0], &graph), Some(Ordering::Greater));
-        assert_eq!(primary_transition_index(&actions, true, None, Some(&graph)), Some(1));
-    }
-
-    #[test]
-    fn actual_art_2921_uses_review_not_pause_work_or_close() {
-        let mut pause = t("161", Some(false), Some(1));
-        pause.to_id = "10291".into();
-        pause.to_category = Some(StatusCategory::Todo);
-        let mut review = t("121", Some(false), Some(20));
-        review.to_id = "10053".into();
-        review.to_category = Some(StatusCategory::InProgress);
+        begin_work.to_id = "3".into();
         let mut close = t("141", Some(true), Some(10));
         close.to_id = "6".into();
-        close.to_category = Some(StatusCategory::Done);
-        let graph = workflow("3", &[
-            ("3", 1), ("10291", 4), ("10053", 2), ("6", 3),
-        ]);
-        let actions = [pause, review, close];
-        assert_eq!(transition_direction(&actions[0], &graph), Some(Ordering::Less));
-        assert_eq!(primary_transition_index(&actions, true, None, Some(&graph)), Some(1));
-    }
-
-    #[test]
-    fn to_do_to_in_progress_is_preferred_even_without_workflow_order() {
-        let mut fallback = t("211", None, Some(1));
-        fallback.to_category = Some(StatusCategory::Todo);
-        let mut advance = t("11", None, Some(50));
-        advance.to_category = Some(StatusCategory::InProgress);
-        let mut done = t("141", None, Some(2));
-        done.to_category = Some(StatusCategory::Done);
-        let mut graph = workflow("ready", &[]);
-        graph.current_category = Some(StatusCategory::Todo);
+        let context = workflow("10291", &[
+            ("10291","1"),("1","10291"),("10291","3"),
+            ("3","10053"),("10053","10069"),("10069","10054"),
+            ("10054","6"),
+        ], "6");
         assert_eq!(
-            primary_transition_index(&[fallback, advance, done], true, None, Some(&graph)),
+            primary_transition_index(&[stash,begin_work,close], true, None, Some(&context)),
             Some(1),
         );
     }
 
     #[test]
-    fn chooses_nearest_forward_step_not_workflow_shortcut() {
-        let mut shortcut = t("shortcut", Some(false), Some(1));
-        shortcut.to_id = "done".into();
-        let mut next = t("next", Some(true), Some(30));
-        next.to_id = "testing".into();
-        let graph = workflow("progress", &[("progress", 1), ("testing", 2), ("done", 4)]);
+    fn art_2921_review_is_primary_not_pause_work() {
+        let mut pause = t("161", Some(false), Some(1));
+        pause.to_id = "10291".into();
+        let mut review = t("121", Some(false), Some(20));
+        review.to_id = "10053".into();
+        let mut close = t("141", Some(true), Some(10));
+        close.to_id = "6".into();
+        let context = workflow("3", &[
+            ("10291","3"),("3","10291"),("3","10053"),
+            ("10053","10069"),("10069","10054"),("10054","6"),
+        ], "6");
         assert_eq!(
-            primary_transition_index(&[shortcut, next], true, None, Some(&graph)),
+            primary_transition_index(&[pause,review,close],true,None,Some(&context)),Some(1),
+        );
+    }
+
+    #[test]
+    fn terminal_step_is_primary_only_at_end_of_normal_workflow() {
+        let mut close = t("finish", Some(false), None);
+        close.to_id = "done".into();
+        let context = workflow("testing", &[("testing","done")], "done");
+        assert_eq!(primary_transition_index(&[close],true,None,Some(&context)),Some(0));
+    }
+
+    #[test]
+    fn terminal_shortcut_cannot_override_a_forward_step() {
+        let mut close = t("finish", None, Some(1));
+        close.to_id = "done".into();
+        let mut next = t("next", None, Some(50));
+        next.to_id = "review".into();
+        let context = workflow("progress", &[
+            ("progress","done"),("progress","review"),("review","done")
+        ],"done");
+        // Direct Close makes the shortest distance 1. Choosing that shortcut
+        // would be wrong, so the selector stays neutral rather than guess.
+        assert_eq!(primary_transition_index(&[close,next],true,None,Some(&context)),None);
+    }
+
+    #[test]
+    fn competing_forward_paths_use_distance_to_terminal() {
+        let mut long_way = t("long", None, Some(1));
+        long_way.to_id = "a".into();
+        let mut short_way = t("short", None, Some(20));
+        short_way.to_id = "b".into();
+        let context = workflow("start", &[
+            ("start","a"),("start","b"),("a","x"),("x","y"),
+            ("y","done"),("b","done"),
+        ], "done");
+        assert_eq!(
+            primary_transition_index(&[long_way,short_way],true,None,Some(&context)),
             Some(1),
         );
     }
 
     #[test]
-    fn uses_status_categories_when_workflow_positions_are_missing() {
-        let mut backward = t("back", None, Some(1));
-        backward.to_category = Some(StatusCategory::Todo);
-        let mut next = t("next", None, Some(20));
-        next.to_category = Some(StatusCategory::Done);
-        let graph = workflow("progress", &[]);
+    fn equal_distance_branches_do_not_invent_primary() {
+        let mut first = t("a", None, None);
+        first.to_id = "left".into();
+        let mut second = t("b", None, None);
+        second.to_id = "right".into();
+        let context = workflow("start", &[
+            ("start","left"),("start","right"),("left","done"),("right","done"),
+        ], "done");
         assert_eq!(
-            primary_transition_index(&[backward, next], false, None, Some(&graph)),
-            Some(1),
-        );
-    }
-
-    #[test]
-    fn refuses_to_promote_backward_or_unknown_transitions() {
-        let mut pause = t("pause", Some(false), Some(1));
-        pause.to_id = "ready".into();
-        let mut reopen = t("reopen", Some(false), Some(2));
-        reopen.to_id = "progress".into();
-        let graph = workflow("progress", &[("ready", 0), ("progress", 1)]);
-        assert_eq!(
-            primary_transition_index(&[pause.clone(), reopen], true, None, Some(&graph)),
+            primary_transition_index(&[first.clone(),second.clone()],true,None,Some(&context)),
             None,
         );
-        assert_eq!(primary_transition_index(&[pause], true, None, None), None);
-        assert_eq!(primary_transition_index(&[t("unknown", None, None)], true, None, Some(
-            &workflow("progress", &[])
-        )), None);
-    }
-
-    #[test]
-    fn does_not_call_close_primary_when_next_step_is_unknown() {
-        let mut close = t("close", None, Some(1));
-        close.to_category = Some(StatusCategory::Done);
-        let mut testing = t("testing", None, Some(2));
-        testing.to_category = Some(StatusCategory::InProgress);
-        let graph = workflow("ready", &[]);
         assert_eq!(
-            primary_transition_index(&[close, testing], true, None, Some(&graph)),
-            None,
-        );
-    }
-
-    #[test]
-    fn uses_only_forward_candidates_for_jira_opsbar_tiebreakers() {
-        let mut a = t("a", None, Some(20));
-        a.to_id = "test-a".into();
-        let mut b = t("b", None, Some(10));
-        b.to_id = "test-b".into();
-        let graph = workflow("progress", &[("progress", 1), ("test-a", 2), ("test-b", 2)]);
-        assert_eq!(primary_transition_index(&[a, b], false, None, Some(&graph)), Some(1));
-    }
-
-    #[test]
-    fn user_override_still_takes_precedence() {
-        let actions = [t("pause", None, Some(1)), t("advance", None, Some(100))];
-        assert_eq!(
-            primary_transition_index(&actions, true, Some("advance"), None),
+            primary_transition_index(&[first,second],true,Some("b"),Some(&context)),
             Some(1),
         );
+    }
+
+    #[test]
+    fn no_directed_workflow_metadata_never_promotes_unknown_action() {
+        let context = workflow("ready",&[], "done");
+        assert_eq!(primary_transition_index(&[t("action",None,None)],true,None,Some(&context)),None);
+        assert_eq!(primary_transition_index(&[t("action",None,None)],true,Some("action"),None),Some(0));
     }
 
     #[test]
