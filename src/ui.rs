@@ -1445,6 +1445,28 @@ fn handle_event(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>, eve
                     let preferred = context.as_ref().and_then(|(project, status, kind)| {
                         state.borrow().primary_transitions.get(project, status, kind).map(str::to_owned)
                     });
+                    let workflow = context.as_ref().map(|(project, current_status_id, _)| {
+                        let s = state.borrow();
+                        let current_category = s.statuses.iter()
+                            .find(|status| &status.project_key == project
+                                && &status.id == current_status_id)
+                            .and_then(|status| status.category)
+                            .or_else(|| s.recent_issues.iter().chain(s.issues.iter())
+                                .chain(s.pinned_issues.iter())
+                                .find(|issue| issue.key == key)
+                                .and_then(|issue| issue.status_category));
+                        let order_by_status_id = s.statuses.iter()
+                            .filter(|status| &status.project_key == project)
+                            .filter_map(|status| Some((
+                                status.id.clone(), status.workflow_order?,
+                            )))
+                            .collect();
+                        transition_ui::WorkflowContext {
+                            current_status_id: current_status_id.clone(),
+                            current_category,
+                            order_by_status_id,
+                        }
+                    });
                     let on_primary_changed: Option<transition_ui::PrimaryChanged> =
                         context.map(|(project, status, kind)| {
                             let ui = ui.clone();
@@ -1471,7 +1493,7 @@ fn handle_event(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>, eve
                     transition_ui::render_actions(
                         &ui.detail_actions, &ui.window, &key, cloud,
                         transitions, transition_ui::ActionOptions {
-                            preferred_id: preferred, on_primary_changed, submit, on_open,
+                            workflow, preferred_id: preferred, on_primary_changed, submit, on_open,
                         },
                     );
                 }
