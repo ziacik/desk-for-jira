@@ -1470,7 +1470,9 @@ fn handle_event(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>, eve
                     ui.detail_actions.set_sensitive(!ui.transition_busy.get());
                     transition_ui::render_actions(
                         &ui.detail_actions, &ui.window, &key, cloud,
-                        transitions, preferred, on_primary_changed, submit, on_open,
+                        transitions, transition_ui::ActionOptions {
+                            preferred_id: preferred, on_primary_changed, submit, on_open,
+                        },
                     );
                 }
                 Err(error) => {
