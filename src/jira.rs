@@ -490,6 +490,33 @@ impl JiraClient {
         parse_issue(&data, None).context("Jira returned an invalid issue response")
     }
 
+    /// Fetch only current workflow status names for the worktree list.
+    /// Unlike full issue retrieval, this avoids descriptions, attachments,
+    /// epic enrichment, and any assignee/board filtering.
+    pub fn issue_statuses_by_keys(&self, keys: &[String]) -> Result<HashMap<String, String>> {
+        let mut statuses = HashMap::new();
+        for batch in keys.chunks(50) {
+            if batch.is_empty() { continue; }
+            // Reuse the validated key-IN query to avoid embedding arbitrary
+            // branch text into JQL.
+            let jql = pinned_issues_jql(batch)?;
+            let data = match self.account.mode {
+                AuthMode::Cloud => self.read_json(
+                    self.http.post(self.url("/rest/api/3/search/jql")).json(
+                        &json!({"jql": jql, "maxResults": 50, "fields": ["status"]}),
+                    ),
+                )?,
+                AuthMode::Server => self.read_json(
+                    self.http.post(self.url("/rest/api/2/search")).json(
+                        &json!({"jql": jql, "maxResults": 50, "startAt": 0, "fields": ["status"]}),
+                    ),
+                )?,
+            };
+            statuses.extend(parse_issue_statuses(&data));
+        }
+        Ok(statuses)
+    }
+
     /// Direct children are requested independently of board filters and assignee.
     /// Jira's parent JQL works for subtasks and modern issue hierarchies.
     pub fn child_issues(&self, parent_key: &str) -> Result<Vec<Issue>> {
@@ -797,6 +824,19 @@ fn child_issues_jql(key: &str) -> Result<String> {
         "Invalid parent issue key"
     );
     Ok(format!("parent = {key} ORDER BY updated DESC"))
+}
+
+/// Status-only Jira response parser. Missing or invisible issues are absent,
+/// never mistaken for a specific workflow state.
+fn parse_issue_statuses(data: &Value) -> HashMap<String, String> {
+    data.get("issues").and_then(Value::as_array)
+        .into_iter().flatten()
+        .filter_map(|issue| {
+            let key = issue.get("key")?.as_str()?.to_ascii_uppercase();
+            let name = issue.get("fields")?.get("status")?.get("name")?.as_str()?;
+            (!name.is_empty()).then_some((key, name.to_owned()))
+        })
+        .collect()
 }
 
 fn pinned_issues_jql(keys: &[String]) -> Result<String> {
@@ -1216,6 +1256,24 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn reads_current_statuses_without_guessing_for_missing_issues() {
+        let response = serde_json::json!({
+            "issues": [
+                {"key": "art-2272", "fields": {"status": {"name": "Ready to Dev"}}},
+                {"key": "AFB-29", "fields": {"status": {"name": "In Progress"}}},
+                {"key": "AFB-30", "fields": {"status": null}},
+                {"key": "ART-1", "fields": {}}
+            ]
+        });
+        let statuses = parse_issue_statuses(&response);
+        assert_eq!(statuses.get("ART-2272"), Some(&"Ready to Dev".to_owned()));
+        assert_eq!(statuses.get("AFB-29"), Some(&"In Progress".to_owned()));
+        assert!(!statuses.contains_key("AFB-30"));
+        assert!(!statuses.contains_key("ART-1"));
+        assert_eq!(statuses.len(), 2);
+    }
 
     #[test]
     fn project_jql_combines_sprint_and_assignee_filters() {

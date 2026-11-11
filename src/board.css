@@ -880,3 +880,368 @@ list.command-results {
 .command-navigation {
   color: alpha(@window_fg_color, 0.53);
 }
+
+
+/* Ticket worktree manager: compact, hierarchy-first, dark/light-theme aware. */
+window.git-worktree-dialog {
+  color: @window_fg_color;
+  background-color: @window_bg_color;
+}
+.git-dialog-content {
+  padding: 21px 22px 18px;
+}
+.git-dialog-eyebrow {
+  color: alpha(@window_fg_color, 0.54);
+  font-size: 0.77em;
+  font-weight: 750;
+  letter-spacing: 0.4px;
+}
+.git-dialog-title {
+  color: @window_fg_color;
+  font-size: 1.12em;
+  font-weight: 720;
+  line-height: 1.3;
+}
+.git-dialog-section {
+  padding: 15px;
+  background-color: @card_bg_color;
+  border: 1px solid alpha(@window_fg_color, 0.085);
+  border-radius: 13px;
+}
+.git-dialog-section .dim-label {
+  color: alpha(@window_fg_color, 0.66);
+  font-size: 0.84em;
+  font-weight: 550;
+}
+.git-dialog-section dropdown,
+.git-dialog-section entry {
+  min-height: 33px;
+  border-radius: 9px;
+}
+button.git-small-action {
+  min-height: 31px;
+  min-width: 31px;
+  padding: 5px;
+  border-radius: 8px;
+  color: alpha(@window_fg_color, 0.68);
+}
+button.git-small-action:hover {
+  color: @window_fg_color;
+  background-color: alpha(@window_fg_color, 0.075);
+}
+.git-dialog-destination {
+  min-height: 36px;
+  padding: 5px 8px;
+  border-radius: 9px;
+  background-color: alpha(@window_fg_color, 0.035);
+}
+.git-destination-icon {
+  color: alpha(@window_fg_color, 0.5);
+  -gtk-icon-size: 16px;
+}
+.git-dialog-path {
+  color: alpha(@window_fg_color, 0.69);
+  font-size: 0.83em;
+}
+.git-dialog-status {
+  color: alpha(@window_fg_color, 0.68);
+  font-size: 0.85em;
+}
+.git-dialog-status.git-status-clean {
+  color: #298362;
+}
+.git-dialog-status.git-status-dirty {
+  color: #ac6830;
+}
+.git-branch-name {
+  color: @window_fg_color;
+  font-weight: 680;
+  font-size: 0.94em;
+}
+.git-dialog-options {
+  color: alpha(@window_fg_color, 0.81);
+}
+.git-dialog-advanced {
+  padding-top: 10px;
+}
+.git-dialog-message {
+  color: @window_fg_color;
+  font-size: 0.85em;
+  padding: 10px 12px;
+  background-color: alpha(@accent_bg_color, 0.09);
+  border-radius: 9px;
+}
+.git-dialog-log {
+  border: 1px solid alpha(@window_fg_color, 0.10);
+  border-radius: 8px;
+}
+.git-dialog-log textview,
+.git-dialog-log textview text {
+  color: @window_fg_color;
+  background-color: alpha(@window_fg_color, 0.025);
+  font-size: 0.85em;
+}
+.git-dialog-footer {
+  padding: 12px 22px;
+  border-top: 1px solid alpha(@window_fg_color, 0.075);
+  background-color: @window_bg_color;
+}
+.git-dialog-footer button {
+  min-height: 36px;
+}
+.git-menu-actions {
+  padding: 6px;
+}
+.git-menu-actions button {
+  min-height: 34px;
+  padding: 6px 12px;
+  text-align: left;
+  border-radius: 7px;
+}
+.git-menu-actions button:hover {
+  background-color: alpha(@window_fg_color, 0.06);
+}
+
+
+/* Development follows the ticket detail's paper surface and its workflow
+   button styling. State badges are badges; actions all reuse transition-action. */
+.ticket-development {
+  padding: 17px 22px 18px;
+  border-bottom: 1px solid alpha(@window_fg_color, 0.095);
+  /* A subtle cool-blue surface distinguishes worktree information from
+     ticket content without inheriting an error-like red application accent. */
+  background-color: alpha(#4e91b5, 0.13);
+}
+.ticket-development-icon {
+  color: alpha(@window_fg_color, 0.68);
+  -gtk-icon-size: 16px;
+}
+.ticket-development-title {
+  color: @window_fg_color;
+  font-size: 1em;
+  font-weight: 700;
+}
+.ticket-development-badge {
+  color: alpha(@window_fg_color, 0.74);
+  background-color: alpha(@window_fg_color, 0.065);
+  padding: 3px 9px;
+  border-radius: 999px;
+  font-size: 0.84em;
+  font-weight: 650;
+}
+.ticket-development-badge.ticket-development-good {
+  color: #2c8063;
+  background-color: alpha(#2c9b70, 0.10);
+}
+.ticket-development-badge.ticket-development-warning {
+  color: #a56b25;
+  background-color: alpha(#c9903a, 0.12);
+}
+.ticket-development-value {
+  color: @window_fg_color;
+  font-size: 0.98em;
+  font-weight: 650;
+}
+.ticket-development-muted {
+  color: alpha(@window_fg_color, 0.72);
+  font-size: 0.91em;
+}
+.ticket-development-repository-row {
+  min-height: 22px;
+}
+.ticket-development-branch {
+  color: alpha(@window_fg_color, 0.73);
+  font-size: 0.95em;
+}
+.ticket-development-path-row {
+  min-height: 33px;
+  padding: 3px 7px 3px 9px;
+  border-radius: 8px;
+  background-color: alpha(@window_fg_color, 0.035);
+}
+.ticket-development-path-icon {
+  color: alpha(@window_fg_color, 0.62);
+  -gtk-icon-size: 15px;
+}
+.ticket-development-path {
+  color: alpha(@window_fg_color, 0.86);
+  font-size: 0.94em;
+}
+.ticket-development-actions {
+  margin-top: 2px;
+}
+.ticket-development-entry {
+  padding: 10px 0;
+  border-bottom: 1px solid alpha(@window_fg_color, 0.075);
+}
+.ticket-development button.ticket-development-icon-button {
+  min-width: 30px;
+  min-height: 30px;
+  padding: 4px;
+  border-radius: 8px;
+  color: alpha(@window_fg_color, 0.69);
+}
+.ticket-development button.ticket-development-icon-button:hover {
+  color: @window_fg_color;
+  background-color: alpha(@window_fg_color, 0.075);
+}
+
+
+/* Global worktree manager – grouped and readable, with the same neutral
+   button language as ticket transitions. */
+.worktree-global-window {
+  background-color: @window_bg_color;
+  color: @window_fg_color;
+}
+.worktree-global-toolbar {
+  padding: 16px 19px 12px;
+  border-bottom: 1px solid alpha(@window_fg_color, 0.08);
+}
+.worktree-global-search {
+  margin: 12px 19px 5px;
+}
+.worktree-global-message {
+  margin: 5px 19px;
+  color: alpha(@window_fg_color, 0.69);
+}
+.worktree-global-content {
+  padding: 12px 19px 24px;
+}
+.worktree-global-section {
+  padding: 14px 16px;
+  border: 1px solid alpha(@window_fg_color, 0.09);
+  border-radius: 12px;
+  background-color: @card_bg_color;
+}
+.worktree-global-repository {
+  color: @window_fg_color;
+  font-weight: 730;
+  font-size: 1.04em;
+}
+.worktree-global-count {
+  color: alpha(@window_fg_color, 0.67);
+  font-size: 0.87em;
+}
+.worktree-global-entry {
+  border-top: 1px solid alpha(@window_fg_color, 0.085);
+  padding: 12px 0 5px;
+}
+.worktree-global-branch {
+  color: @window_fg_color;
+  font-weight: 640;
+}
+.worktree-global-path {
+  color: alpha(@window_fg_color, 0.79);
+  font-size: 0.92em;
+}
+/* One action contains both issue key and Jira state. The palette is
+   assigned per distinct workflow state, not guessed from status names. */
+button.worktree-global-ticket-link {
+  min-height: 30px;
+  padding: 4px 9px;
+  border-radius: 8px;
+  border: 1px solid alpha(@window_fg_color, 0.12);
+  background-color: alpha(@window_fg_color, 0.055);
+  background-image: none;
+  box-shadow: none;
+  color: @window_fg_color;
+}
+button.worktree-global-ticket-link:hover {
+  background-color: alpha(@window_fg_color, 0.10);
+  box-shadow: inset 0 0 0 1px alpha(@window_fg_color, 0.11);
+}
+.worktree-global-ticket-key {
+  color: @window_fg_color;
+  font-size: 0.88em;
+  font-weight: 750;
+}
+.worktree-global-ticket-divider {
+  color: alpha(@window_fg_color, 0.43);
+  font-size: 0.85em;
+}
+.worktree-global-ticket-state {
+  color: alpha(@window_fg_color, 0.86);
+  font-size: 0.86em;
+  font-weight: 600;
+}
+button.worktree-global-ticket-link.worktree-global-ticket-tone-0 {
+  background-color: alpha(#3299e6, 0.14);
+  border-color: alpha(#3299e6, 0.26);
+}
+button.worktree-global-ticket-link.worktree-global-ticket-tone-1 {
+  background-color: alpha(#8b72df, 0.14);
+  border-color: alpha(#8b72df, 0.26);
+}
+button.worktree-global-ticket-link.worktree-global-ticket-tone-2 {
+  background-color: alpha(#3caa9d, 0.14);
+  border-color: alpha(#3caa9d, 0.26);
+}
+button.worktree-global-ticket-link.worktree-global-ticket-tone-3 {
+  background-color: alpha(#d5a048, 0.14);
+  border-color: alpha(#d5a048, 0.26);
+}
+button.worktree-global-ticket-link.worktree-global-ticket-tone-4 {
+  background-color: alpha(#b578ba, 0.14);
+  border-color: alpha(#b578ba, 0.26);
+}
+button.worktree-global-ticket-link.worktree-global-ticket-tone-5 {
+  background-color: alpha(#41ad86, 0.14);
+  border-color: alpha(#41ad86, 0.26);
+}
+button.worktree-global-ticket-link.worktree-global-ticket-tone-6 {
+  background-color: alpha(#697fcb, 0.14);
+  border-color: alpha(#697fcb, 0.26);
+}
+button.worktree-global-ticket-link.worktree-global-ticket-tone-7 {
+  background-color: alpha(#b08b59, 0.14);
+  border-color: alpha(#b08b59, 0.26);
+}
+.worktree-global-status {
+  padding: 3px 9px;
+  border-radius: 999px;
+  background-color: alpha(#2c9b70, 0.10);
+  color: #27805e;
+  font-size: 0.81em;
+  font-weight: 650;
+}
+.worktree-global-status.worktree-global-dirty {
+  background-color: alpha(#c9903a, 0.13);
+  color: #a66b25;
+}
+.worktree-global-merge-control {
+  margin-top: 3px;
+  margin-bottom: 2px;
+}
+.worktree-global-merge-control > label {
+  font-size: 0.88em;
+}
+.worktree-global-base-selector {
+  min-width: 170px;
+}
+.worktree-global-merge-status {
+  padding: 3px 9px;
+  border-radius: 999px;
+  background-color: alpha(@window_fg_color, 0.055);
+  color: alpha(@window_fg_color, 0.74);
+  font-size: 0.81em;
+  font-weight: 650;
+}
+.worktree-global-merge-status.worktree-global-merged {
+  background-color: alpha(#2c9b70, 0.12);
+  color: #27805e;
+}
+.worktree-global-merge-status.worktree-global-unconfirmed {
+  background-color: alpha(@window_fg_color, 0.065);
+  color: alpha(@window_fg_color, 0.79);
+}
+.worktree-global-actions {
+  margin-top: 2px;
+}
+.worktree-global-error {
+  color: #a66b25;
+}
+button.header-worktrees-action {
+  border-radius: 8px;
+  padding: 3px 9px;
+  font-weight: 600;
+}

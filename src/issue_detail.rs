@@ -15,11 +15,9 @@ pub struct DetailRender {
     pub children: gtk::Box,
 }
 
-/// Both header actions use exactly the same symbolic drawing system:
-/// size, stroke, color and alignment follow the current GTK theme.
+/// Draw a theme-aware external-link action with a fixed visual size.
 #[derive(Clone, Copy)]
 pub(crate) enum HeaderActionIcon {
-    Branch,
     ExternalLink,
 }
 
@@ -50,17 +48,6 @@ pub(crate) fn header_action_icon(kind: HeaderActionIcon) -> gtk::DrawingArea {
         cr.set_line_join(gtk::cairo::LineJoin::Round);
 
         match kind {
-            HeaderActionIcon::Branch => {
-                cr.move_to(5.0, 5.0);
-                cr.line_to(5.0, 15.0);
-                cr.move_to(5.0, 11.0);
-                cr.curve_to(10.0, 11.0, 15.0, 11.0, 15.0, 5.0);
-                cr.stroke().expect("Branch icon stroke");
-                for (x, y) in [(5.0, 4.0), (5.0, 16.0), (15.0, 4.0)] {
-                    cr.arc(x, y, 1.8, 0.0, std::f64::consts::TAU);
-                    cr.fill().expect("Branch icon node");
-                }
-            }
             HeaderActionIcon::ExternalLink => {
                 // Conventional external-link glyph: a square with an arrow
                 // pointing out through its open upper-right corner.

@@ -11,6 +11,7 @@ use adw::prelude::*;
 use gtk::glib;
 
 use crate::{
+    development,
     issue_detail,
     command_palette::{self, PaletteCommand, PaletteItem},
     jira::{Attachment, AuthMode, Credentials, Issue, IssueComment, IssueTransition, JiraClient, JiraTransitionError, Project, ProjectStatus},
@@ -43,6 +44,7 @@ struct Ui {
     manage_projects_button: gtk::Button,
     manage_columns_button: gtk::Button,
     palette_button: gtk::Button,
+    worktrees_button: gtk::Button,
     palette_window: Rc<RefCell<Option<gtk::Window>>>,
     pending_direct_issue: Rc<RefCell<Option<String>>>,
     search: gtk::SearchEntry,
@@ -53,6 +55,7 @@ struct Ui {
     pinned_scroll: gtk::ScrolledWindow,
     pinned_count: gtk::Label,
     detail_box: gtk::Box,
+    development: development::DevelopmentPanel,
     comments_box: Rc<RefCell<gtk::Box>>,
     comments_request: Rc<Cell<u64>>,
     children_box: Rc<RefCell<gtk::Box>>,
@@ -67,7 +70,6 @@ struct Ui {
     history_forward: gtk::Button,
     issue_history: Rc<RefCell<IssueHistory>>,
     open_in_jira: gtk::Button,
-    copy_branch: gtk::Button,
     pin_detail: gtk::Button,
     state: Rc<RefCell<State>>,
     saved_detail_width: Rc<Cell<i32>>,
@@ -365,12 +367,21 @@ fn build_ui(app: &adw::Application) {
         .tooltip_text("Command palette (Ctrl+K)")
         .build();
     palette_button.add_css_class("flat");
+    let worktrees_button = gtk::Button::new();
+    let worktrees_label = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    worktrees_label.append(&gtk::Image::from_icon_name("folder-symbolic"));
+    worktrees_label.append(&gtk::Label::new(Some("Worktrees")));
+    worktrees_button.set_child(Some(&worktrees_label));
+    worktrees_button.add_css_class("flat");
+    worktrees_button.add_css_class("header-worktrees-action");
+    worktrees_button.set_tooltip_text(Some("Manage local Git worktrees across all repositories"));
     let spinner = gtk::Spinner::new();
     spinner.set_visible(false);
     header.pack_start(&sidebar_toggle);
     header.pack_end(&disconnect_button);
     header.pack_end(&refresh_button);
     header.pack_end(&palette_button);
+    header.pack_end(&worktrees_button);
     header.pack_end(&spinner);
 
 
@@ -516,15 +527,6 @@ fn build_ui(app: &adw::Application) {
     open_in_jira.set_tooltip_text(Some("Open this issue in Jira"));
     open_in_jira.set_visible(false);
     detail_header.pack_end(&open_in_jira);
-    let copy_branch = gtk::Button::new();
-    copy_branch.set_child(Some(&issue_detail::header_action_icon(
-        issue_detail::HeaderActionIcon::Branch,
-    )));
-    copy_branch.add_css_class("flat");
-    copy_branch.add_css_class("detail-header-action");
-    copy_branch.set_tooltip_text(Some("Copy suggested Git branch name"));
-    copy_branch.set_visible(false);
-    detail_header.pack_end(&copy_branch);
     let pin_detail = gtk::Button::from_icon_name("view-pin-symbolic");
     pin_detail.add_css_class("flat");
     pin_detail.add_css_class("detail-header-action");
@@ -714,23 +716,24 @@ fn build_ui(app: &adw::Application) {
     let toast = adw::ToastOverlay::new();
     toast.set_child(Some(&workspace_split));
     window.set_content(Some(&toast));
+    let development = development::DevelopmentPanel::new(&window, &toast);
 
     let ui = Ui {
         window, toast, header_title, spinner, status, projects_label, sidebar_projects,
         project_filter: Rc::new(RefCell::new(None)),
         connect_button, disconnect_button, refresh_button,
-        manage_projects_button, manage_columns_button, palette_button,
+        manage_projects_button, manage_columns_button, palette_button, worktrees_button,
         palette_window: Rc::new(RefCell::new(None)),
         pending_direct_issue: Rc::new(RefCell::new(None)),
         search, center_title,
         board_box, pinned_section, pinned_box, pinned_scroll, pinned_count,
-        detail_box, comments_box: Rc::new(RefCell::new(gtk::Box::new(gtk::Orientation::Vertical, 10))),
+        detail_box, development, comments_box: Rc::new(RefCell::new(gtk::Box::new(gtk::Orientation::Vertical, 10))),
         comments_request: Rc::new(Cell::new(0)),
         children_box: Rc::new(RefCell::new(gtk::Box::new(gtk::Orientation::Vertical, 9))),
         children_request: Rc::new(Cell::new(0)),
         detail_actions, detail_panel, detail_heading, history_back, history_forward,
         issue_history: Rc::new(RefCell::new(IssueHistory::default())),
-        open_in_jira, copy_branch, pin_detail, inner_split,
+        open_in_jira, pin_detail, inner_split,
         state: state.clone(),
         detail_request: Rc::new(Cell::new(0)),
         transition_busy: Rc::new(Cell::new(false)),
@@ -768,27 +771,6 @@ fn build_ui(app: &adw::Application) {
                 let _ = gtk::gio::AppInfo::launch_default_for_uri(
                     &url, None::<&gtk::gio::AppLaunchContext>
                 );
-            }
-        });
-    }
-    {
-        let selected_issue = ui.selected_issue.clone();
-        let state = state.clone();
-        let toast = ui.toast.clone();
-        ui.copy_branch.connect_clicked(move |_| {
-            let key = selected_issue.borrow().clone();
-            let state = state.borrow();
-            let issue = key.as_deref().and_then(|key| {
-                state.issues.iter().chain(state.pinned_issues.iter())
-                    .chain(state.recent_issues.iter())
-                    .find(|issue| issue.key == key)
-            });
-            if let Some(issue) = issue
-                && let Some(display) = gtk::gdk::Display::default()
-            {
-                let name = issue_detail::suggested_branch_name(&issue.key, &issue.summary);
-                display.clipboard().set_text(&name);
-                toast.add_toast(adw::Toast::new("Branch name copied"));
             }
         });
     }
@@ -918,7 +900,22 @@ fn build_ui(app: &adw::Application) {
     ui.window.present();
 }
 
+/// Reuse in-app issue navigation, including Jira loading for tickets that
+/// are not currently cached on the board.
+fn show_all_worktrees(ui: &Ui) {
+    let events = ui.events.clone();
+    crate::all_worktrees::show(&ui.window, &ui.toast, Rc::new(move |key| {
+        let _ = events.send(Event::OpenLinkedIssue(key));
+    }), ui.layout.clone(), ui.state.borrow().account.clone());
+}
+
 fn wire_actions(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>) {
+    {
+        let ui = ui.clone();
+        ui.worktrees_button.clone().connect_clicked(move |_| {
+            show_all_worktrees(&ui);
+        });
+    }
     {
         let ui = ui.clone();
         let state = state.clone();
@@ -3088,6 +3085,8 @@ fn show_command_palette(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Eve
                 "view-grid-symbolic", true, PaletteCommand::ChooseProjects),
             PaletteItem::new("Search on board", "Focus the board's local search field", "Command",
                 "system-search-symbolic", false, PaletteCommand::FocusBoardSearch),
+            PaletteItem::new("All worktrees", "Manage Git worktrees in all local repositories",
+                "Command", "folder-symbolic", true, PaletteCommand::AllWorktrees),
         ];
         if !s.statuses.is_empty() {
             items.push(PaletteItem::new("Edit columns", "Reorder and configure workflow columns",
@@ -3105,8 +3104,8 @@ fn show_command_palette(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Eve
             };
             items.push(PaletteItem::new(pin_action, &issue.key, "Ticket action",
                 "view-pin-symbolic", true, PaletteCommand::TogglePin(issue.clone())));
-            items.push(PaletteItem::new("Copy branch name", &issue.key, "Ticket action",
-                "edit-copy-symbolic", true, PaletteCommand::CopyBranch(issue.clone())));
+            items.push(PaletteItem::new("Git worktrees", &issue.key, "Ticket action",
+                "folder-symbolic", true, PaletteCommand::ManageWorktree(issue.clone())));
             items.push(PaletteItem::new("Open current ticket in Jira", &issue.key, "Ticket action",
                 "web-browser-symbolic", false, PaletteCommand::OpenInJira(issue.clone())));
         }
@@ -3192,17 +3191,31 @@ fn show_command_palette(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Eve
                     show_login(&ui_for_action, &state_for_action, &sender_for_action);
                 }
             }
+            PaletteCommand::AllWorktrees => {
+                show_all_worktrees(&ui_for_action);
+            }
             PaletteCommand::FocusBoardSearch => {
                 ui_for_action.search.grab_focus();
             }
             PaletteCommand::TogglePin(issue) => {
                 toggle_pinned_issue(&ui_for_action, &issue);
             }
-            PaletteCommand::CopyBranch(issue) => {
-                if let Some(display) = gtk::gdk::Display::default() {
-                    let name = issue_detail::suggested_branch_name(&issue.key, &issue.summary);
-                    display.clipboard().set_text(&name);
-                    ui_for_action.toast.add_toast(adw::Toast::new("Branch name copied"));
+            PaletteCommand::ManageWorktree(issue) => {
+                if let Some(account) = state_for_action.borrow().account.as_ref() {
+                    let site = account.base_url.clone();
+                    let dialog = crate::git_ui::show(
+                        &ui_for_action.window, &site, &issue.key, &issue.summary,
+                    );
+                    let panel = ui_for_action.development.clone();
+                    let key = issue.key;
+                    let summary = issue.summary;
+                    let selected = ui_for_action.selected_issue.clone();
+                    dialog.connect_close_request(move |_| {
+                        if selected.borrow().as_deref() == Some(key.as_str()) {
+                            panel.refresh(&site, &key, &summary);
+                        }
+                        glib::Propagation::Proceed
+                    });
                 }
             }
             PaletteCommand::OpenInJira(issue) => {
@@ -3422,11 +3435,11 @@ fn open_issue(ui: &Ui, issue: &Issue, source_button: Option<&gtk::Button>) {
     let base_url = account.as_ref().map(|account| account.base_url.as_str()).unwrap_or("");
     ui.detail_heading.set_text(&issue.key);
     ui.open_in_jira.set_visible(!base_url.is_empty());
-    ui.copy_branch.set_visible(true);
     ui.pin_detail.set_visible(true);
     style_pin_button(&ui.pin_detail,
         ui.state.borrow().settings.pinned_issues.iter().any(|key| key == &issue.key));
     render_issue_detail(ui, issue, base_url);
+    ui.development.refresh(base_url, &issue.key, &issue.summary);
     if !ui.detail_panel.is_visible() {
         // Restore after GTK has allocated the newly visible pane. Until then,
         // position notifications must not overwrite the saved user preference.
@@ -3464,6 +3477,11 @@ fn render_issue_detail(ui: &Ui, issue: &Issue, base_url: &str) {
     let detail = issue_detail::render(
         &ui.detail_box, issue, base_url, &ui.detail_actions, &on_issue_link,
     );
+    // The Development section is always visible before the ticket properties.
+    // issue_detail::render clears old children, so reinsert the persistent panel.
+    if let Some(hero) = ui.detail_box.first_child() {
+        ui.detail_box.insert_child_after(ui.development.widget(), Some(&hero));
+    }
     *ui.image_slots.borrow_mut() = detail.images;
     *ui.comments_box.borrow_mut() = detail.comments;
     *ui.children_box.borrow_mut() = detail.children;

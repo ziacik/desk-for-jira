@@ -236,6 +236,8 @@ pub struct UiLayout {
     pub sidebar_visible: bool,
     pub sidebar_width: i32,
     pub detail_width: i32,
+    pub worktrees_window_width: i32,
+    pub worktrees_window_height: i32,
 }
 
 impl Default for UiLayout {
@@ -246,6 +248,8 @@ impl Default for UiLayout {
             sidebar_visible: true,
             sidebar_width: 224,
             detail_width: 470,
+            worktrees_window_width: 980,
+            worktrees_window_height: 760,
         }
     }
 }
@@ -256,7 +260,104 @@ impl UiLayout {
         self.window_height = self.window_height.max(580);
         self.sidebar_width = self.sidebar_width.clamp(184, 800);
         self.detail_width = self.detail_width.clamp(320, 2048);
+        self.worktrees_window_width = self.worktrees_window_width.clamp(640, 2400);
+        self.worktrees_window_height = self.worktrees_window_height.clamp(480, 1600);
         self
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GitRepository {
+    pub name: String,
+    pub path: String,
+    /// User-approved setup script, run only immediately after new worktree creation.
+    pub setup: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorktreeOrigin {
+    pub repository: String,
+    pub branch: String,
+    pub base: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GitSettings {
+    pub repositories: Vec<GitRepository>,
+    pub scan_roots: Vec<String>,
+    pub worktree_root: String,
+    pub editor: String,
+    pub fetch_before_create: bool,
+    /// site -> Jira project key -> repository path -> number of successful creates.
+    pub usage: HashMap<String, HashMap<String, HashMap<String, u64>>>,
+    /// Worktree path -> origin of a branch newly created by Desk for Jira.
+    /// This is a suggested merge-check target, never proof of a merge.
+    pub worktree_origins: HashMap<String, WorktreeOrigin>,
+}
+
+impl Default for GitSettings {
+    fn default() -> Self {
+        Self {
+            repositories: Vec::new(),
+            scan_roots: Vec::new(),
+            worktree_root: "~/Worktrees".to_owned(),
+            editor: "code".to_owned(),
+            fetch_before_create: true,
+            usage: HashMap::new(),
+            worktree_origins: HashMap::new(),
+        }
+    }
+}
+
+impl GitSettings {
+    pub fn register(&mut self, repository: GitRepository) {
+        if let Some(previous) = self.repositories.iter_mut().find(|r| r.path == repository.path) {
+            // Re-discovery never overwrites an explicitly configured setup.
+            if previous.name.is_empty() { previous.name = repository.name; }
+        } else {
+            self.repositories.push(repository);
+        }
+    }
+
+    pub fn preferred_index(&self, site: &str, key: &str) -> Option<usize> {
+        let project = key.split_once('-')?.0;
+        let counts = self.usage.get(site)?.get(project)?;
+        self.repositories.iter().enumerate()
+            .filter(|(_, repo)| counts.get(&repo.path).copied().unwrap_or(0) > 0)
+            .max_by_key(|(_, repo)| counts.get(&repo.path).copied().unwrap_or(0))
+            .map(|(index, _)| index)
+    }
+
+    pub fn remember_worktree_origin(
+        &mut self, repository: &str, worktree: &str, branch: &str, base: &str,
+    ) {
+        self.worktree_origins.insert(worktree.to_owned(), WorktreeOrigin {
+            repository: repository.to_owned(),
+            branch: branch.to_owned(),
+            base: base.to_owned(),
+        });
+    }
+
+    pub fn worktree_origin<'a>(
+        &'a self, repository: &str, worktree: &str, branch: &str,
+    ) -> Option<&'a str> {
+        let origin = self.worktree_origins.get(worktree)?;
+        (origin.repository == repository && origin.branch == branch)
+            .then_some(origin.base.as_str())
+    }
+
+    pub fn forget_worktree_origin(&mut self, worktree: &str) {
+        self.worktree_origins.remove(worktree);
+    }
+
+    pub fn record_usage(&mut self, site: &str, key: &str, path: &str) {
+        let Some((project, _)) = key.split_once('-') else { return; };
+        let entry = self.usage.entry(site.to_owned()).or_default()
+            .entry(project.to_owned()).or_default()
+            .entry(path.to_owned()).or_default();
+        *entry = entry.saturating_add(1);
     }
 }
 
@@ -268,6 +369,8 @@ struct Preferences {
     view_by_site: HashMap<String, ViewSettings>,
     #[serde(default)]
     ui_layout: UiLayout,
+    #[serde(default)]
+    git: GitSettings,
 }
 fn preferences_path() -> Result<PathBuf> {
     let root = env::var_os("XDG_CONFIG_HOME").filter(|p| !p.is_empty()).map(PathBuf::from)
@@ -326,6 +429,17 @@ pub fn save_layout(layout: &UiLayout) -> Result<()> {
     prefs.ui_layout = layout.clone().sanitized();
     write_preferences(&path, &prefs)
 }
+pub fn load_git() -> Result<GitSettings> {
+    Ok(read_preferences(&preferences_path()?)?.git)
+}
+
+pub fn save_git(settings: &GitSettings) -> Result<()> {
+    let path = preferences_path()?;
+    let mut prefs = read_preferences(&path)?;
+    prefs.git = settings.clone();
+    write_preferences(&path, &prefs)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -335,6 +449,20 @@ mod tests {
             category: None, workflow_order: None,
         }
     }
+    #[test]
+    fn worktrees_window_size_defaults_and_clamps() {
+        let defaults = UiLayout::default();
+        assert_eq!((defaults.worktrees_window_width, defaults.worktrees_window_height), (980, 760));
+        let invalid = UiLayout {
+            worktrees_window_width: 0,
+            worktrees_window_height: 5000,
+            ..UiLayout::default()
+        };
+        let corrected = invalid.sanitized();
+        assert_eq!(corrected.worktrees_window_width, 640);
+        assert_eq!(corrected.worktrees_window_height, 1600);
+    }
+
     #[test]
     fn first_load_uses_real_workflow_order_independent_of_names() {
         let mut board = BoardSettings {
@@ -640,6 +768,24 @@ mod tests {
         assert_eq!(decoded.view_by_site["first"].open_issue.as_deref(), Some("ART-42"));
         assert_eq!(decoded.view_by_site["second"].open_issue, None);
         assert_eq!(decoded.ui_layout.sidebar_width, 300);
+    }
+
+    #[test]
+    fn remembers_worktree_origin_only_for_matching_repository_and_branch() {
+        let mut settings = GitSettings::default();
+        settings.remember_worktree_origin("/repo", "/trees/a", "ART-12-fix", "release/2.7");
+        let restored: GitSettings = serde_json::from_slice(
+            &serde_json::to_vec(&settings).unwrap(),
+        ).unwrap();
+        assert_eq!(
+            restored.worktree_origin("/repo", "/trees/a", "ART-12-fix"),
+            Some("release/2.7"),
+        );
+        assert_eq!(restored.worktree_origin("/other", "/trees/a", "ART-12-fix"), None);
+        assert_eq!(restored.worktree_origin("/repo", "/trees/a", "ART-13-fix"), None);
+        let mut restored = restored;
+        restored.forget_worktree_origin("/trees/a");
+        assert!(restored.worktree_origins.is_empty());
     }
 
     #[test]
