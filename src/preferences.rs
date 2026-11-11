@@ -25,6 +25,22 @@ pub struct BoardSettings {
     #[serde(default)]
     pub pinned_issues: Vec<String>,
 }
+/// Visibility of the Git worktree panel for a Jira project and workflow status ID.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct WorktreeVisibility(pub HashMap<String, HashMap<String, bool>>);
+
+impl WorktreeVisibility {
+    pub fn should_show(&self, project: &str, status_id: &str, category: Option<StatusCategory>) -> bool {
+        self.0.get(project).and_then(|statuses| statuses.get(status_id)).copied()
+            .unwrap_or(!matches!(category, Some(StatusCategory::Done)))
+    }
+
+    pub fn set(&mut self, project: &str, status_id: &str, show: bool) {
+        self.0.entry(project.to_owned()).or_default().insert(status_id.to_owned(), show);
+    }
+}
+
 impl ProjectStatus {
     pub fn reference(&self) -> StatusRef {
         StatusRef { project_key: self.project_key.clone(), status_id: self.id.clone() }
@@ -368,6 +384,8 @@ struct Preferences {
     #[serde(default)]
     view_by_site: HashMap<String, ViewSettings>,
     #[serde(default)]
+    worktree_visibility_by_site: HashMap<String, WorktreeVisibility>,
+    #[serde(default)]
     ui_layout: UiLayout,
     #[serde(default)]
     git: GitSettings,
@@ -419,6 +437,18 @@ pub fn save_view(base_url: &str, view: &ViewSettings) -> Result<()> {
     write_preferences(&path, &prefs)
 }
 
+pub fn load_worktree_visibility(base_url: &str) -> Result<WorktreeVisibility> {
+    Ok(read_preferences(&preferences_path()?)?
+        .worktree_visibility_by_site.get(base_url).cloned().unwrap_or_default())
+}
+
+pub fn save_worktree_visibility(base_url: &str, visibility: &WorktreeVisibility) -> Result<()> {
+    let path = preferences_path()?;
+    let mut prefs = read_preferences(&path)?;
+    prefs.worktree_visibility_by_site.insert(base_url.to_owned(), visibility.clone());
+    write_preferences(&path, &prefs)
+}
+
 pub fn load_layout() -> Result<UiLayout> {
     Ok(read_preferences(&preferences_path()?)?.ui_layout.sanitized())
 }
@@ -443,6 +473,29 @@ pub fn save_git(settings: &GitSettings) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn worktree_visibility_defaults_to_hidden_only_for_done() {
+        let rules = WorktreeVisibility::default();
+        assert!(rules.should_show("ART", "1", Some(StatusCategory::Todo)));
+        assert!(rules.should_show("ART", "2", Some(StatusCategory::InProgress)));
+        assert!(rules.should_show("ART", "3", None));
+        assert!(!rules.should_show("ART", "4", Some(StatusCategory::Done)));
+    }
+
+    #[test]
+    fn worktree_status_rules_are_scoped_by_project_and_status_id() {
+        let mut rules = WorktreeVisibility::default();
+        rules.set("ART", "2", false);
+        rules.set("ART", "4", true);
+        assert!(!rules.should_show("ART", "2", Some(StatusCategory::InProgress)));
+        assert!(rules.should_show("AFB", "2", Some(StatusCategory::InProgress)));
+        assert!(rules.should_show("ART", "4", Some(StatusCategory::Done)));
+        let restored: WorktreeVisibility = serde_json::from_str(
+            &serde_json::to_string(&rules).unwrap()
+        ).unwrap();
+        assert_eq!(rules, restored);
+    }
     fn status(project: &str, id: &str, name: &str) -> ProjectStatus {
         ProjectStatus {
             project_key: project.into(), id: id.into(), name: name.into(),
