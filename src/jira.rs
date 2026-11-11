@@ -315,7 +315,7 @@ fn parse_dev_pull_requests(payload: &Value) -> Vec<PullRequest> {
     let details = payload.get("detail").or_else(|| payload.get("details"));
     let entries: Vec<&Value> = match details {
         Some(Value::Array(items)) => items.iter().collect(),
-        Some(item @ Value::Object(_)) => vec![item],
+        Some(item) if item.is_object() => vec![item],
         _ => Vec::new(),
     };
 
@@ -424,7 +424,7 @@ impl JiraClient {
         let version = if self.account.mode == AuthMode::Cloud { "3" } else { "2" };
         let issue = self.read_json(self.http.get(
             self.url(&format!("/rest/api/{version}/issue/{key}"))
-        ).query(&[("fields", "none")]))?;
+        ).query(&[("fields", "summary")]))?;
         let id = issue.get("id").and_then(Value::as_str)
             .context("Jira did not return a numeric issue ID")?;
         let summary = self.read_json(self.http.get(
