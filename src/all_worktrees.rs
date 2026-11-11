@@ -698,7 +698,6 @@ impl Manager {
                 let remove = remove.clone();
                 let target = target.clone();
                 let progress = progress.clone();
-                let target_field = target_field.clone();
                 let change = change.clone();
                 let manual = manual.clone();
                 poll(rx, move |result| {
@@ -752,7 +751,8 @@ impl Manager {
                 let manual_button = manual_button.clone();
                 let remove_button = remove_button.clone();
                 let progress_label = progress_label.clone();
-                alert.choose(Some(&confirm), None::<&gtk::gio::Cancellable>, move |response| {
+                let parent = confirm.clone();
+                alert.choose(Some(&parent), None::<&gtk::gio::Cancellable>, move |response| {
                     if !matches!(response, Ok(1)) { return; }
                     manual_button.set_sensitive(false);
                     remove_button.set_sensitive(false);
