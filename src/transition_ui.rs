@@ -1,4 +1,4 @@
-use std::{cell::{Cell, RefCell}, collections::HashSet, rc::Rc, sync::Arc};
+use std::{cell::{Cell, RefCell}, collections::{HashMap, HashSet}, rc::Rc, sync::Arc};
 
 use adw::prelude::*;
 use serde_json::{Map, Value};
@@ -136,8 +136,38 @@ fn primary_transition_index(
         return Some(index);
     }
     let context = workflow?;
-    let distances = context.graph.distance_to_terminals(&context.terminal_status_ids);
+    let done_distances = context.graph.distance_to_terminals(&context.terminal_status_ids);
+    // Some Jira workflows close via a GLOBAL transition from every status.
+    // In that case the directed graph has no path to Done; its furthest
+    // reachable normal stage is the target until the final Close action.
+    let frontier = context.graph.normal_frontier(&context.terminal_status_ids);
+    let frontier_distances = context.graph.distance_to_terminals(&frontier);
+    let has_forward = |distances: &HashMap<String, usize>| {
+        let Some(current) = distances.get(&context.current_status_id) else {
+            return false;
+        };
+        transitions.iter().any(|transition| {
+            !context.terminal_status_ids.contains(&transition.to_id)
+                && context.graph.has_edge(&context.current_status_id, &transition.to_id)
+                && distances.get(&transition.to_id).is_some_and(|next| next < current)
+        })
+    };
+    let frontier_distance = frontier_distances.get(&context.current_status_id).copied();
+    let use_frontier = frontier_distance.is_some_and(|distance| {
+        !done_distances.contains_key(&context.current_status_id)
+            || (!has_forward(&done_distances)
+                && (has_forward(&frontier_distances) || distance == 0))
+    });
+    let distances = if use_frontier { &frontier_distances } else { &done_distances };
     let current_distance = distances.get(&context.current_status_id).copied()?;
+    if use_frontier && current_distance == 0 {
+        let finish: Vec<usize> = transitions.iter().enumerate()
+            .filter_map(|(index, transition)| (
+                context.terminal_status_ids.contains(&transition.to_id)
+            ).then_some(index))
+            .collect();
+        return (finish.len() == 1).then_some(finish[0]);
+    }
 
     // Only directed workflow edges count. Global actions (such as an
     // unconditional Close) are not normal workflow progression.
@@ -767,6 +797,43 @@ mod tests {
         assert_eq!(
             primary_transition_index(&[pause,review,close],true,None,Some(&context)),Some(1),
         );
+    }
+
+    #[test]
+    fn global_close_only_still_selects_normal_steps_then_close_at_frontier() {
+        let mut start = t("begin", None, Some(25));
+        start.to_id = "progress".into();
+        let mut stash = t("stash", None, Some(1));
+        stash.to_id = "open".into();
+        let mut close = t("close", Some(true), Some(2));
+        close.to_id = "done".into();
+        let mut ready = workflow("ready", &[
+            ("open","ready"),("ready","open"),("ready","progress"),
+            ("progress","review"),("review","testing"),("testing","review"),
+        ], "done");
+        let graph = Arc::make_mut(&mut ready.graph);
+        graph.initial_status_ids.insert("open".into());
+        assert_eq!(
+            primary_transition_index(&[stash,start,close.clone()],true,None,Some(&ready)),
+            Some(1),
+        );
+        let mut review = t("review", None, None);
+        review.to_id = "review".into();
+        let mut pause = t("pause", None, None);
+        pause.to_id = "ready".into();
+        let progressing = WorkflowContext {
+            current_status_id: "progress".into(), graph: ready.graph.clone(),
+            terminal_status_ids: ready.terminal_status_ids.clone(),
+        };
+        assert_eq!(
+            primary_transition_index(&[pause,review,close.clone()],true,None,Some(&progressing)),
+            Some(1),
+        );
+        let testing = WorkflowContext {
+            current_status_id: "testing".into(), graph: ready.graph.clone(),
+            terminal_status_ids: ready.terminal_status_ids.clone(),
+        };
+        assert_eq!(primary_transition_index(&[close],true,None,Some(&testing)),Some(0));
     }
 
     #[test]
