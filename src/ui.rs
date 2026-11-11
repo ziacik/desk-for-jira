@@ -15,7 +15,7 @@ use crate::{
     pull_requests,
     issue_detail,
     command_palette::{self, PaletteCommand, PaletteItem},
-    jira::{Attachment, AuthMode, Credentials, Issue, IssueComment, IssueTransition, JiraClient, JiraTransitionError, Project, ProjectStatus},
+    jira::{Attachment, AuthMode, Credentials, Issue, IssueComment, IssueTransition, JiraClient, JiraTransitionError, Project, ProjectStatus, StatusCategory},
     transition_ui,
     preferences::{self, BoardSettings, IssueScope, UiLayout, ViewSettings},
     secrets,
@@ -44,6 +44,7 @@ struct Ui {
     refresh_button: gtk::Button,
     manage_projects_button: gtk::Button,
     manage_columns_button: gtk::Button,
+    manage_worktree_visibility_button: gtk::Button,
     palette_button: gtk::Button,
     worktrees_button: gtk::Button,
     palette_window: Rc<RefCell<Option<gtk::Window>>>,
@@ -140,12 +141,13 @@ impl IssueHistory {
         Some(issue)
     }
 
-    fn update_status(&mut self, key: &str, status: &str, status_id: &str) {
+    fn update_status(&mut self, key: &str, status: &str, status_id: &str, category: Option<StatusCategory>) {
         for issue in self.entries.iter_mut().filter(|issue| issue.key == key) {
             issue.status = status.to_owned();
             if !status_id.is_empty() {
                 issue.status_id = status_id.to_owned();
             }
+            issue.status_category = category;
         }
     }
 }
@@ -213,6 +215,7 @@ struct State {
     projects: Vec<Project>,
     settings: BoardSettings,
     statuses: Vec<ProjectStatus>,
+    worktree_visibility: preferences::WorktreeVisibility,
     issues: Vec<Issue>,
     pinned_issues: Vec<Issue>,
     recent_issues: Vec<Issue>,
@@ -425,6 +428,11 @@ fn build_ui(app: &adw::Application) {
     manage_columns_button.add_css_class("sidebar-action");
     manage_columns_button.set_sensitive(false);
     manage_columns_button.set_tooltip_text(Some("Edit status columns and their order"));
+    let manage_worktree_visibility_button = gtk::Button::with_label("Worktree visibility…");
+    manage_worktree_visibility_button.add_css_class("sidebar-action");
+    manage_worktree_visibility_button.add_css_class("flat");
+    manage_worktree_visibility_button.set_tooltip_text(Some("Choose which Jira statuses show the Git worktree panel"));
+    manage_worktree_visibility_button.set_sensitive(false);
 
     let search = gtk::SearchEntry::new();
     search.set_placeholder_text(Some("Search issues… (/)"));
@@ -529,6 +537,23 @@ fn build_ui(app: &adw::Application) {
     open_in_jira.set_tooltip_text(Some("Open this issue in Jira"));
     open_in_jira.set_visible(false);
     detail_header.pack_end(&open_in_jira);
+    // The inspector still offers worktree management when its main panel is hidden.
+    let worktree_more = gtk::MenuButton::new();
+    worktree_more.set_icon_name("view-more-symbolic");
+    worktree_more.add_css_class("flat");
+    worktree_more.add_css_class("detail-header-action");
+    worktree_more.set_tooltip_text(Some("More issue actions"));
+    worktree_more.set_visible(false);
+    let worktree_popover = gtk::Popover::new();
+    let worktree_actions = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    worktree_actions.add_css_class("board-settings-menu");
+    let manage_hidden_worktree = gtk::Button::with_label("Manage worktree…");
+    manage_hidden_worktree.add_css_class("flat");
+    manage_hidden_worktree.add_css_class("sidebar-action");
+    worktree_actions.append(&manage_hidden_worktree);
+    worktree_popover.set_child(Some(&worktree_actions));
+    worktree_more.set_popover(Some(&worktree_popover));
+    detail_header.pack_end(&worktree_more);
     let pin_detail = gtk::Button::from_icon_name("view-pin-symbolic");
     pin_detail.add_css_class("flat");
     pin_detail.add_css_class("detail-header-action");
@@ -632,9 +657,10 @@ fn build_ui(app: &adw::Application) {
     settings_actions.add_css_class("board-settings-menu");
     settings_actions.append(&manage_projects_button);
     settings_actions.append(&manage_columns_button);
+    settings_actions.append(&manage_worktree_visibility_button);
     board_popover.set_child(Some(&settings_actions));
     board_menu.set_popover(Some(&board_popover));
-    for action in [&manage_projects_button, &manage_columns_button] {
+    for action in [&manage_projects_button, &manage_columns_button, &manage_worktree_visibility_button] {
         let popover = board_popover.clone();
         action.connect_clicked(move |_| popover.popdown());
     }
@@ -718,14 +744,15 @@ fn build_ui(app: &adw::Application) {
     let toast = adw::ToastOverlay::new();
     toast.set_child(Some(&workspace_split));
     window.set_content(Some(&toast));
-    let development = development::DevelopmentPanel::new(&window, &toast);
+    let development = development::DevelopmentPanel::new(&window, &toast, &worktree_more);
     let pull_requests = pull_requests::PullRequestsPanel::new();
 
     let ui = Ui {
         window, toast, header_title, spinner, status, projects_label, sidebar_projects,
         project_filter: Rc::new(RefCell::new(None)),
         connect_button, disconnect_button, refresh_button,
-        manage_projects_button, manage_columns_button, palette_button, worktrees_button,
+        manage_projects_button, manage_columns_button, manage_worktree_visibility_button,
+        palette_button, worktrees_button,
         palette_window: Rc::new(RefCell::new(None)),
         pending_direct_issue: Rc::new(RefCell::new(None)),
         search, center_title,
@@ -775,6 +802,14 @@ fn build_ui(app: &adw::Application) {
                     &url, None::<&gtk::gio::AppLaunchContext>
                 );
             }
+        });
+    }
+    {
+        let worktree_popover = worktree_popover.clone();
+        let development = ui.development.clone();
+        manage_hidden_worktree.connect_clicked(move |_| {
+            worktree_popover.popdown();
+            development.manage_current();
         });
     }
     {
@@ -987,6 +1022,12 @@ fn wire_actions(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>) {
     {
         let ui = ui.clone();
         let state = state.clone();
+        let button = ui.manage_worktree_visibility_button.clone();
+        button.connect_clicked(move |_| show_worktree_visibility_editor(&ui, &state));
+    }
+    {
+        let ui = ui.clone();
+        let state = state.clone();
         let sender = sender.clone();
         let button = ui.connect_button.clone();
         button.connect_clicked(move |_| show_login(&ui, &state, &sender));
@@ -1048,6 +1089,7 @@ fn wire_actions(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>) {
             ui.search.set_text("");
             ui.manage_projects_button.set_sensitive(false);
             ui.manage_columns_button.set_sensitive(false);
+            ui.manage_worktree_visibility_button.set_sensitive(false);
             ui.center_title.set_text("Unified board");
             ui.mine_filter.set_active(true);
             ui.sprint_filter.set_active(false);
@@ -1179,6 +1221,11 @@ fn handle_event(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>, eve
                         show_error(ui, &format!("Could not read saved view: {err}"));
                         ViewSettings::default()
                     });
+                    let worktree_visibility = preferences::load_worktree_visibility(&account.base_url)
+                        .unwrap_or_else(|err| {
+                            show_error(ui, &format!("Could not read worktree visibility: {err}"));
+                            preferences::WorktreeVisibility::default()
+                        });
                     let project_error = loaded.projects.as_ref().err().cloned();
                     ui.restoring_view.set(true);
                     {
@@ -1186,6 +1233,7 @@ fn handle_event(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>, eve
                         s.account = Some(account);
                         s.projects = loaded.projects.unwrap_or_default();
                         s.settings = settings;
+                        s.worktree_visibility = worktree_visibility;
                         s.statuses.clear();
                         s.issues.clear();
                         s.pinned_issues.clear();
@@ -1207,6 +1255,7 @@ fn handle_event(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>, eve
                     ui.pinned_section.set_visible(false);
                     ui.manage_projects_button.set_sensitive(true);
                     ui.manage_columns_button.set_sensitive(false);
+                    ui.manage_worktree_visibility_button.set_sensitive(false);
                     ui.header_title.set_subtitle(&loaded.user);
                     update_project_label(ui, state);
                     ui.restoring_view.set(false);
@@ -1405,6 +1454,13 @@ fn handle_event(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>, eve
                     if let Some(form) = completed_form {
                         form.close();
                     }
+                    let next_category = {
+                        let s = state.borrow();
+                        s.statuses.iter().find(|status| status.id == transition.to_id
+                            && status.project_key == key.split('-').next().unwrap_or(""))
+                            .and_then(|status| status.category)
+                            .or(transition.to_category)
+                    };
                     {
                         let mut s = state.borrow_mut();
                         let State { issues, pinned_issues, recent_issues, issue_cache, .. } = &mut *s;
@@ -1418,11 +1474,12 @@ fn handle_event(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>, eve
                                 if !transition.to_id.is_empty() {
                                     issue.status_id = transition.to_id.clone();
                                 }
+                                issue.status_category = next_category;
                             }
                         }
                     }
                     ui.issue_history.borrow_mut().update_status(
-                        &key, &transition.to_name, &transition.to_id,
+                        &key, &transition.to_name, &transition.to_id, next_category,
                     );
                     render_board(ui, &state.borrow());
                     if ui.selected_issue.borrow().as_deref() == Some(key.as_str()) {
@@ -1435,6 +1492,7 @@ fn handle_event(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>, eve
                         if let Some(issue) = issue {
                             let base_url = account.as_ref().map(|a| a.base_url.as_str()).unwrap_or("");
                             render_issue_detail(ui, &issue, base_url);
+                            refresh_current_worktree(ui);
                             if let Some(account) = account.clone() {
                                 load_issue_images(&ui.events, account, &issue, id);
                             }
@@ -1538,7 +1596,9 @@ fn display_board(ui: &Ui, state: &Rc<RefCell<State>>, data: BoardData) {
     {
         show_error(ui, &format!("Could not save board settings: {error}"));
     }
-    ui.manage_columns_button.set_sensitive(!state.borrow().statuses.is_empty());
+    let has_statuses = !state.borrow().statuses.is_empty();
+    ui.manage_columns_button.set_sensitive(has_statuses);
+    ui.manage_worktree_visibility_button.set_sensitive(has_statuses);
     render_board(ui, &state.borrow());
     if let Some(error) = pinned_error {
         show_error(ui, &format!("Could not load pinned issues: {error}"));
@@ -1564,6 +1624,7 @@ fn start_board_load(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>)
         set_busy(ui, state, false);
         ui.status.set_text("Select one or more projects");
         ui.manage_columns_button.set_sensitive(false);
+        ui.manage_worktree_visibility_button.set_sensitive(false);
         ui.pinned_section.set_visible(false);
         show_empty(&ui.board_box, "Choose projects", "Select ART, AFB or any other projects to build your board.");
         return;
@@ -3442,7 +3503,8 @@ fn open_issue(ui: &Ui, issue: &Issue, source_button: Option<&gtk::Button>) {
     style_pin_button(&ui.pin_detail,
         ui.state.borrow().settings.pinned_issues.iter().any(|key| key == &issue.key));
     render_issue_detail(ui, issue, base_url);
-    ui.development.refresh(base_url, &issue.key, &issue.summary);
+    ui.development.refresh(base_url, &issue.key, &issue.summary,
+        should_show_worktree_panel(ui, issue));
     ui.pull_requests.refresh(account.clone(), &issue.key);
     if !ui.detail_panel.is_visible() {
         // Restore after GTK has allocated the newly visible pane. Until then,
@@ -3829,6 +3891,7 @@ mod scope_tests {
             summary: summary.into(),
             status: format!("Status {status_id}"),
             status_id: status_id.into(),
+            status_category: None,
             kind: String::new(),
             priority: String::new(),
             fix_versions: Vec::new(),
