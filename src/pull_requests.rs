@@ -29,7 +29,7 @@ impl PullRequestsPanel {
         root.set_visible(false);
 
         let heading = gtk::Box::new(gtk::Orientation::Horizontal, 9);
-        let icon = gtk::Image::from_icon_name("git-merge-symbolic");
+        let icon = gtk::Image::from_icon_name("insert-link-symbolic");
         icon.add_css_class("ticket-pr-icon");
         heading.append(&icon);
         let title = gtk::Label::new(Some("Pull requests"));
