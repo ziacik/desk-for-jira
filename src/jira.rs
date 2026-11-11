@@ -980,12 +980,17 @@ impl JiraClient {
         let mut start = 0usize;
         let mut pages = 0usize;
         let mut workflows_found = 0usize;
+        let mut expanded_workflows = 0usize;
+        let mut transitions_returned = 0usize;
         let mut failure = None;
         for _ in 0..10 {
             let page = self.read_json(self.http.get(
                 self.url("/rest/api/3/workflows/search")
             ).query(&[
                 ("projectId", project_id.as_str()),
+                // The new /workflows/search endpoint omits directed transition
+                // details unless values.transitions is explicitly expanded.
+                ("expand", "values.transitions"),
                 ("startAt", &start.to_string()),
                 ("maxResults", "100"),
                 ("isActive", "true"),
@@ -995,8 +1000,17 @@ impl JiraClient {
                 break;
             };
             pages += 1;
-            workflows_found += page.get("values").and_then(Value::as_array)
-                .map_or(0, Vec::len);
+            if let Some(values) = page.get("values").and_then(Value::as_array) {
+                workflows_found += values.len();
+                for workflow in values {
+                    if let Some(transitions) =
+                        workflow.get("transitions").and_then(Value::as_array)
+                    {
+                        expanded_workflows += 1;
+                        transitions_returned += transitions.len();
+                    }
+                }
+            }
             graphs.extend(parse_workflow_graphs(&page));
             for (id, position) in parse_workflow_status_order(&page) {
                 result.entry(id).and_modify(|old: &mut usize| {
@@ -1010,10 +1024,21 @@ impl JiraClient {
             }
             start += count;
         }
-        let metadata_note = failure.unwrap_or_else(|| format!(
-            "Workflow search: {pages} page(s), {workflows_found} definition(s), {} graph(s) parsed",
-            graphs.len(),
-        ));
+        let metadata_note = failure.unwrap_or_else(|| {
+            let mut note = format!(
+                "Workflow search: {pages} page(s), {workflows_found} definition(s), {} graph(s) parsed, \
+                 {expanded_workflows} workflow(s) with expanded transitions, {transitions_returned} transition(s) returned",
+                graphs.len(),
+            );
+            if workflows_found > 0 && expanded_workflows == 0 {
+                note.push_str("; WARNING: Jira did not include transitions despite expand=values.transitions");
+            } else if transitions_returned > 0
+                && graphs.iter().all(|graph| graph.edges.is_empty())
+            {
+                note.push_str("; WARNING: transitions were returned but no directed edges were parsed");
+            }
+            note
+        });
         (result, graphs, metadata_note)
     }
 
@@ -1719,6 +1744,37 @@ mod tests {
         assert_eq!(result.get("1"), Some(&0));
         assert_eq!(result.get("2"), Some(&1));
         assert_eq!(result.get("3"), Some(&2));
+    }
+
+    #[test]
+    fn missing_transition_expansion_produces_no_directed_edges() {
+        // Jira's /workflows/search response is not the full workflow unless
+        // expand=values.transitions is requested. Statuses alone aren't enough.
+        let response = json!({
+            "statuses": [
+                {"id": "3", "statusReference": "progress"},
+                {"id": "6", "statusReference": "done"}
+            ],
+            "values": [{
+                "statuses": [
+                    {"statusReference": "progress"},
+                    {"statusReference": "done"}
+                ]
+            }]
+        });
+        let without_expansion = parse_workflow_graphs(&response);
+        assert_eq!(without_expansion.len(), 1);
+        assert!(without_expansion[0].edges.is_empty());
+
+        let mut expanded = response;
+        expanded["values"][0]["transitions"] = json!([{
+            "id": "121",
+            "type": "DIRECTED",
+            "toStatusReference": "done",
+            "links": [{"fromStatusReference": "progress"}]
+        }]);
+        let with_expansion = parse_workflow_graphs(&expanded);
+        assert!(with_expansion[0].has_edge("3", "6"));
     }
 
     #[test]
