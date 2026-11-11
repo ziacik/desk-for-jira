@@ -266,6 +266,10 @@ pub struct IssueTransition {
     pub to_name: String,
     pub to_id: String,
     pub to_category: Option<StatusCategory>,
+    /// Jira Cloud exposes whether a transition is global; absent on older servers.
+    pub is_global: Option<bool>,
+    /// Explicit Jira Data Center opsbar ordering, when returned by the API.
+    pub opsbar_sequence: Option<i64>,
     pub fields: Vec<TransitionField>,
     // Fields editable on the issue but absent from this transition screen.
     pub edit_fields: Vec<TransitionField>,
@@ -509,9 +513,23 @@ impl JiraClient {
     pub fn issue_transitions(&self, key: &str) -> Result<Vec<IssueTransition>> {
         let version = if self.account.mode == AuthMode::Cloud { "3" } else { "2" };
         let path = format!("/rest/api/{version}/issue/{key}/transitions");
-        let data = self.read_json(self.http.get(self.url(&path))
-            .query(&[("expand", "transitions.fields")]))?;
+        let request = self.http.get(self.url(&path));
+        let request = if self.account.mode == AuthMode::Cloud {
+            // Cloud can order transitions by Jira's configured OpsBar priority.
+            request.query(&[
+                ("expand", "transitions.fields"),
+                ("sortByOpsBarAndStatus", "true"),
+            ])
+        } else {
+            // Data Center exposes opsbarSequence in each transition instead.
+            request.query(&[("expand", "transitions.fields")])
+        };
+        let data = self.read_json(request)?;
         let mut transitions = parse_issue_transitions(&data);
+        if self.account.mode != AuthMode::Cloud {
+            // Stable: transitions with equal priority keep the API's ordering.
+            transitions.sort_by_key(|transition| transition.opsbar_sequence.unwrap_or(i64::MAX));
+        }
 
         // An issue field may already be populated even when its transition-screen
         // metadata says "required". Never ask the user to re-enter that value.
@@ -1370,11 +1388,13 @@ fn parse_issue_transitions(response: &Value) -> Vec<IssueTransition> {
             let to_name = to.get("name").and_then(Value::as_str).unwrap_or(&name).to_owned();
             let to_id = to.get("id").and_then(Value::as_str).unwrap_or("").to_owned();
             let to_category = to.get("statusCategory").and_then(parse_status_category);
+            let is_global = transition.get("isGlobal").and_then(Value::as_bool);
+            let opsbar_sequence = transition.get("opsbarSequence").and_then(Value::as_i64);
             let fields = transition.get("fields").and_then(Value::as_object)
                 .map(parse_transition_fields).unwrap_or_default();
             Some(IssueTransition {
-                id, name, to_name, to_id, to_category, fields,
-                edit_fields: Vec::new(),
+                id, name, to_name, to_id, to_category, is_global, opsbar_sequence,
+                fields, edit_fields: Vec::new(),
             })
         }).collect()
 }
@@ -1730,6 +1750,7 @@ mod transition_tests {
         let mut transition = IssueTransition {
             id: "31".into(), name: "Review".into(),
             to_name: "Review".into(), to_id: "3".into(), to_category: None,
+            is_global: None, opsbar_sequence: None,
             fields: vec![
                 TransitionField { id: "fixVersions".into(), name: "Fix versions".into(),
                     schema_type: "array".into(), item_type: "version".into(),
@@ -1868,6 +1889,21 @@ mod transition_tests {
         assert_eq!(body["fields"]["resolution"]["id"], "1");
         assert!(body["fields"].get("comment").is_none());
         assert_eq!(body["update"]["comment"][0]["add"]["body"], "Done");
+    }
+
+    #[test]
+    fn parses_jira_workflow_priority_without_matching_transition_names() {
+        let data = json!({"transitions": [
+            {"id":"12", "name":"Whatever", "isGlobal":false, "opsbarSequence":20,
+                "to":{"id":"4", "name":"B"}},
+            {"id":"13", "name":"Anything", "isGlobal":true, "opsbarSequence":10,
+                "to":{"id":"5", "name":"C"}}
+        ]});
+        let transitions = parse_issue_transitions(&data);
+        assert_eq!(transitions[0].is_global, Some(false));
+        assert_eq!(transitions[0].opsbar_sequence, Some(20));
+        assert_eq!(transitions[1].is_global, Some(true));
+        assert_eq!(transitions[1].opsbar_sequence, Some(10));
     }
 
     #[test]
