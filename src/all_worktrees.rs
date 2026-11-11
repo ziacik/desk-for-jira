@@ -530,6 +530,19 @@ impl Manager {
         (row, merge_badge)
     }
 
+    fn cleanup_removed(&self, confirm: &gtk::Window, worktree_path: &Path) {
+        confirm.close();
+        if let Ok(mut settings) = preferences::load_git() {
+            settings.forget_worktree_origin(&worktree_path.to_string_lossy());
+            if let Err(error) = preferences::save_git(&settings) {
+                eprintln!("Could not clean up worktree origin: {error}");
+            }
+        }
+        self.toast.add_toast(adw::Toast::new("Worktree and local branch removed"));
+        // Re-scan worktrees and their Jira tickets after a successful removal.
+        // The owning Manager refresh is invoked by each successful callback.
+    }
+
     fn confirm_removal(self: &Rc<Self>, repo: GitRepository, tree: Worktree) {
         let confirm = gtk::Window::builder()
             .title("Remove worktree and local branch")
@@ -615,6 +628,14 @@ impl Manager {
         progress.set_wrap(true);
         progress.set_visible(false);
         content.append(&progress);
+        let manual = gtk::Button::with_label("PR completed? Remove locally…");
+        manual.add_css_class("flat");
+        manual.set_halign(gtk::Align::Start);
+        manual.set_visible(false);
+        manual.set_tooltip_text(Some(
+            "Only if you verified that the completed PR includes every commit on this branch",
+        ));
+        content.append(&manual);
 
         let footer = gtk::Box::new(gtk::Orientation::Horizontal, 9);
         footer.set_halign(gtk::Align::End);
@@ -651,7 +672,8 @@ impl Manager {
                 remove.set_sensitive(false);
                 target.set_sensitive(false);
                 change.set_sensitive(false);
-                progress.set_text("Verifying Git history and worktree status…");
+                manual.set_visible(false);
+                progress.set_text("Checking the selected branch and updating remote history…");
                 progress.set_visible(true);
                 let repo_path = repo.path.clone();
                 let worktree_path = tree.path.clone();
@@ -669,19 +691,11 @@ impl Manager {
                 let progress = progress.clone();
                 let target_field = target_field.clone();
                 let change = change.clone();
+                let manual = manual.clone();
                 poll(rx, move |result| {
                     match result {
                         Ok(()) => {
-                            confirm.close();
-                            // Stale origin records must not leak into a later
-                            // checkout reusing the same path.
-                            if let Ok(mut settings) = preferences::load_git() {
-                                settings.forget_worktree_origin(&worktree_path.to_string_lossy());
-                                if let Err(error) = preferences::save_git(&settings) {
-                                    eprintln!("Could not clean up worktree origin: {error}");
-                                }
-                            }
-                            manager.toast.add_toast(adw::Toast::new("Worktree and local branch removed"));
+                            manager.cleanup_removed(&confirm, &worktree_path);
                             manager.refresh();
                         }
                         Err(error) => {
@@ -689,12 +703,80 @@ impl Manager {
                             target.set_sensitive(true);
                             remove.set_sensitive(true);
                             change.set_sensitive(true);
-                            if error.contains("not provably merged") {
-                                target_field.set_visible(true);
-                                change.set_label("Hide");
+                            if error.starts_with(git::MERGE_NOT_CONFIRMED) {
+                                manual.set_visible(true);
                             }
                         }
                     }
+                });
+            });
+        }
+        {
+            let manager = self.clone();
+            let confirm = confirm.clone();
+            let repo = repo.clone();
+            let tree = tree.clone();
+            let manual_button = manual.clone();
+            let remove_button = remove.clone();
+            let progress_label = progress.clone();
+            let target = target.clone();
+            let bases = bases.clone();
+            manual.connect_clicked(move |_| {
+                let chosen = (target.selected() as usize).checked_sub(1)
+                    .and_then(|index| bases.get(index));
+                let target_name = chosen.map(String::as_str).unwrap_or("the selected branch");
+                let branch_name = tree.branch.as_deref().unwrap_or("Detached HEAD");
+                let alert = gtk::AlertDialog::builder()
+                    .message("Remove without Git merge proof?")
+                    .detail(format!(
+                        "Only continue if you independently verified that the PR for {branch_name} was completed into {target_name} and that NO commits were added to this branch afterward.\n\nThis deletes the linked worktree and its local branch, even though Git could not prove the merge. Uncommitted changes and primary checkouts are still protected. Remote branches are never deleted."
+                    ))
+                    .buttons(["Cancel", "Remove locally anyway"])
+                    .cancel_button(0)
+                    .default_button(0)
+                    .modal(true)
+                    .build();
+                let manager = manager.clone();
+                let confirm = confirm.clone();
+                let repo = repo.clone();
+                let tree = tree.clone();
+                let manual_button = manual_button.clone();
+                let remove_button = remove_button.clone();
+                let progress_label = progress_label.clone();
+                alert.choose(Some(&confirm), None::<&gtk::gio::Cancellable>, move |response| {
+                    if !matches!(response, Ok(1)) { return; }
+                    manual_button.set_sensitive(false);
+                    remove_button.set_sensitive(false);
+                    progress_label.set_text("Removing locally after your explicit confirmation…");
+                    progress_label.set_visible(true);
+                    let (tx, rx) = mpsc::channel();
+                    let tree_for_git = tree.clone();
+                    let repo_path = repo.path.clone();
+                    thread::spawn(move || {
+                        let result = git::remove_manually_confirmed_worktree(
+                            Path::new(&repo_path), &tree_for_git,
+                        ).map_err(|error| error.to_string());
+                        let _ = tx.send(result);
+                    });
+                    let manager = manager.clone();
+                    let confirm = confirm.clone();
+                    let manual_button = manual_button.clone();
+                    let remove_button = remove_button.clone();
+                    let progress_label = progress_label.clone();
+                    let worktree_path = tree.path.clone();
+                    poll(rx, move |result| {
+                        match result {
+                            Ok(()) => {
+                                manager.cleanup_removed(&confirm, &worktree_path);
+                                manager.refresh();
+                            }
+                            Err(error) => {
+                                progress_label.set_text(&error);
+                                manual_button.set_sensitive(true);
+                                remove_button.set_sensitive(true);
+                            }
+                        }
+                    });
                 });
             });
         }
