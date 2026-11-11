@@ -143,8 +143,9 @@ fn transition_direction(transition: &IssueTransition, workflow: &WorkflowContext
         StatusCategory::InProgress => 1,
         StatusCategory::Done => 2,
     };
-    Some(category_rank(transition.to_category?)
-        .cmp(&category_rank(workflow.current_category?)))
+    let order = category_rank(transition.to_category?)
+        .cmp(&category_rank(workflow.current_category?));
+    (order != Ordering::Equal).then_some(order)
 }
 
 /// Select the next forward move. Jira's opsbar priority is a tie-breaker *only*
@@ -159,6 +160,12 @@ fn primary_transition_index(
         return Some(index);
     }
     let workflow = workflow?;
+    // An action in the same status category may be the *real* next step.
+    // If Jira did not expose enough workflow ordering to classify it, do not
+    // incorrectly promote a category-changing shortcut such as Close.
+    if transitions.iter().any(|transition| transition_direction(transition, workflow).is_none()) {
+        return None;
+    }
     let mut forward: Vec<usize> = transitions.iter().enumerate()
         .filter_map(|(index, transition)| (
             transition_direction(transition, workflow) == Some(Ordering::Greater)
@@ -798,6 +805,19 @@ mod tests {
         assert_eq!(primary_transition_index(&[t("unknown", None, None)], true, None, Some(
             &workflow("progress", &[])
         )), None);
+    }
+
+    #[test]
+    fn does_not_call_close_primary_when_next_step_is_unknown() {
+        let mut close = t("close", None, Some(1));
+        close.to_category = Some(StatusCategory::Done);
+        let mut testing = t("testing", None, Some(2));
+        testing.to_category = Some(StatusCategory::InProgress);
+        let graph = workflow("ready", &[]);
+        assert_eq!(
+            primary_transition_index(&[close, testing], true, None, Some(&graph)),
+            None,
+        );
     }
 
     #[test]
