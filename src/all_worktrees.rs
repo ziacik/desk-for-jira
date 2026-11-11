@@ -550,18 +550,67 @@ impl Manager {
         explanation.set_wrap(true);
         explanation.set_ellipsize(gtk::pango::EllipsizeMode::None);
         content.append(&explanation);
-        let target_label = label("Merged into", "dim-label");
-        content.append(&target_label);
-        let bases = git::available_bases(Path::new(&repo.path)).unwrap_or_default();
-        let target = gtk::DropDown::from_strings(
-            &bases.iter().map(String::as_str).collect::<Vec<_>>(),
+        let repo_path = Path::new(&repo.path);
+        let recorded_origin = preferences::load_git().ok().and_then(|settings| {
+            settings.worktree_origin(&repo.path, &tree.path.to_string_lossy(), branch)
+                .map(str::to_owned)
+        });
+        let proposed = git::suggested_merge_target(
+            repo_path, branch, recorded_origin.as_deref(),
         );
-        let recommended = git::recommended_base(Path::new(&repo.path));
-        if let Some(index) = bases.iter().position(|r| r == &recommended) {
-            target.set_selected(index as u32);
+        // The first entry is a placeholder, never a valid integration ref.
+        // This prevents accidental selection of an arbitrary feature branch.
+        let bases: Vec<String> = git::available_bases(repo_path).unwrap_or_default()
+            .into_iter()
+            .filter(|base| base != "HEAD" && base != branch).collect();
+        let mut choices = vec!["Choose a merge target…".to_owned()];
+        choices.extend(bases.iter().cloned());
+        let target = gtk::DropDown::from_strings(
+            &choices.iter().map(String::as_str).collect::<Vec<_>>(),
+        );
+        let selected = proposed.as_ref()
+            .and_then(|target| bases.iter().position(|b| b == &target.name))
+            .map(|position| position + 1).unwrap_or(0);
+        target.set_selected(selected as u32);
+        let merge_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        let merge_target = label(&proposed.map_or_else(
+            || "Verify merged into: Choose target".to_owned(),
+            |target| format!("Verify merged into: {} ({})", target.name, target.source),
+        ), "dim-label");
+        merge_target.set_hexpand(true);
+        merge_target.set_wrap(true);
+        merge_row.append(&merge_target);
+        let change = gtk::Button::with_label("Change");
+        change.add_css_class("flat");
+        change.set_sensitive(!bases.is_empty());
+        merge_row.append(&change);
+        content.append(&merge_row);
+        let target_field = gtk::Box::new(gtk::Orientation::Vertical, 5);
+        target_field.append(&label("Check merge into", "dim-label"));
+        target_field.append(&target);
+        target_field.set_visible(selected == 0);
+        change.set_label(if selected == 0 { "Hide" } else { "Change" });
+        {
+            let target_field = target_field.clone();
+            let change = change.clone();
+            change.clone().connect_clicked(move |_| {
+                let visible = !target_field.is_visible();
+                target_field.set_visible(visible);
+                change.set_label(if visible { "Hide" } else { "Change" });
+            });
         }
-        target.set_sensitive(!bases.is_empty());
-        content.append(&target);
+        {
+            let merge_target = merge_target.clone();
+            let bases = bases.clone();
+            target.connect_selected_notify(move |target| {
+                if let Some(base) = (target.selected() as usize).checked_sub(1)
+                    .and_then(|index| bases.get(index))
+                {
+                    merge_target.set_text(&format!("Verify merged into: {base}"));
+                }
+            });
+        }
+        content.append(&target_field);
         let progress = label("", "worktree-global-error");
         progress.set_wrap(true);
         progress.set_visible(false);
@@ -572,7 +621,7 @@ impl Manager {
         let cancel = gtk::Button::with_label("Cancel");
         let remove = gtk::Button::with_label("Remove worktree and branch");
         remove.add_css_class("destructive-action");
-        remove.set_sensitive(!bases.is_empty());
+        remove.set_sensitive(selected != 0);
         footer.append(&cancel);
         footer.append(&remove);
         content.append(&footer);
@@ -585,14 +634,17 @@ impl Manager {
             let confirm = confirm.clone();
             let manager = self.clone();
             remove.clone().connect_clicked(move |_| {
-                let selected = target.selected() as usize;
-                let Some(target_branch) = bases.get(selected).cloned() else {
+                let selected = (target.selected() as usize).checked_sub(1);
+                let Some(target_branch) = selected.and_then(|index| bases.get(index)).cloned() else {
                     progress.set_text("Choose a merge target.");
                     progress.set_visible(true);
+                    target_field.set_visible(true);
+                    change.set_label("Hide");
                     return;
                 };
                 remove.set_sensitive(false);
                 target.set_sensitive(false);
+                change.set_sensitive(false);
                 progress.set_text("Verifying Git history and worktree status…");
                 progress.set_visible(true);
                 let repo_path = repo.path.clone();
@@ -612,6 +664,14 @@ impl Manager {
                     match result {
                         Ok(()) => {
                             confirm.close();
+                            // Stale origin records must not leak into a later
+                            // checkout reusing the same path.
+                            if let Ok(mut settings) = preferences::load_git() {
+                                settings.forget_worktree_origin(&tree.path.to_string_lossy());
+                                if let Err(error) = preferences::save_git(&settings) {
+                                    eprintln!("Could not clean up worktree origin: {error}");
+                                }
+                            }
                             manager.toast.add_toast(adw::Toast::new("Worktree and local branch removed"));
                             manager.refresh();
                         }
@@ -619,6 +679,11 @@ impl Manager {
                             progress.set_text(&error);
                             target.set_sensitive(true);
                             remove.set_sensitive(true);
+                            change.set_sensitive(true);
+                            if error.contains("not provably merged") {
+                                target_field.set_visible(true);
+                                change.set_label("Hide");
+                            }
                         }
                     }
                 });
