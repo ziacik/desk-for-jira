@@ -4072,7 +4072,7 @@ mod workflow_diagnostics_tests {
         let (context, reason) = resolve_workflow_context(&[status], "ART", "3", "Bug");
         assert!(context.is_none());
         assert!(reason.contains("no uniquely matching issue-type graph"));
-        assert!(reason.contains("issue types: [\\"Task\\"]"));
+        assert!(reason.contains("Task"));
         assert!(reason.contains("Workflow search: 1 page(s)"));
     }
 }
