@@ -317,7 +317,9 @@ impl DevelopmentPanel {
     }
 
     pub fn refresh_if_policy_changed(&self, show_when_missing: bool) {
-        if let Some((site, key, summary, old_policy)) = self.context.borrow().clone()
+        // Release the RefCell borrow before refresh mutates the context.
+        let current = self.context.borrow().clone();
+        if let Some((site, key, summary, old_policy)) = current
             && old_policy != show_when_missing
         {
             self.refresh(&site, &key, &summary, show_when_missing);
@@ -325,7 +327,8 @@ impl DevelopmentPanel {
     }
 
     pub fn refresh_current(&self) {
-        if let Some((site, key, summary, show)) = self.context.borrow().clone() {
+        let current = self.context.borrow().clone();
+        if let Some((site, key, summary, show)) = current {
             self.refresh(&site, &key, &summary, show);
         }
     }
