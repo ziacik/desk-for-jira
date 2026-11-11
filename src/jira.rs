@@ -1779,6 +1779,7 @@ mod transition_tests {
         let mut transition = IssueTransition {
             id: "31".into(), name: "Review".into(),
             to_name: "Review".into(), to_id: "3".into(), to_category: None,
+            is_global: None, opsbar_sequence: None,
             fields: vec![TransitionField {
                 id: "worklog".into(), name: "Log work".into(), required: true,
                 schema_type: "array".into(), item_type: "worklog".into(),
