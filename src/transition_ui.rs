@@ -1,15 +1,22 @@
-use std::{cell::{Cell, RefCell}, rc::Rc};
+use std::{cell::{Cell, RefCell}, cmp::Ordering, collections::HashMap, rc::Rc};
 
 use adw::prelude::*;
 use serde_json::{Map, Value};
 
-use crate::jira::{IssueTransition, TransitionField};
+use crate::jira::{IssueTransition, StatusCategory, TransitionField};
 
 pub type TransitionSubmit = Rc<dyn Fn(IssueTransition, Map<String, Value>, Map<String, Value>, Option<Value>) -> bool>;
 pub type FormOpened = Rc<dyn Fn(TransitionForm)>;
 pub type PrimaryChanged = Rc<dyn Fn(Option<String>)>;
 
+pub struct WorkflowContext {
+    pub current_status_id: String,
+    pub current_category: Option<StatusCategory>,
+    pub order_by_status_id: HashMap<String, usize>,
+}
+
 pub struct ActionOptions {
+    pub workflow: Option<WorkflowContext>,
     pub preferred_id: Option<String>,
     pub on_primary_changed: Option<PrimaryChanged>,
     pub submit: TransitionSubmit,
@@ -116,49 +123,84 @@ fn clear(container: &gtk::Box) {
     }
 }
 
-/// Infer a primary action only from Jira metadata, never from transition or status labels.
+/// Compare real workflow status positions, not transition labels or Jira menu order.
+/// A change within the same status category is forward only if the workflow
+/// ordering places its destination later than the issue's current status.
+fn transition_direction(transition: &IssueTransition, workflow: &WorkflowContext) -> Option<Ordering> {
+    if transition.to_id == workflow.current_status_id {
+        return Some(Ordering::Equal);
+    }
+    if let (Some(current), Some(destination)) = (
+        workflow.order_by_status_id.get(&workflow.current_status_id),
+        workflow.order_by_status_id.get(&transition.to_id),
+    ) {
+        return Some(destination.cmp(current));
+    }
+    // Status categories are useful only across categories. "In progress"
+    // to "In progress" is not evidence of progress in a workflow.
+    let category_rank = |category: StatusCategory| match category {
+        StatusCategory::Todo => 0,
+        StatusCategory::InProgress => 1,
+        StatusCategory::Done => 2,
+    };
+    Some(category_rank(transition.to_category?)
+        .cmp(&category_rank(workflow.current_category?)))
+}
+
+/// Select the next forward move. Jira's opsbar priority is a tie-breaker *only*
+/// between forward transitions, and may never promote a backward transition.
 fn primary_transition_index(
     transitions: &[IssueTransition],
     cloud_sorted: bool,
     override_id: Option<&str>,
+    workflow: Option<&WorkflowContext>,
 ) -> Option<usize> {
     if let Some(index) = override_id.and_then(|id| transitions.iter().position(|t| t.id == id)) {
         return Some(index);
     }
-    if transitions.len() == 1 {
-        return Some(0);
-    }
-
-    // A transition from this specific state is preferable to a global shortcut.
-    let local: Vec<usize> = transitions.iter().enumerate()
-        .filter_map(|(index, transition)| (transition.is_global == Some(false)).then_some(index))
+    let workflow = workflow?;
+    let mut forward: Vec<usize> = transitions.iter().enumerate()
+        .filter_map(|(index, transition)| (
+            transition_direction(transition, workflow) == Some(Ordering::Greater)
+        ).then_some(index))
         .collect();
-    let candidates: Vec<usize> = if !local.is_empty() {
-        local
-    } else {
-        transitions.iter().enumerate()
-            .filter_map(|(index, transition)| (transition.is_global != Some(true)).then_some(index))
-            .collect()
-    };
-    if candidates.len() == 1 {
-        return candidates.first().copied();
-    }
-    if candidates.is_empty() {
+    if forward.is_empty() {
+        // Do not label an unknown or backward move as primary.
         return None;
     }
 
-    // Data Center exposes explicit numeric priority. A tie does not identify a primary.
-    let min_sequence = candidates.iter()
-        .filter_map(|&i| transitions[i].opsbar_sequence).min();
-    if let Some(sequence) = min_sequence {
-        let best: Vec<_> = candidates.iter().copied()
-            .filter(|&i| transitions[i].opsbar_sequence == Some(sequence)).collect();
-        return (best.len() == 1).then_some(best[0]);
+    // Prefer the next workflow position, not a shortcut several stages ahead.
+    let current = workflow.order_by_status_id.get(&workflow.current_status_id);
+    let nearest = forward.iter().filter_map(|&index| {
+        let destination = workflow.order_by_status_id.get(&transitions[index].to_id)?;
+        destination.checked_sub(*current?)
+    }).min();
+    if let Some(distance) = nearest {
+        forward.retain(|&index| workflow.order_by_status_id
+            .get(&transitions[index].to_id)
+            .and_then(|destination| destination.checked_sub(*current?)) == Some(distance));
+    }
+    if forward.len() == 1 {
+        return forward.first().copied();
     }
 
-    // Cloud's sortByOpsBarAndStatus=true is the only available priority ranking.
-    // If the server did not give an ordering, don't invent one.
-    cloud_sorted.then_some(candidates[0])
+    let local: Vec<usize> = forward.iter().copied()
+        .filter(|&index| transitions[index].is_global == Some(false)).collect();
+    if !local.is_empty() {
+        forward = local;
+    }
+    if forward.len() == 1 {
+        return forward.first().copied();
+    }
+
+    let min_sequence = forward.iter().filter_map(|&index| transitions[index].opsbar_sequence).min();
+    if let Some(sequence) = min_sequence {
+        let best: Vec<_> = forward.into_iter()
+            .filter(|&index| transitions[index].opsbar_sequence == Some(sequence)).collect();
+        return (best.len() == 1).then_some(best[0]);
+    }
+    // The Cloud API returns transitions in opsbar priority order.
+    cloud_sorted.then_some(forward[0])
 }
 
 fn action_button(
@@ -194,7 +236,7 @@ pub fn render_actions(
     transitions: Vec<IssueTransition>,
     options: ActionOptions,
 ) {
-    let ActionOptions { preferred_id, on_primary_changed, submit, on_open } = options;
+    let ActionOptions { workflow, preferred_id, on_primary_changed, submit, on_open } = options;
     clear(container);
     container.set_visible(true);
 
@@ -206,7 +248,9 @@ pub fn render_actions(
         return;
     }
 
-    let primary = primary_transition_index(&transitions, cloud, preferred_id.as_deref());
+    let primary = primary_transition_index(
+        &transitions, cloud, preferred_id.as_deref(), workflow.as_ref(),
+    );
     let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
     row.set_halign(gtk::Align::Start);
     row.add_css_class("workflow-actions-row");
@@ -218,7 +262,7 @@ pub fn render_actions(
         row.append(&button);
     }
 
-    if transitions.len() > 1 {
+    if transitions.len() > 1 || primary.is_none() {
         let popover = gtk::Popover::new();
         let list = gtk::Box::new(gtk::Orientation::Vertical, 3);
         list.add_css_class("workflow-actions-menu");
@@ -688,33 +732,91 @@ mod tests {
         }
     }
 
-    #[test]
-    fn jira_local_transition_wins_over_global_actions() {
-        let actions = vec![
-            t("close", Some(true), Some(1)),
-            t("rework", Some(true), Some(2)),
-            t("testing", Some(false), Some(3)),
-        ];
-        assert_eq!(primary_transition_index(&actions, true, None), Some(2));
+    fn workflow(current: &str, statuses: &[(&str, usize)]) -> WorkflowContext {
+        WorkflowContext {
+            current_status_id: current.into(),
+            current_category: Some(StatusCategory::InProgress),
+            order_by_status_id: statuses.iter()
+                .map(|(id, position)| ((*id).to_owned(), *position)).collect(),
+        }
     }
 
     #[test]
-    fn jira_data_center_uses_unique_opsbar_sequence() {
-        let actions = vec![t("x", None, Some(20)), t("y", None, Some(10))];
-        assert_eq!(primary_transition_index(&actions, false, None), Some(1));
-        let tied = vec![t("x", None, Some(10)), t("y", None, Some(10))];
-        assert_eq!(primary_transition_index(&tied, false, None), None);
+    fn prefers_next_step_over_backward_pause_even_when_jira_lists_pause_first() {
+        let mut pause = t("pause", Some(false), Some(1));
+        pause.to_id = "ready".into();
+        let mut close = t("close", Some(true), Some(2));
+        close.to_id = "done".into();
+        let mut advance = t("advance", Some(false), Some(100));
+        advance.to_id = "review".into();
+        let graph = workflow("progress", &[
+            ("ready", 0), ("progress", 1), ("review", 2), ("done", 3),
+        ]);
+        let actions = [pause, close, advance];
+        assert_eq!(primary_transition_index(&actions, true, None, Some(&graph)), Some(2));
+        assert_eq!(primary_transition_index(&actions, false, None, Some(&graph)), Some(2));
     }
 
     #[test]
-    fn cloud_uses_server_order_only_without_a_more_specific_signal() {
-        let actions = vec![t("x", None, None), t("y", None, None)];
-        assert_eq!(primary_transition_index(&actions, true, None), Some(0));
-        assert_eq!(primary_transition_index(&actions, false, None), None);
-        assert_eq!(primary_transition_index(&actions, false, Some("y")), Some(1));
-        assert_eq!(primary_transition_index(&actions, true, Some("missing")), Some(0));
-        let globals = vec![t("x", Some(true), None), t("y", Some(true), None)];
-        assert_eq!(primary_transition_index(&globals, true, None), None);
+    fn chooses_nearest_forward_step_not_workflow_shortcut() {
+        let mut shortcut = t("shortcut", Some(false), Some(1));
+        shortcut.to_id = "done".into();
+        let mut next = t("next", Some(true), Some(30));
+        next.to_id = "testing".into();
+        let graph = workflow("progress", &[("progress", 1), ("testing", 2), ("done", 4)]);
+        assert_eq!(
+            primary_transition_index(&[shortcut, next], true, None, Some(&graph)),
+            Some(1),
+        );
+    }
+
+    #[test]
+    fn uses_status_categories_when_workflow_positions_are_missing() {
+        let mut backward = t("back", None, Some(1));
+        backward.to_category = Some(StatusCategory::Todo);
+        let mut next = t("next", None, Some(20));
+        next.to_category = Some(StatusCategory::Done);
+        let graph = workflow("progress", &[]);
+        assert_eq!(
+            primary_transition_index(&[backward, next], false, None, Some(&graph)),
+            Some(1),
+        );
+    }
+
+    #[test]
+    fn refuses_to_promote_backward_or_unknown_transitions() {
+        let mut pause = t("pause", Some(false), Some(1));
+        pause.to_id = "ready".into();
+        let mut reopen = t("reopen", Some(false), Some(2));
+        reopen.to_id = "progress".into();
+        let graph = workflow("progress", &[("ready", 0), ("progress", 1)]);
+        assert_eq!(
+            primary_transition_index(&[pause.clone(), reopen], true, None, Some(&graph)),
+            None,
+        );
+        assert_eq!(primary_transition_index(&[pause], true, None, None), None);
+        assert_eq!(primary_transition_index(&[t("unknown", None, None)], true, None, Some(
+            &workflow("progress", &[])
+        )), None);
+    }
+
+    #[test]
+    fn uses_only_forward_candidates_for_jira_opsbar_tiebreakers() {
+        let mut a = t("a", None, Some(20));
+        a.to_id = "test-a".into();
+        let mut b = t("b", None, Some(10));
+        b.to_id = "test-b".into();
+        let graph = workflow("progress", &[("progress", 1), ("test-a", 2), ("test-b", 2)]);
+        assert_eq!(primary_transition_index(&[a, b], false, None, Some(&graph)), Some(1));
+    }
+
+    #[test]
+    fn user_override_still_takes_precedence() {
+        let actions = [t("pause", None, Some(1)), t("advance", None, Some(100))];
+        assert_eq!(
+            primary_transition_index(&actions, true, Some("advance"), None),
+            Some(1),
+        );
     }
 
     #[test]
