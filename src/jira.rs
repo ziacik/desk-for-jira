@@ -75,6 +75,7 @@ pub struct Issue {
     pub summary: String,
     pub status: String,
     pub status_id: String,
+    pub status_category: Option<StatusCategory>,
     pub kind: String,
     pub priority: String,
     pub fix_versions: Vec<String>,
@@ -1198,6 +1199,8 @@ fn parse_issue(v: &Value, epic_link_field: Option<&str>) -> Option<Issue> {
         summary: field("summary"),
         status: nested("status", "name"),
         status_id: nested("status", "id"),
+        status_category: f.get("status").and_then(|status| status.get("statusCategory"))
+            .and_then(parse_status_category),
         kind,
         priority: nested("priority", "name"),
         fix_versions: f.get("fixVersions").and_then(Value::as_array)
