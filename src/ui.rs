@@ -1445,27 +1445,38 @@ fn handle_event(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>, eve
                     let preferred = context.as_ref().and_then(|(project, status, kind)| {
                         state.borrow().primary_transitions.get(project, status, kind).map(str::to_owned)
                     });
-                    let workflow = context.as_ref().map(|(project, current_status_id, _)| {
+                    let workflow = context.as_ref().and_then(|(project, current_status_id, kind)| {
                         let s = state.borrow();
-                        let current_category = s.statuses.iter()
-                            .find(|status| &status.project_key == project
-                                && &status.id == current_status_id)
-                            .and_then(|status| status.category)
-                            .or_else(|| s.recent_issues.iter().chain(s.issues.iter())
-                                .chain(s.pinned_issues.iter())
-                                .find(|issue| issue.key == key)
-                                .and_then(|issue| issue.status_category));
-                        let order_by_status_id = s.statuses.iter()
-                            .filter(|status| &status.project_key == project)
-                            .filter_map(|status| Some((
-                                status.id.clone(), status.workflow_order?,
-                            )))
+                        let status = s.statuses.iter().find(|status| {
+                            &status.project_key == project && &status.id == current_status_id
+                        })?;
+                        // Multiple workflows can share a status; match by Jira
+                        // issue type, never merge their edges into a fake graph.
+                        let matching: Vec<_> = status.workflows.iter()
+                            .filter(|graph| graph.issue_types.contains(kind))
                             .collect();
-                        transition_ui::WorkflowContext {
+                        let graph = match matching.as_slice() {
+                            [graph] => (*graph).clone(),
+                            [] if status.workflows.len() == 1
+                                && status.workflows[0].issue_types.is_empty() =>
+                                    status.workflows[0].clone(),
+                            _ => return None,
+                        };
+                        let mut terminal_status_ids: HashSet<String> = s.statuses.iter()
+                            .filter(|status| &status.project_key == project
+                                && status.category == Some(StatusCategory::Done))
+                            .map(|status| status.id.clone())
+                            .collect();
+                        // Also use the real transition destination metadata if
+                        // the project-status endpoint omitted status categories.
+                        terminal_status_ids.extend(transitions.iter()
+                            .filter(|transition| transition.to_category == Some(StatusCategory::Done))
+                            .map(|transition| transition.to_id.clone()));
+                        Some(transition_ui::WorkflowContext {
                             current_status_id: current_status_id.clone(),
-                            current_category,
-                            order_by_status_id,
-                        }
+                            graph,
+                            terminal_status_ids,
+                        })
                     });
                     let on_primary_changed: Option<transition_ui::PrimaryChanged> =
                         context.map(|(project, status, kind)| {
