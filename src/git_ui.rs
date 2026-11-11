@@ -442,12 +442,13 @@ impl View {
             view.remove.set_sensitive(false);
             report(&view.info, "Verifying merge and removing worktree…");
             let repo = repo.clone();
-            let tree = tree.clone();
+            let worktree_path = tree.path.clone();
+            let tree_for_git = tree.clone();
             let base = base.clone();
             let key = view.key.clone();
             let (tx, rx) = mpsc::channel();
             thread::spawn(move || {
-                let result = git::remove_merged(Path::new(&repo.path), &tree, &base, &key)
+                let result = git::remove_merged(Path::new(&repo.path), &tree_for_git, &base, &key)
                     .map_err(|e| e.to_string());
                 let _ = tx.send(result);
             });
@@ -457,7 +458,7 @@ impl View {
                 match result {
                     Ok(()) => {
                         view.settings.borrow_mut().forget_worktree_origin(
-                            &tree.path.to_string_lossy(),
+                            &worktree_path.to_string_lossy(),
                         );
                         if let Err(error) = preferences::save_git(&view.settings.borrow()) {
                             report(&view.info, &format!(
@@ -468,7 +469,13 @@ impl View {
                         }
                         view.refresh();
                     }
-                    Err(error) => report(&view.info, &error),
+                    Err(error) => {
+                        report(&view.info, &error);
+                        if error.contains("not provably merged") {
+                            view.cleanup_choices.set_visible(true);
+                            view.cleanup_change.set_label("Hide");
+                        }
+                    },
                 }
             });
         });
