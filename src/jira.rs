@@ -301,6 +301,62 @@ fn parse_status_category(value: &Value) -> Option<StatusCategory> {
     }
 }
 
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PullRequest {
+    pub title: String,
+    pub url: String,
+    pub status: String,
+}
+
+/// The private Jira development endpoint can return PRs alongside branches,
+/// and its singular/plural "detail" response keys vary by Jira version.
+fn parse_dev_pull_requests(payload: &Value) -> Vec<PullRequest> {
+    let details = payload.get("detail").or_else(|| payload.get("details"));
+    let entries: Vec<&Value> = match details {
+        Some(Value::Array(items)) => items.iter().collect(),
+        Some(item) if item.is_object() => vec![item],
+        _ => Vec::new(),
+    };
+
+    let mut requests = Vec::new();
+    for entry in entries {
+        for field in ["pullRequests", "pullrequests"] {
+            let Some(items) = entry.get(field).and_then(Value::as_array) else {
+                continue;
+            };
+            for item in items {
+                let url = item.get("url")
+                    .or_else(|| item.get("link"))
+                    .or_else(|| item.get("displayUrl"))
+                    .and_then(Value::as_str);
+                let Some(url) = url.filter(|url| reqwest::Url::parse(url).is_ok_and(
+                    |parsed| matches!(parsed.scheme(), "https" | "http")
+                )) else {
+                    continue;
+                };
+                let title = item.get("name")
+                    .or_else(|| item.get("title"))
+                    .or_else(|| item.get("displayName"))
+                    .and_then(Value::as_str)
+                    .filter(|name| !name.trim().is_empty())
+                    .unwrap_or("Pull request");
+                let status = item.get("status")
+                    .or_else(|| item.get("state"))
+                    .or_else(|| item.get("pullRequestStatus"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                requests.push(PullRequest {
+                    title: title.to_owned(),
+                    url: url.to_owned(),
+                    status: status.to_ascii_uppercase(),
+                });
+            }
+        }
+    }
+    requests
+}
+
 pub struct JiraClient {
     account: Credentials,
     http: Client,
@@ -346,6 +402,107 @@ impl JiraClient {
         response.json().context("Jira returned invalid JSON")
     }
 
+
+
+    /// Read PR URLs reported by Jira's Development panel. Jira does not expose
+    /// a supported read API for this information. The private dev-status API
+    /// works with the same basic email/token login as the Cloud REST client,
+    /// but can change without warning.
+    pub fn issue_pull_requests(&self, key: &str) -> Result<Vec<PullRequest>> {
+        let Some((project, number)) = key.split_once('-') else {
+            bail!("Invalid Jira issue key");
+        };
+        ensure!(
+            !project.is_empty()
+                && project.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+                && !number.is_empty()
+                && number.bytes().all(|byte| byte.is_ascii_digit()),
+            "Invalid Jira issue key"
+        );
+
+        // dev-status requires the numeric issue ID, not the human-readable key.
+        let version = if self.account.mode == AuthMode::Cloud { "3" } else { "2" };
+        let issue = self.read_json(self.http.get(
+            self.url(&format!("/rest/api/{version}/issue/{key}"))
+        ).query(&[("fields", "summary")]))?;
+        let id = issue.get("id").and_then(Value::as_str)
+            .context("Jira did not return a numeric issue ID")?;
+        // Newer Jira Cloud instances expose the complete development detail
+        // without applicationType or dataType. Prefer this single request so
+        // third-party integration IDs need not be guessed.
+        if let Ok(payload) = self.read_json(self.http.get(
+            self.url("/rest/dev-status/latest/issue/details")
+        ).query(&[("issueId", id)])) {
+            let requests = parse_dev_pull_requests(&payload);
+            if !requests.is_empty() {
+                let mut unique = HashSet::new();
+                return Ok(requests.into_iter()
+                    .filter(|request| unique.insert(request.url.clone()))
+                    .collect());
+            }
+        }
+        let summary = self.read_json(self.http.get(
+            self.url("/rest/dev-status/latest/issue/summary")
+        ).query(&[("issueId", id)]))?;
+
+        let expected_count = summary.pointer("/summary/pullrequest/overall/count")
+            .and_then(Value::as_u64).unwrap_or(0);
+        let mut providers = HashSet::new();
+        // Some integrations put PRs inside the branch detail response.
+        for kind in ["pullrequest", "branch"] {
+            if let Some(instances) = summary.pointer(&format!("/summary/{kind}/byInstanceType"))
+                .and_then(Value::as_object)
+            {
+                for (name, info) in instances {
+                    if info.get("count").and_then(Value::as_u64) != Some(0) {
+                        providers.insert(name.clone());
+                    }
+                }
+            }
+        }
+        if providers.is_empty() {
+            if expected_count == 0 {
+                return Ok(Vec::new());
+            }
+            bail!("Jira reports pull requests but no development provider");
+        }
+
+        let mut providers: Vec<_> = providers.into_iter().collect();
+        providers.sort();
+        let mut requests = Vec::new();
+        let mut seen = HashSet::new();
+        for provider in providers {
+            for kind in ["pullrequest", "branch"] {
+                // In 2026 Atlassian also began serving some installations via
+                // /details (plural), while others still require /detail.
+                for endpoint in ["details", "detail"] {
+                    let path = format!("/rest/dev-status/latest/issue/{endpoint}");
+                    let result = self.read_json(self.http.get(self.url(&path)).query(&[
+                        ("issueId", id),
+                        ("applicationType", provider.as_str()),
+                        ("dataType", kind),
+                    ]));
+                    let Ok(payload) = result else {
+                        continue;
+                    };
+                    let found = parse_dev_pull_requests(&payload);
+                    let has_prs = !found.is_empty();
+                    for request in found {
+                        if seen.insert(request.url.clone()) {
+                            requests.push(request);
+                        }
+                    }
+                    if has_prs {
+                        break;
+                    }
+                }
+            }
+        }
+        if requests.is_empty() && expected_count > 0 {
+            bail!("Jira reports {expected_count} pull request(s), but the development API returned no PR links");
+        }
+        Ok(requests)
+    }
 
     pub fn issue_transitions(&self, key: &str) -> Result<Vec<IssueTransition>> {
         let version = if self.account.mode == AuthMode::Cloud { "3" } else { "2" };
@@ -1796,4 +1953,37 @@ mod advanced_transition_tests {
         assert_eq!(textarea.text_value("A note", true).unwrap()["type"], "doc");
         assert_eq!(textarea.text_value("A note", false).unwrap(), json!("A note"));
     }
+    #[test]
+    fn dev_status_parses_pull_request_links_and_states() {
+        let response = json!({
+            "detail": [{
+                "pullRequests": [{
+                    "id": "12555",
+                    "name": "AFB-29 NQD: Add components to questionnaires",
+                    "url": "https://dev.azure.com/resconet/MobileCRM/_git/web-projects-nx/pullrequest/12555",
+                    "status": "MERGED"
+                }]
+            }]
+        });
+        assert_eq!(parse_dev_pull_requests(&response), vec![PullRequest {
+            title: "AFB-29 NQD: Add components to questionnaires".into(),
+            url: "https://dev.azure.com/resconet/MobileCRM/_git/web-projects-nx/pullrequest/12555".into(),
+            status: "MERGED".into(),
+        }]);
+    }
+
+    #[test]
+    fn dev_status_accepts_plural_details_and_skips_unsafe_links() {
+        let response = json!({"details": [
+            {"pullrequests": [
+                {"title": "Valid", "url": "https://example.com/pr/2", "state": "open"},
+                {"title": "Unsafe", "url": "javascript:alert(1)"}
+            ]}
+        ]});
+        let parsed = parse_dev_pull_requests(&response);
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].title, "Valid");
+        assert_eq!(parsed[0].status, "OPEN");
+    }
+
 }

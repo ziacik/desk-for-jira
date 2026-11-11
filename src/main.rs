@@ -6,6 +6,7 @@ mod git;
 mod git_ui;
 mod all_worktrees;
 mod development;
+mod pull_requests;
 mod preferences;
 mod secrets;
 mod transition_ui;
