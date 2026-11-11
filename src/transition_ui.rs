@@ -130,22 +130,29 @@ fn transition_direction(transition: &IssueTransition, workflow: &WorkflowContext
     if transition.to_id == workflow.current_status_id {
         return Some(Ordering::Equal);
     }
+    // Category changes are authoritative even when Jira's project-wide
+    // workflow positions disagree (they can combine different issue types).
+    let category_rank = |category: StatusCategory| match category {
+        StatusCategory::Todo => 0,
+        StatusCategory::InProgress => 1,
+        StatusCategory::Done => 2,
+    };
+    if let (Some(source), Some(destination)) =
+        (workflow.current_category, transition.to_category)
+    {
+        let category_order = category_rank(destination).cmp(&category_rank(source));
+        if category_order != Ordering::Equal {
+            return Some(category_order);
+        }
+    }
+    // Within a category, use status positions only when both are known.
     if let (Some(current), Some(destination)) = (
         workflow.order_by_status_id.get(&workflow.current_status_id),
         workflow.order_by_status_id.get(&transition.to_id),
     ) {
         return Some(destination.cmp(current));
     }
-    // Status categories are useful only across categories. "In progress"
-    // to "In progress" is not evidence of progress in a workflow.
-    let category_rank = |category: StatusCategory| match category {
-        StatusCategory::Todo => 0,
-        StatusCategory::InProgress => 1,
-        StatusCategory::Done => 2,
-    };
-    let order = category_rank(transition.to_category?)
-        .cmp(&category_rank(workflow.current_category?));
-    (order != Ordering::Equal).then_some(order)
+    None
 }
 
 /// Select the next forward move. Jira's opsbar priority is a tie-breaker *only*
@@ -160,6 +167,25 @@ fn primary_transition_index(
         return Some(index);
     }
     let workflow = workflow?;
+    // From To Do, entering In Progress is an unambiguous advance to the
+    // adjacent lifecycle category. A same-category transition may be a
+    // rollback (e.g. Ready for Dev -> Open), despite misleading workflow
+    // positions. Do not let such a transition or a direct Done shortcut win.
+    if workflow.current_category == Some(StatusCategory::Todo) {
+        let start_work: Vec<usize> = transitions.iter().enumerate()
+            .filter_map(|(index, transition)| (
+                transition.to_category == Some(StatusCategory::InProgress)
+            ).then_some(index))
+            .collect();
+        if start_work.len() == 1 {
+            return start_work.first().copied();
+        }
+        if start_work.len() > 1 {
+            // Several paths into In Progress: Jira does not identify the
+            // intended next one. Let the user explicitly choose it.
+            return None;
+        }
+    }
     // An action in the same status category may be the *real* next step.
     // If Jira did not expose enough workflow ordering to classify it, do not
     // incorrectly promote a category-changing shortcut such as Close.
@@ -762,6 +788,61 @@ mod tests {
         let actions = [pause, close, advance];
         assert_eq!(primary_transition_index(&actions, true, None, Some(&graph)), Some(2));
         assert_eq!(primary_transition_index(&actions, false, None, Some(&graph)), Some(2));
+    }
+
+    #[test]
+    fn actual_art_1885_uses_begin_work_not_stash_despite_wrong_workflow_positions() {
+        let mut stash = t("211", Some(false), Some(1));
+        stash.to_id = "1".into(); // Open, To Do
+        stash.to_category = Some(StatusCategory::Todo);
+        let mut begin_work = t("11", Some(false), Some(20));
+        begin_work.to_id = "3".into(); // In Progress
+        begin_work.to_category = Some(StatusCategory::InProgress);
+        let mut close = t("141", Some(true), Some(10));
+        close.to_id = "6".into(); // Closed
+        close.to_category = Some(StatusCategory::Done);
+        let mut graph = workflow("10291", &[
+            ("10291", 1), ("1", 2), ("3", 3), ("6", 4),
+        ]);
+        graph.current_category = Some(StatusCategory::Todo);
+        let actions = [stash, begin_work, close];
+        assert_eq!(transition_direction(&actions[0], &graph), Some(Ordering::Greater));
+        assert_eq!(primary_transition_index(&actions, true, None, Some(&graph)), Some(1));
+    }
+
+    #[test]
+    fn actual_art_2921_uses_review_not_pause_work_or_close() {
+        let mut pause = t("161", Some(false), Some(1));
+        pause.to_id = "10291".into();
+        pause.to_category = Some(StatusCategory::Todo);
+        let mut review = t("121", Some(false), Some(20));
+        review.to_id = "10053".into();
+        review.to_category = Some(StatusCategory::InProgress);
+        let mut close = t("141", Some(true), Some(10));
+        close.to_id = "6".into();
+        close.to_category = Some(StatusCategory::Done);
+        let graph = workflow("3", &[
+            ("3", 1), ("10291", 4), ("10053", 2), ("6", 3),
+        ]);
+        let actions = [pause, review, close];
+        assert_eq!(transition_direction(&actions[0], &graph), Some(Ordering::Less));
+        assert_eq!(primary_transition_index(&actions, true, None, Some(&graph)), Some(1));
+    }
+
+    #[test]
+    fn to_do_to_in_progress_is_preferred_even_without_workflow_order() {
+        let mut fallback = t("211", None, Some(1));
+        fallback.to_category = Some(StatusCategory::Todo);
+        let mut advance = t("11", None, Some(50));
+        advance.to_category = Some(StatusCategory::InProgress);
+        let mut done = t("141", None, Some(2));
+        done.to_category = Some(StatusCategory::Done);
+        let mut graph = workflow("ready", &[]);
+        graph.current_category = Some(StatusCategory::Todo);
+        assert_eq!(
+            primary_transition_index(&[fallback, advance, done], true, None, Some(&graph)),
+            Some(1),
+        );
     }
 
     #[test]
