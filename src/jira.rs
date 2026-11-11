@@ -265,6 +265,7 @@ pub struct IssueTransition {
     pub name: String,
     pub to_name: String,
     pub to_id: String,
+    pub to_category: Option<StatusCategory>,
     pub fields: Vec<TransitionField>,
     // Fields editable on the issue but absent from this transition screen.
     pub edit_fields: Vec<TransitionField>,
@@ -1368,10 +1369,11 @@ fn parse_issue_transitions(response: &Value) -> Vec<IssueTransition> {
             let to = transition.get("to")?;
             let to_name = to.get("name").and_then(Value::as_str).unwrap_or(&name).to_owned();
             let to_id = to.get("id").and_then(Value::as_str).unwrap_or("").to_owned();
+            let to_category = to.get("statusCategory").and_then(parse_status_category);
             let fields = transition.get("fields").and_then(Value::as_object)
                 .map(parse_transition_fields).unwrap_or_default();
             Some(IssueTransition {
-                id, name, to_name, to_id, fields,
+                id, name, to_name, to_id, to_category, fields,
                 edit_fields: Vec::new(),
             })
         }).collect()
@@ -1727,7 +1729,7 @@ mod transition_tests {
     fn existing_fix_and_affects_versions_are_not_requested_again() {
         let mut transition = IssueTransition {
             id: "31".into(), name: "Review".into(),
-            to_name: "Review".into(), to_id: "3".into(),
+            to_name: "Review".into(), to_id: "3".into(), to_category: None,
             fields: vec![
                 TransitionField { id: "fixVersions".into(), name: "Fix versions".into(),
                     schema_type: "array".into(), item_type: "version".into(),
@@ -1755,7 +1757,7 @@ mod transition_tests {
     fn log_work_is_not_satisfied_by_an_older_worklog() {
         let mut transition = IssueTransition {
             id: "31".into(), name: "Review".into(),
-            to_name: "Review".into(), to_id: "3".into(),
+            to_name: "Review".into(), to_id: "3".into(), to_category: None,
             fields: vec![TransitionField {
                 id: "worklog".into(), name: "Log work".into(), required: true,
                 schema_type: "array".into(), item_type: "worklog".into(),
