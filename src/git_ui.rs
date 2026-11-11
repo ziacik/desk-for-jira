@@ -118,6 +118,7 @@ struct View {
     cleanup_summary: gtk::Label,
     cleanup_choices: gtk::Box,
     cleanup_change: gtk::Button,
+    manual_remove: gtk::Button,
     branch: gtk::Entry,
     root: gtk::Entry,
     root_field: gtk::Box,
@@ -255,6 +256,7 @@ impl View {
         }
         self.cleanup_choices.set_visible(false);
         self.cleanup_change.set_label("Change");
+        self.manual_remove.set_visible(false);
         let status = git::status(&tree.path);
         self.summary.remove_css_class("git-status-clean");
         self.summary.remove_css_class("git-status-dirty");
@@ -391,6 +393,62 @@ impl View {
         });
     }
 
+    fn confirm_manual_removal(self: &Rc<Self>) {
+        let Some(tree) = self.active_tree.borrow().clone() else { return; };
+        let Some(repo) = self.selected() else { return; };
+        let chosen_target = selected_text(&self.cleanup_target)
+            .unwrap_or_else(|| "the selected target".to_owned());
+        let branch = tree.branch.as_deref().unwrap_or("Detached HEAD");
+        let confirmation = gtk::AlertDialog::builder()
+            .message("Remove without Git merge proof?")
+            .detail(format!(
+                "Only continue if you independently verified that the PR for {branch} was completed into {chosen_target} and that NO commits were added to the branch afterward.\n\nThe linked worktree and local branch will be deleted despite the missing Git ancestry proof. Primary checkouts and uncommitted changes remain protected. Remote branches are never deleted."
+            ))
+            .buttons(["Cancel", "Remove locally anyway"])
+            .cancel_button(0)
+            .default_button(0)
+            .modal(true)
+            .build();
+        let view = self.clone();
+        confirmation.choose(Some(&self.dialog), None::<&gtk::gio::Cancellable>, move |response| {
+            if !matches!(response, Ok(1)) { return; }
+            view.manual_remove.set_sensitive(false);
+            view.remove.set_sensitive(false);
+            report(&view.info, "Removing locally after your explicit confirmation…");
+            let (tx, rx) = mpsc::channel();
+            let repo_path = repo.path.clone();
+            let tree_for_git = tree.clone();
+            let worktree_path = tree.path.clone();
+            thread::spawn(move || {
+                let result = git::remove_manually_confirmed_worktree(
+                    Path::new(&repo_path), &tree_for_git
+                ).map_err(|error| error.to_string());
+                let _ = tx.send(result);
+            });
+            let view = view.clone();
+            poll(rx, move |result| {
+                view.manual_remove.set_sensitive(true);
+                view.remove.set_sensitive(true);
+                match result {
+                    Ok(()) => {
+                        view.settings.borrow_mut().forget_worktree_origin(
+                            &worktree_path.to_string_lossy(),
+                        );
+                        if let Err(error) = preferences::save_git(&view.settings.borrow()) {
+                            report(&view.info, &format!(
+                                "Worktree removed, but preference cleanup failed: {error}"
+                            ));
+                        } else {
+                            report(&view.info, "Worktree and local branch removed.");
+                        }
+                        view.refresh();
+                    }
+                    Err(error) => report(&view.info, &error),
+                }
+            });
+        });
+    }
+
     fn setup_again(self: &Rc<Self>) {
         let Some(tree) = self.active_tree.borrow().clone() else { return; };
         let script = self.setup.text().to_string();
@@ -425,6 +483,7 @@ impl View {
             report(&self.info, "Choose the branch to verify the merge against.");
             return;
         };
+        self.manual_remove.set_visible(false);
         let confirmation = gtk::AlertDialog::builder()
             .message("Remove worktree and branch?")
             .detail(format!(
@@ -471,9 +530,10 @@ impl View {
                     }
                     Err(error) => {
                         report(&view.info, &error);
-                        if error.contains("not provably merged") {
+                        if error.starts_with(git::MERGE_NOT_CONFIRMED) {
                             view.cleanup_choices.set_visible(true);
                             view.cleanup_change.set_label("Hide");
+                            view.manual_remove.set_visible(true);
                         }
                     },
                 }
@@ -699,6 +759,15 @@ pub fn show(parent: &adw::ApplicationWindow, site: &str, key: &str, summary: &st
     let cleanup_choices = field("Check merge into", &cleanup_target);
     cleanup_choices.set_visible(false);
     existing_box.append(&cleanup_choices);
+    let manual_remove = gtk::Button::with_label("PR completed? Remove locally…");
+    manual_remove.add_css_class("flat");
+    manual_remove.add_css_class("git-small-action");
+    manual_remove.set_halign(gtk::Align::Start);
+    manual_remove.set_visible(false);
+    manual_remove.set_tooltip_text(Some(
+        "Only after independently verifying that the PR included every commit on this branch",
+    ));
+    existing_box.append(&manual_remove);
     section.append(&existing_box);
 
     let destination = gtk::Box::new(gtk::Orientation::Horizontal, 8);
@@ -833,7 +902,7 @@ pub fn show(parent: &adw::ApplicationWindow, site: &str, key: &str, summary: &st
         site: site.into(), key: key.into(),
         suggested_branch: issue_detail::suggested_branch_name(key, summary),
         repository: repository.clone(),
-        base, cleanup_target, cleanup_summary, cleanup_choices, cleanup_change,
+        base, cleanup_target, cleanup_summary, cleanup_choices, cleanup_change, manual_remove,
         branch, root, root_field, editor, setup, run_setup, fetch, after_open,
         summary: summary_label, path, existing_branch, existing_box, new_box,
         tree_picker, trees: Rc::new(RefCell::new(Vec::new())), more,
@@ -847,6 +916,12 @@ pub fn show(parent: &adw::ApplicationWindow, site: &str, key: &str, summary: &st
     {
         let view = view.clone();
         view.tree_picker.clone().connect_selected_notify(move |_| view.choose_tree());
+    }
+    {
+        let view = view.clone();
+        view.manual_remove.clone().connect_clicked(move |_| {
+            view.confirm_manual_removal();
+        });
     }
     {
         let view = view.clone();
