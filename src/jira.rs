@@ -306,12 +306,56 @@ pub struct ProjectStatus {
 pub struct WorkflowGraph {
     pub status_ids: HashSet<String>,
     pub edges: HashMap<String, HashSet<String>>,
+    pub initial_status_ids: HashSet<String>,
     pub issue_types: HashSet<String>,
 }
 
 impl WorkflowGraph {
     pub fn has_edge(&self, source: &str, target: &str) -> bool {
         self.edges.get(source).is_some_and(|destinations| destinations.contains(target))
+    }
+
+    /// If the only way to close is a GLOBAL action, Done is disconnected from
+    /// directed edges. The furthest normally reachable statuses form the last
+    /// stage before that action. Never use numeric IDs or display names.
+    pub fn normal_frontier(&self, terminal_statuses: &HashSet<String>) -> HashSet<String> {
+        let mut initial = self.initial_status_ids.clone();
+        if initial.is_empty() {
+            let targets: HashSet<&str> = self.edges.values()
+                .flat_map(|destinations| destinations.iter().map(String::as_str)).collect();
+            initial = self.status_ids.iter()
+                .filter(|status| !targets.contains(status.as_str()))
+                .cloned().collect();
+        }
+        if initial.is_empty() {
+            return HashSet::new();
+        }
+        let mut visited = HashMap::new();
+        let mut queue = VecDeque::new();
+        for status in initial {
+            if self.status_ids.contains(&status) {
+                visited.insert(status.clone(), 0usize);
+                queue.push_back(status);
+            }
+        }
+        while let Some(status) = queue.pop_front() {
+            let next_distance = visited[&status] + 1;
+            for next in self.edges.get(&status).into_iter().flatten() {
+                if !visited.contains_key(next) {
+                    visited.insert(next.clone(), next_distance);
+                    queue.push_back(next.clone());
+                }
+            }
+        }
+        let maximum = visited.iter()
+            .filter(|(status, _)| !terminal_statuses.contains(*status))
+            .map(|(_, distance)| *distance).max();
+        let Some(maximum) = maximum.filter(|distance| *distance > 0) else {
+            return HashSet::new();
+        };
+        visited.into_iter().filter_map(|(status, distance)| {
+            (distance == maximum && !terminal_statuses.contains(&status)).then_some(status)
+        }).collect()
     }
 
     /// Reverse BFS, handling cycles and multiple terminal statuses.
@@ -1141,17 +1185,23 @@ fn parse_workflow_graphs(response: &Value) -> Vec<WorkflowGraph> {
                 return None;
             }
             let mut edges: HashMap<String, HashSet<String>> = HashMap::new();
+            let mut initial_status_ids = HashSet::new();
             for transition in workflow.get("transitions").and_then(Value::as_array)
                 .into_iter().flatten()
             {
-                if transition.get("type").and_then(Value::as_str) != Some("DIRECTED") {
-                    continue;
-                }
                 let Some(target) = transition.get("toStatusReference").and_then(Value::as_str)
                     .and_then(|reference| references.get(reference))
                 else { continue };
                 if !ids.contains(*target) {
                     continue;
+                }
+                match transition.get("type").and_then(Value::as_str) {
+                    Some("INITIAL") => {
+                        initial_status_ids.insert((*target).to_owned());
+                        continue;
+                    }
+                    Some("DIRECTED") => {}
+                    _ => continue,
                 }
                 for link in transition.get("links").and_then(Value::as_array)
                     .into_iter().flatten()
@@ -1164,7 +1214,9 @@ fn parse_workflow_graphs(response: &Value) -> Vec<WorkflowGraph> {
                     }
                 }
             }
-            Some(WorkflowGraph { status_ids: ids, edges, issue_types: HashSet::new() })
+            Some(WorkflowGraph {
+                status_ids: ids, edges, initial_status_ids, issue_types: HashSet::new(),
+            })
         }).collect()
 }
 
@@ -1677,6 +1729,44 @@ mod tests {
         assert_eq!(distances.get("4"), Some(&0));
         assert_eq!(distances.get("3"), Some(&1));
         assert_eq!(distances.get("2"), Some(&2));
+        assert_eq!(distances.get("1"), Some(&3));
+    }
+
+    #[test]
+    fn global_only_close_uses_last_reachable_normal_status_as_frontier() {
+        let response = json!({
+            "statuses":[
+                {"id":"1","statusReference":"open"},
+                {"id":"2","statusReference":"ready"},
+                {"id":"3","statusReference":"progress"},
+                {"id":"4","statusReference":"review"},
+                {"id":"5","statusReference":"done"}
+            ],
+            "values":[{"statuses":[
+                {"statusReference":"open"},{"statusReference":"ready"},
+                {"statusReference":"progress"},{"statusReference":"review"},
+                {"statusReference":"done"}
+            ],"transitions":[
+                {"type":"INITIAL","toStatusReference":"open"},
+                {"type":"DIRECTED","toStatusReference":"ready",
+                  "links":[{"fromStatusReference":"open"}]},
+                {"type":"DIRECTED","toStatusReference":"open",
+                  "links":[{"fromStatusReference":"ready"}]},
+                {"type":"DIRECTED","toStatusReference":"progress",
+                  "links":[{"fromStatusReference":"ready"}]},
+                {"type":"DIRECTED","toStatusReference":"review",
+                  "links":[{"fromStatusReference":"progress"}]},
+                {"type":"GLOBAL","toStatusReference":"done"}
+            ]}]
+        });
+        let graph = &parse_workflow_graphs(&response)[0];
+        let terminals = HashSet::from(["5".into()]);
+        assert!(!graph.distance_to_terminals(&terminals).contains_key("2"));
+        let frontier = graph.normal_frontier(&terminals);
+        assert_eq!(frontier, HashSet::from(["4".into()]));
+        let distances = graph.distance_to_terminals(&frontier);
+        assert_eq!(distances.get("2"), Some(&2));
+        assert_eq!(distances.get("3"), Some(&1));
         assert_eq!(distances.get("1"), Some(&3));
     }
 
