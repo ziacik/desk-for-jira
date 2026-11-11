@@ -181,7 +181,49 @@ pub fn recommended_base(repository: &Path) -> String {
     "HEAD".to_owned()
 }
 
-pub fn create(request: &CreateWorktree<'_>) -> Result<()> {
+/// Choose an integration branch to verify before deletion. Saved origin
+/// takes priority, then a meaningful upstream, then the repository default.
+/// Git does not persist the original creation branch for arbitrary worktrees.
+pub struct MergeTarget {
+    pub name: String,
+    pub source: &'static str,
+}
+
+pub fn suggested_merge_target(
+    repository: &Path, branch: &str, recorded_origin: Option<&str>,
+) -> Option<MergeTarget> {
+    let choices = available_bases(repository).ok()?;
+    let usable = |candidate: &str| {
+        candidate != "HEAD" && candidate != branch
+            && candidate != format!("refs/heads/{branch}")
+            && choices.iter().any(|name| name == candidate)
+    };
+
+    if let Some(base) = recorded_origin.filter(|base| usable(base)) {
+        return Some(MergeTarget { name: base.to_owned(), source: "Starting point" });
+    }
+    // The upstream of a ticket branch is often origin/<same ticket branch>.
+    // That is NOT an integration target: merely pushing a branch must never
+    // mark its commits as merged.
+    let local_ref = format!("refs/heads/{branch}");
+    if let Ok(upstream) = output(repository, &["for-each-ref",
+        "--format=%(upstream:short)", &local_ref])
+        && !upstream.is_empty()
+        && upstream != branch
+        && !upstream.ends_with(&format!("/{branch}"))
+        && usable(&upstream)
+    {
+        return Some(MergeTarget { name: upstream, source: "Git upstream" });
+    }
+    let fallback = recommended_base(repository);
+    usable(&fallback).then_some(MergeTarget {
+        name: fallback, source: "Repository default",
+    })
+}
+
+/// Returns whether a new branch was created. When an existing branch is
+/// checked out, request.base did not actually create that branch.
+pub fn create(request: &CreateWorktree<'_>) -> Result<bool> {
     if !is_repository(request.repository) { bail!("Not a Git repository"); }
     if !request.destination.is_absolute() { bail!("Worktree destination must be absolute"); }
     if request.destination.exists() { bail!("Worktree directory already exists"); }
@@ -212,7 +254,7 @@ pub fn create(request: &CreateWorktree<'_>) -> Result<()> {
         output(request.repository, &["worktree", "add", "-b", request.branch, "--",
             path, request.base])?;
     }
-    Ok(())
+    Ok(!exists)
 }
 
 pub fn status(worktree: &Path) -> Result<String> {
@@ -403,6 +445,50 @@ mod tests {
         let error = remove_merged_worktree(&root, &primary, "main").unwrap_err();
         assert!(error.to_string().contains("primary checkout"));
         assert!(root.exists());
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn origin_has_priority_over_default_and_same_branch_upstream() {
+        let root = temporary_repo();
+        output(&root, &["branch", "release/2.7"]).unwrap();
+        let target = root.parent().unwrap().join(format!(
+            "{}-release-worktree", root.file_name().unwrap().to_string_lossy()
+        ));
+        assert!(create(&CreateWorktree {
+            repository: &root, destination: &target,
+            branch: "ART-33-work", base: "release/2.7", fetch: false,
+        }).unwrap());
+
+        let choice = suggested_merge_target(&root, "ART-33-work", Some("release/2.7")).unwrap();
+        assert_eq!(choice.name, "release/2.7");
+        assert_eq!(choice.source, "Starting point");
+
+        // A remote tracking ref for the *same* branch must never be treated
+        // as proof that the feature was integrated.
+        output(&root, &["update-ref", "refs/remotes/origin/ART-33-work",
+            &output(&root, &["rev-parse", "ART-33-work"]).unwrap()]).unwrap();
+        output(&root, &["branch", "--set-upstream-to=origin/ART-33-work", "ART-33-work"]).unwrap();
+        let choice = suggested_merge_target(&root, "ART-33-work", None).unwrap();
+        assert_eq!(choice.name, "main");
+        assert_eq!(choice.source, "Repository default");
+
+        output(&root, &["worktree", "remove", "--", target.to_str().unwrap()]).unwrap();
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn existing_branch_checkout_does_not_claim_base_as_origin() {
+        let root = temporary_repo();
+        output(&root, &["branch", "ART-44-existing"]).unwrap();
+        let target = root.parent().unwrap().join(format!(
+            "{}-existing-worktree", root.file_name().unwrap().to_string_lossy()
+        ));
+        assert!(!create(&CreateWorktree {
+            repository: &root, destination: &target,
+            branch: "ART-44-existing", base: "main", fetch: false,
+        }).unwrap());
+        output(&root, &["worktree", "remove", "--", target.to_str().unwrap()]).unwrap();
         fs::remove_dir_all(&root).unwrap();
     }
 
