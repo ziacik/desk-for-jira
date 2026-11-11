@@ -546,6 +546,7 @@ mod tests {
             name: "Start progress".to_owned(),
             to_name: "In Progress".to_owned(),
             to_id: "3".to_owned(),
+            to_category: None,
             fields: vec![],
             edit_fields: vec![],
         };
@@ -554,6 +555,7 @@ mod tests {
             name: "Resolve".to_owned(),
             to_name: "Done".to_owned(),
             to_id: "10001".to_owned(),
+            to_category: None,
             fields: vec![TransitionField {
                 id: "resolution".to_owned(),
                 name: "Resolution".to_owned(),

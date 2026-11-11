@@ -14,6 +14,8 @@ use gtk::glib;
 
 use crate::{git, git_ui, issue_detail, preferences};
 
+type WorktreeContext = (String, String, String, bool);
+
 #[derive(Clone, Debug)]
 struct ExistingWorktree {
     repository: String,
@@ -25,6 +27,7 @@ struct ExistingWorktree {
 #[derive(Clone, Debug)]
 enum Snapshot {
     Unconfigured,
+    Hidden,
     Missing {
         repository: String,
         branch: String,
@@ -38,10 +41,10 @@ enum Snapshot {
     },
 }
 
-fn inspect(site: &str, key: &str, summary: &str) -> Result<Snapshot, String> {
+fn inspect(site: &str, key: &str, summary: &str, show_when_missing: bool) -> Result<Snapshot, String> {
     let settings = preferences::load_git().map_err(|error| error.to_string())?;
     if settings.repositories.is_empty() {
-        return Ok(Snapshot::Unconfigured);
+        return Ok(if show_when_missing { Snapshot::Unconfigured } else { Snapshot::Hidden });
     }
 
     let mut existing = Vec::new();
@@ -73,6 +76,11 @@ fn inspect(site: &str, key: &str, summary: &str) -> Result<Snapshot, String> {
             editor: settings.editor,
             worktrees: existing,
         });
+    }
+    // No worktree: a status policy can hide the whole panel. Do not spend
+    // time resolving branch names or possible creation paths in this case.
+    if !show_when_missing {
+        return Ok(Snapshot::Hidden);
     }
 
     let preferred = settings.preferred_index(site, key);
@@ -117,17 +125,18 @@ fn wipe(container: &gtk::Box) {
 #[derive(Clone)]
 pub struct DevelopmentPanel {
     root: gtk::Box,
+    hidden_menu: gtk::MenuButton,
     state: gtk::Label,
     git_status: gtk::Label,
     body: gtk::Box,
     request: Rc<Cell<u64>>,
-    context: Rc<RefCell<Option<(String, String, String)>>>,
+    context: Rc<RefCell<Option<WorktreeContext>>>,
     window: adw::ApplicationWindow,
     toast: adw::ToastOverlay,
 }
 
 impl DevelopmentPanel {
-    pub fn new(window: &adw::ApplicationWindow, toast: &adw::ToastOverlay) -> Self {
+    pub fn new(window: &adw::ApplicationWindow, toast: &adw::ToastOverlay, hidden_menu: &gtk::MenuButton) -> Self {
         let root = gtk::Box::new(gtk::Orientation::Vertical, 9);
         root.add_css_class("ticket-development");
 
@@ -154,7 +163,7 @@ impl DevelopmentPanel {
         root.append(&body);
 
         let panel = Self {
-            root, state, git_status, body,
+            root, hidden_menu: hidden_menu.clone(), state, git_status, body,
             request: Rc::new(Cell::new(0)),
             context: Rc::new(RefCell::new(None)),
             window: window.clone(),
@@ -163,8 +172,8 @@ impl DevelopmentPanel {
         let panel_for_refresh = panel.clone();
         refresh.connect_clicked(move |_| {
             let context = panel_for_refresh.context.borrow().clone();
-            if let Some((site, key, summary)) = context {
-                panel_for_refresh.refresh(&site, &key, &summary);
+            if let Some((site, key, summary, show)) = context {
+                panel_for_refresh.refresh(&site, &key, &summary, show);
             }
         });
         panel
@@ -174,10 +183,15 @@ impl DevelopmentPanel {
         &self.root
     }
 
-    pub fn refresh(&self, site: &str, key: &str, summary: &str) {
+    pub fn refresh(&self, site: &str, key: &str, summary: &str, show_when_missing: bool) {
         let request = self.request.get().wrapping_add(1);
         self.request.set(request);
-        *self.context.borrow_mut() = Some((site.to_owned(), key.to_owned(), summary.to_owned()));
+        *self.context.borrow_mut() = Some((
+            site.to_owned(), key.to_owned(), summary.to_owned(), show_when_missing
+        ));
+        // Do not flash the full worktree panel while inspecting a completed ticket.
+        self.root.set_visible(show_when_missing);
+        self.hidden_menu.set_visible(!show_when_missing);
         wipe(&self.body);
         self.set_state("Checking…", None);
         self.set_git_status(None);
@@ -191,7 +205,7 @@ impl DevelopmentPanel {
         let worker_summary = summary.clone();
         let (sender, receiver) = mpsc::channel();
         thread::spawn(move || {
-            let result = inspect(&worker_site, &worker_key, &worker_summary);
+            let result = inspect(&worker_site, &worker_key, &worker_summary, show_when_missing);
             let _ = sender.send(result);
         });
 
@@ -304,6 +318,29 @@ impl DevelopmentPanel {
         self.manager_button("Manage worktree…", site, key, summary)
     }
 
+    pub fn refresh_if_policy_changed(&self, show_when_missing: bool) {
+        // Release the RefCell borrow before refresh mutates the context.
+        let current = self.context.borrow().clone();
+        if let Some((site, key, summary, old_policy)) = current
+            && old_policy != show_when_missing
+        {
+            self.refresh(&site, &key, &summary, show_when_missing);
+        }
+    }
+
+    pub fn refresh_current(&self) {
+        let current = self.context.borrow().clone();
+        if let Some((site, key, summary, show)) = current {
+            self.refresh(&site, &key, &summary, show);
+        }
+    }
+
+    pub fn manage_current(&self) {
+        if let Some((site, key, summary, _)) = self.context.borrow().clone() {
+            self.manager(&site, &key, &summary);
+        }
+    }
+
     fn manager(&self, site: &str, key: &str, summary: &str) {
         let dialog = git_ui::show(&self.window, site, key, summary);
         let panel = self.clone();
@@ -316,7 +353,8 @@ impl DevelopmentPanel {
             if panel.context.borrow().as_ref().is_some_and(|context|
                 context.0 == site && context.1 == key
             ) {
-                panel.refresh(&site, &key, &summary);
+                let show = panel.context.borrow().as_ref().is_some_and(|context| context.3);
+                panel.refresh(&site, &key, &summary, show);
             }
             glib::Propagation::Proceed
         });
@@ -354,7 +392,12 @@ impl DevelopmentPanel {
 
     fn paint(&self, site: &str, key: &str, summary: &str, result: Result<Snapshot, String>) {
         wipe(&self.body);
+        let hidden = matches!(&result, Ok(Snapshot::Hidden))
+            || (result.is_err() && self.context.borrow().as_ref().is_some_and(|ctx| !ctx.3));
+        self.root.set_visible(!hidden);
+        self.hidden_menu.set_visible(hidden);
         match result {
+            Ok(Snapshot::Hidden) => {}
             Ok(Snapshot::Unconfigured) => {
                 self.set_state("Not configured", None);
                 self.body.append(&Self::info("No Git repositories configured",
