@@ -316,6 +316,14 @@ impl DevelopmentPanel {
         self.manager_button("Manage worktree…", site, key, summary)
     }
 
+    pub fn refresh_if_policy_changed(&self, show_when_missing: bool) {
+        if let Some((site, key, summary, old_policy)) = self.context.borrow().clone()
+            && old_policy != show_when_missing
+        {
+            self.refresh(&site, &key, &summary, show_when_missing);
+        }
+    }
+
     pub fn refresh_current(&self) {
         if let Some((site, key, summary, show)) = self.context.borrow().clone() {
             self.refresh(&site, &key, &summary, show);
