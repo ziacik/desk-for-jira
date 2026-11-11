@@ -660,6 +660,15 @@ impl Manager {
         {
             let confirm = confirm.clone();
             let manager = self.clone();
+            let repo = repo.clone();
+            let tree = tree.clone();
+            let remove = remove.clone();
+            let target = target.clone();
+            let target_field = target_field.clone();
+            let bases = bases.clone();
+            let change = change.clone();
+            let progress = progress.clone();
+            let manual = manual.clone();
             remove.clone().connect_clicked(move |_| {
                 let selected = (target.selected() as usize).checked_sub(1);
                 let Some(target_branch) = selected.and_then(|index| bases.get(index)).cloned() else {
