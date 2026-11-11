@@ -7,6 +7,7 @@ use crate::jira::{IssueTransition, TransitionField};
 
 pub type TransitionSubmit = Rc<dyn Fn(IssueTransition, Map<String, Value>, Map<String, Value>, Option<Value>) -> bool>;
 pub type FormOpened = Rc<dyn Fn(TransitionForm)>;
+pub type PrimaryChanged = Rc<dyn Fn(Option<String>)>;
 
 #[derive(Clone)]
 pub struct TransitionForm {
@@ -108,12 +109,84 @@ fn clear(container: &gtk::Box) {
     }
 }
 
+/// Infer a primary action only from Jira metadata, never from transition or status labels.
+fn primary_transition_index(
+    transitions: &[IssueTransition],
+    cloud_sorted: bool,
+    override_id: Option<&str>,
+) -> Option<usize> {
+    if let Some(index) = override_id.and_then(|id| transitions.iter().position(|t| t.id == id)) {
+        return Some(index);
+    }
+    if transitions.len() == 1 {
+        return Some(0);
+    }
+
+    // A transition from this specific state is preferable to a global shortcut.
+    let local: Vec<usize> = transitions.iter().enumerate()
+        .filter_map(|(index, transition)| (transition.is_global == Some(false)).then_some(index))
+        .collect();
+    let candidates: Vec<usize> = if !local.is_empty() {
+        local
+    } else {
+        transitions.iter().enumerate()
+            .filter_map(|(index, transition)| (transition.is_global != Some(true)).then_some(index))
+            .collect()
+    };
+    if candidates.len() == 1 {
+        return candidates.first().copied();
+    }
+    if candidates.is_empty() {
+        return None;
+    }
+
+    // Data Center exposes explicit numeric priority. A tie does not identify a primary.
+    let min_sequence = candidates.iter()
+        .filter_map(|&i| transitions[i].opsbar_sequence).min();
+    if let Some(sequence) = min_sequence {
+        let best: Vec<_> = candidates.iter().copied()
+            .filter(|&i| transitions[i].opsbar_sequence == Some(sequence)).collect();
+        return (best.len() == 1).then_some(best[0]);
+    }
+
+    // Cloud's sortByOpsBarAndStatus=true is the only available priority ranking.
+    // If the server did not give an ordering, don't invent one.
+    cloud_sorted.then_some(candidates[0])
+}
+
+fn action_button(
+    parent: &adw::ApplicationWindow,
+    issue_key: &str,
+    cloud: bool,
+    transition: IssueTransition,
+    submit: &TransitionSubmit,
+    on_open: &FormOpened,
+) -> gtk::Button {
+    let button = gtk::Button::with_label(&transition.name);
+    button.add_css_class("transition-action");
+    button.set_tooltip_text(Some(&format!("Move to {}", transition.to_name)));
+    let parent = parent.downgrade();
+    let key = issue_key.to_owned();
+    let submit = submit.clone();
+    let on_open = on_open.clone();
+    button.connect_clicked(move |_| {
+        if let Some(parent) = parent.upgrade() {
+            activate_transition(
+                &parent, &key, cloud, transition.clone(), submit.clone(), on_open.clone(),
+            );
+        }
+    });
+    button
+}
+
 pub fn render_actions(
     container: &gtk::Box,
     parent: &adw::ApplicationWindow,
     issue_key: &str,
     cloud: bool,
     transitions: Vec<IssueTransition>,
+    preferred_id: Option<String>,
+    on_primary_changed: Option<PrimaryChanged>,
     submit: TransitionSubmit,
     on_open: FormOpened,
 ) {
@@ -128,30 +201,83 @@ pub fn render_actions(
         return;
     }
 
-    let actions = gtk::FlowBox::new();
-    actions.set_selection_mode(gtk::SelectionMode::None);
-    actions.set_max_children_per_line(3);
-    actions.set_column_spacing(7);
-    actions.set_row_spacing(7);
-    actions.set_halign(gtk::Align::Start);
-    for transition in transitions {
-        let button = gtk::Button::with_label(&transition.name);
-        button.add_css_class("transition-action");
-        button.set_tooltip_text(Some(&format!("Move to {}", transition.to_name)));
-        let parent = parent.downgrade();
-        let key = issue_key.to_owned();
-        let submit = submit.clone();
-        let on_open = on_open.clone();
-        button.connect_clicked(move |_| {
-            if let Some(parent) = parent.upgrade() {
-                activate_transition(
-                    &parent, &key, cloud, transition.clone(), submit.clone(), on_open.clone(),
-                );
-            }
-        });
-        actions.insert(&button, -1);
+    let primary = primary_transition_index(&transitions, cloud, preferred_id.as_deref());
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    row.set_halign(gtk::Align::Start);
+    row.add_css_class("workflow-actions-row");
+    if let Some(index) = primary {
+        let button = action_button(
+            parent, issue_key, cloud, transitions[index].clone(), &submit, &on_open,
+        );
+        button.add_css_class("transition-primary");
+        row.append(&button);
     }
-    container.append(&actions);
+
+    if transitions.len() > 1 {
+        let popover = gtk::Popover::new();
+        let list = gtk::Box::new(gtk::Orientation::Vertical, 3);
+        list.add_css_class("workflow-actions-menu");
+        list.set_margin_top(7);
+        list.set_margin_bottom(7);
+        list.set_margin_start(7);
+        list.set_margin_end(7);
+        for (index, transition) in transitions.iter().enumerate() {
+            if Some(index) == primary {
+                continue;
+            }
+            let item = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+            let button = action_button(
+                parent, issue_key, cloud, transition.clone(), &submit, &on_open,
+            );
+            button.add_css_class("flat");
+            button.add_css_class("transition-secondary");
+            button.set_hexpand(true);
+            let popover_for_action = popover.clone();
+            button.connect_clicked(move |_| popover_for_action.popdown());
+            item.append(&button);
+
+            if let Some(change) = &on_primary_changed {
+                let choose = gtk::Button::from_icon_name("starred-symbolic");
+                choose.add_css_class("flat");
+                choose.add_css_class("transition-prefer");
+                choose.set_tooltip_text(Some("Make primary action for this workflow status"));
+                let id = transition.id.clone();
+                let change = change.clone();
+                let popover_for_change = popover.clone();
+                choose.connect_clicked(move |_| {
+                    popover_for_change.popdown();
+                    change(Some(id.clone()));
+                });
+                item.append(&choose);
+            }
+            list.append(&item);
+        }
+        if preferred_id.is_some() && let Some(change) = &on_primary_changed {
+            let reset = gtk::Button::with_label("Use Jira's default priority");
+            reset.add_css_class("flat");
+            reset.add_css_class("transition-reset");
+            let change = change.clone();
+            let popover_for_reset = popover.clone();
+            reset.connect_clicked(move |_| {
+                popover_for_reset.popdown();
+                change(None);
+            });
+            list.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
+            list.append(&reset);
+        }
+        popover.set_child(Some(&list));
+        let more = gtk::MenuButton::new();
+        more.add_css_class("workflow-actions-more");
+        if primary.is_some() {
+            more.set_icon_name("pan-down-symbolic");
+            more.set_tooltip_text(Some("Other workflow actions"));
+        } else {
+            more.set_label("Workflow actions");
+        }
+        more.set_popover(Some(&popover));
+        row.append(&more);
+    }
+    container.append(&row);
 }
 
 /// Execute a workflow action from either the inspector or the command palette.
@@ -538,7 +664,8 @@ mod tests {
         };
         let transition = IssueTransition {
             id: "31".into(), name: "Done".into(), to_name: "Done".into(),
-            to_id: "3".into(), to_category: None, fields: vec![], edit_fields: vec![],
+            to_id: "3".into(), to_category: None, is_global: None,
+            opsbar_sequence: None, fields: vec![], edit_fields: vec![],
         };
         assert!(!transition_needs_form(&transition));
         let optional = TransitionField { required: false, ..required.clone() };
@@ -546,6 +673,43 @@ mod tests {
         assert!(!transition_needs_form(&with_optional));
         let with_required = IssueTransition { fields: vec![required], ..transition };
         assert!(transition_needs_form(&with_required));
+    }
+
+    fn t(id: &str, is_global: Option<bool>, priority: Option<i64>) -> IssueTransition {
+        IssueTransition {
+            id: id.into(), name: format!("Localized {id}"), to_name: format!("State {id}"),
+            to_id: id.into(), to_category: None, is_global,
+            opsbar_sequence: priority, fields: vec![], edit_fields: vec![],
+        }
+    }
+
+    #[test]
+    fn jira_local_transition_wins_over_global_actions() {
+        let actions = vec![
+            t("close", Some(true), Some(1)),
+            t("rework", Some(true), Some(2)),
+            t("testing", Some(false), Some(3)),
+        ];
+        assert_eq!(primary_transition_index(&actions, true, None), Some(2));
+    }
+
+    #[test]
+    fn jira_data_center_uses_unique_opsbar_sequence() {
+        let actions = vec![t("x", None, Some(20)), t("y", None, Some(10))];
+        assert_eq!(primary_transition_index(&actions, false, None), Some(1));
+        let tied = vec![t("x", None, Some(10)), t("y", None, Some(10))];
+        assert_eq!(primary_transition_index(&tied, false, None), None);
+    }
+
+    #[test]
+    fn cloud_uses_server_order_only_without_a_more_specific_signal() {
+        let actions = vec![t("x", None, None), t("y", None, None)];
+        assert_eq!(primary_transition_index(&actions, true, None), Some(0));
+        assert_eq!(primary_transition_index(&actions, false, None), None);
+        assert_eq!(primary_transition_index(&actions, false, Some("y")), Some(1));
+        assert_eq!(primary_transition_index(&actions, true, Some("missing")), Some(0));
+        let globals = vec![t("x", Some(true), None), t("y", Some(true), None)];
+        assert_eq!(primary_transition_index(&globals, true, None), None);
     }
 
     #[test]
