@@ -622,6 +622,12 @@ impl Manager {
         let remove = gtk::Button::with_label("Remove worktree and branch");
         remove.add_css_class("destructive-action");
         remove.set_sensitive(selected != 0);
+        {
+            let remove = remove.clone();
+            target.connect_selected_notify(move |dropdown| {
+                remove.set_sensitive(dropdown.selected() > 0);
+            });
+        }
         footer.append(&cancel);
         footer.append(&remove);
         content.append(&footer);
@@ -648,11 +654,12 @@ impl Manager {
                 progress.set_text("Verifying Git history and worktree status…");
                 progress.set_visible(true);
                 let repo_path = repo.path.clone();
-                let tree = tree.clone();
+                let worktree_path = tree.path.clone();
+                let tree_for_git = tree.clone();
                 let (tx, rx) = mpsc::channel();
                 thread::spawn(move || {
                     let result = git::remove_merged_worktree(Path::new(&repo_path),
-                        &tree, &target_branch).map_err(|e| e.to_string());
+                        &tree_for_git, &target_branch).map_err(|e| e.to_string());
                     let _ = tx.send(result);
                 });
                 let manager = manager.clone();
@@ -660,6 +667,8 @@ impl Manager {
                 let remove = remove.clone();
                 let target = target.clone();
                 let progress = progress.clone();
+                let target_field = target_field.clone();
+                let change = change.clone();
                 poll(rx, move |result| {
                     match result {
                         Ok(()) => {
@@ -667,7 +676,7 @@ impl Manager {
                             // Stale origin records must not leak into a later
                             // checkout reusing the same path.
                             if let Ok(mut settings) = preferences::load_git() {
-                                settings.forget_worktree_origin(&tree.path.to_string_lossy());
+                                settings.forget_worktree_origin(&worktree_path.to_string_lossy());
                                 if let Err(error) = preferences::save_git(&settings) {
                                     eprintln!("Could not clean up worktree origin: {error}");
                                 }
