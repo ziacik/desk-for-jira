@@ -710,3 +710,29 @@ pub fn show(
     manager.refresh();
     window.present();
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn distinct_workflow_states_get_distinct_tones() {
+        let first = HashMap::from([
+            ("AFB-34".to_owned(), "Ready for Dev".to_owned()),
+            ("ART-2".to_owned(), "In Progress".to_owned()),
+            ("ART-3".to_owned(), "Ready for Dev".to_owned()),
+            ("ART-4".to_owned(), "Closed".to_owned()),
+        ]);
+        let reordered = HashMap::from([
+            ("ART-4".to_owned(), "Closed".to_owned()),
+            ("ART-3".to_owned(), "Ready for Dev".to_owned()),
+            ("ART-2".to_owned(), "In Progress".to_owned()),
+            ("AFB-34".to_owned(), "Ready for Dev".to_owned()),
+        ]);
+        let colors = ticket_status_colors(&first);
+        assert_eq!(colors.len(), 3);
+        assert_eq!(colors, ticket_status_colors(&reordered));
+        assert_ne!(colors["Ready for Dev"], colors["In Progress"]);
+        assert_ne!(colors["Closed"], colors["Ready for Dev"]);
+    }
+}
