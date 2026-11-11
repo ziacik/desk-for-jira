@@ -41,6 +41,36 @@ impl WorktreeVisibility {
     }
 }
 
+/// User-chosen workflow action, scoped to project, status ID and issue type.
+/// The IDs, not status/transition names, are used to resolve Jira transitions.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct PrimaryTransitions(pub HashMap<String, HashMap<String, HashMap<String, String>>>);
+
+impl PrimaryTransitions {
+    pub fn get(&self, project: &str, status_id: &str, issue_type: &str) -> Option<&str> {
+        self.0.get(project)?.get(status_id)?.get(issue_type).map(String::as_str)
+    }
+
+    pub fn set(&mut self, project: &str, status_id: &str, issue_type: &str, id: Option<&str>) {
+        if let Some(id) = id {
+            self.0.entry(project.to_owned()).or_default()
+                .entry(status_id.to_owned()).or_default()
+                .insert(issue_type.to_owned(), id.to_owned());
+        } else if let Some(statuses) = self.0.get_mut(project) {
+            if let Some(types) = statuses.get_mut(status_id) {
+                types.remove(issue_type);
+                if types.is_empty() {
+                    statuses.remove(status_id);
+                }
+            }
+            if statuses.is_empty() {
+                self.0.remove(project);
+            }
+        }
+    }
+}
+
 impl ProjectStatus {
     pub fn reference(&self) -> StatusRef {
         StatusRef { project_key: self.project_key.clone(), status_id: self.id.clone() }
@@ -386,6 +416,8 @@ struct Preferences {
     #[serde(default)]
     worktree_visibility_by_site: HashMap<String, WorktreeVisibility>,
     #[serde(default)]
+    primary_transitions_by_site: HashMap<String, PrimaryTransitions>,
+    #[serde(default)]
     ui_layout: UiLayout,
     #[serde(default)]
     git: GitSettings,
@@ -449,6 +481,18 @@ pub fn save_worktree_visibility(base_url: &str, visibility: &WorktreeVisibility)
     write_preferences(&path, &prefs)
 }
 
+pub fn load_primary_transitions(base_url: &str) -> Result<PrimaryTransitions> {
+    Ok(read_preferences(&preferences_path()?)?
+        .primary_transitions_by_site.get(base_url).cloned().unwrap_or_default())
+}
+
+pub fn save_primary_transitions(base_url: &str, transitions: &PrimaryTransitions) -> Result<()> {
+    let path = preferences_path()?;
+    let mut prefs = read_preferences(&path)?;
+    prefs.primary_transitions_by_site.insert(base_url.to_owned(), transitions.clone());
+    write_preferences(&path, &prefs)
+}
+
 pub fn load_layout() -> Result<UiLayout> {
     Ok(read_preferences(&preferences_path()?)?.ui_layout.sanitized())
 }
@@ -473,6 +517,22 @@ pub fn save_git(settings: &GitSettings) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn primary_transition_overrides_are_scoped_and_removable() {
+        let mut rules = PrimaryTransitions::default();
+        rules.set("ART", "101", "Bug", Some("31"));
+        assert_eq!(rules.get("ART", "101", "Bug"), Some("31"));
+        assert_eq!(rules.get("ART", "101", "Task"), None);
+        assert_eq!(rules.get("ART", "102", "Bug"), None);
+        assert_eq!(rules.get("AFB", "101", "Bug"), None);
+        let restored: PrimaryTransitions =
+            serde_json::from_str(&serde_json::to_string(&rules).unwrap()).unwrap();
+        assert_eq!(rules, restored);
+        rules.set("ART", "101", "Bug", None);
+        assert_eq!(rules.get("ART", "101", "Bug"), None);
+        assert!(rules.0.is_empty());
+    }
 
     #[test]
     fn worktree_visibility_defaults_to_hidden_only_for_done() {
