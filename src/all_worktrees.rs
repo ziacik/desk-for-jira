@@ -172,6 +172,35 @@ struct Section {
     rows: Vec<(gtk::Box, String)>,
 }
 
+struct TicketButton {
+    button: gtk::Button,
+    status: gtk::Label,
+}
+
+/// Give distinct Jira workflow status names distinct, calm colors within the
+/// current list. No guesses based on English status names or Jira project keys.
+fn ticket_status_colors(statuses: &HashMap<String, String>) -> HashMap<String, usize> {
+    let mut names: Vec<String> = statuses.values().cloned().collect();
+    names.sort();
+    names.dedup();
+    names.into_iter().enumerate().map(|(index, name)| (name, index % 8)).collect()
+}
+
+fn render_ticket_status(
+    button: &TicketButton, key: &str, state: &str, color: Option<usize>,
+    tooltip: &str,
+) {
+    for index in 0..8 {
+        button.button.remove_css_class(&format!("worktree-global-ticket-tone-{index}"));
+    }
+    if let Some(color) = color {
+        button.button.add_css_class(&format!("worktree-global-ticket-tone-{color}"));
+    }
+    button.status.set_text(state);
+    button.button.set_tooltip_text(Some(&format!("Open {key} in Desk for Jira — {tooltip}")));
+}
+
+
 struct Manager {
     window: gtk::Window,
     content: gtk::Box,
@@ -183,7 +212,7 @@ struct Manager {
     toast: adw::ToastOverlay,
     open_issue: Rc<dyn Fn(String)>,
     account: Option<Credentials>,
-    ticket_badges: RefCell<HashMap<String, Vec<gtk::Label>>>,
+    ticket_badges: RefCell<HashMap<String, Vec<TicketButton>>>,
     ticket_request: Cell<u64>,
 }
 
@@ -221,10 +250,10 @@ impl Manager {
         let keys: Vec<String> = self.ticket_badges.borrow().keys().cloned().collect();
         if keys.is_empty() { return; }
         let Some(account) = self.account.clone() else {
-            for badges in self.ticket_badges.borrow().values() {
+            for (key, badges) in self.ticket_badges.borrow().iter() {
                 for badge in badges {
-                    badge.set_text("Jira: Disconnected");
-                    badge.set_tooltip_text(Some("Connect to Jira to see ticket status"));
+                    render_ticket_status(badge, key, "Disconnected", None,
+                        "Connect to Jira to see the current ticket status");
                 }
             }
             return;
@@ -240,20 +269,21 @@ impl Manager {
         let manager = self.clone();
         poll(rx, move |result| {
             if manager.ticket_request.get() != generation { return; }
+            let colors = result.as_ref().map(ticket_status_colors).unwrap_or_default();
             let badges = manager.ticket_badges.borrow();
-            for (key, labels) in badges.iter() {
-                let (display, tooltip) = match &result {
+            for (key, widgets) in badges.iter() {
+                let (state, color, tooltip) = match &result {
                     Ok(statuses) => match statuses.get(key) {
-                        Some(status) => (format!("Jira: {status}"), format!("{key} · {status}")),
-                        None => ("Jira: Unavailable".to_owned(),
+                        Some(status) => (status.as_str(), colors.get(status).copied(),
+                            format!("Jira status: {status}")),
+                        None => ("Unavailable", None,
                             format!("{key} not found or not accessible in Jira")),
                     },
-                    Err(error) => ("Jira: Unavailable".to_owned(),
+                    Err(error) => ("Unavailable", None,
                         format!("Unable to read {key}: {error}")),
                 };
-                for label in labels {
-                    label.set_text(&display);
-                    label.set_tooltip_text(Some(&tooltip));
+                for widget in widgets {
+                    render_ticket_status(widget, key, state, color, &tooltip);
                 }
             }
         });
@@ -384,27 +414,30 @@ impl Manager {
         // The link is inferred from the same Jira-key prefix convention as
         // the issue detail. There is no extra persisted mapping.
         if let Some(key) = snapshot.tree.branch.as_deref().and_then(git::ticket_key_from_branch) {
-            let key_for_status = key.clone();
-            let ticket = gtk::Button::with_label(&key);
-            ticket.add_css_class("flat");
+            let ticket = gtk::Button::new();
             ticket.add_css_class("worktree-global-ticket-link");
             ticket.set_tooltip_text(Some(&format!("Open {key} in Desk for Jira")));
+            let content = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+            let key_label = label(&key, "worktree-global-ticket-key");
+            content.append(&key_label);
+            content.append(&label("·", "worktree-global-ticket-divider"));
+            let jira_status = label("Loading…", "worktree-global-ticket-state");
+            jira_status.set_max_width_chars(25);
+            jira_status.set_ellipsize(gtk::pango::EllipsizeMode::End);
+            content.append(&jira_status);
+            ticket.set_child(Some(&content));
             let open_issue = self.open_issue.clone();
             let window = self.window.downgrade();
+            let ticket_key = key.clone();
             ticket.connect_clicked(move |_| {
                 if let Some(window) = window.upgrade() {
                     window.close();
                 }
-                open_issue(key.clone());
+                open_issue(ticket_key.clone());
             });
             top.append(&ticket);
-            let jira_status = label("Jira: Loading…", "worktree-global-ticket-status");
-            jira_status.set_max_width_chars(26);
-            jira_status.set_ellipsize(gtk::pango::EllipsizeMode::End);
-            jira_status.set_tooltip_text(Some("Loading current workflow state from Jira"));
-            top.append(&jira_status);
-            self.ticket_badges.borrow_mut().entry(key_for_status)
-                .or_default().push(jira_status);
+            self.ticket_badges.borrow_mut().entry(key)
+                .or_default().push(TicketButton { button: ticket, status: jira_status });
         }
         let status = if !snapshot.tree.path.exists() {
             "Missing"
