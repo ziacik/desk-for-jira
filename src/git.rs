@@ -306,12 +306,49 @@ pub fn is_primary_worktree(repository: &Path, tree: &Worktree) -> Result<bool> {
     Ok(primary.path == tree.path)
 }
 
-/// Removes a linked worktree and its local branch only when its tip is known
-/// to be merged into an explicitly selected integration ref. No forced
-/// removal of dirty or locked worktrees; no deletion of remote branches.
-pub fn remove_merged_worktree(repository: &Path, tree: &Worktree, target: &str) -> Result<()> {
+/// An ancestry check cannot establish squash/rebase PR completion. The UI
+/// may offer a separate, explicitly confirmed local-only deletion on this
+/// error, but must never silently interpret it as a successful merge.
+pub const MERGE_NOT_CONFIRMED: &str = "Git cannot confirm merge:";
+
+/// Returns the remote branch corresponding to a locally selected target.
+/// A named remote target takes precedence over the generic "origin" fallback.
+fn remote_merge_target(repository: &Path, target: &str) -> Result<Option<(String, String)>> {
+    let mut remotes: Vec<&str> = output(repository, &["remote"])?
+        .lines().collect::<Vec<_>>();
+    remotes.sort();
+    if remotes.is_empty() { return Ok(None); }
+    if let Some(target) = target.strip_prefix("refs/remotes/") {
+        if let Some((remote, name)) = remotes.iter().find_map(|remote| {
+            target.strip_prefix(&format!("{remote}/")).map(|name| (*remote, name))
+        }) {
+            return Ok(Some((remote.to_owned(), name.to_owned())));
+        }
+    }
+    for remote in &remotes {
+        if let Some(name) = target.strip_prefix(&format!("{remote}/")) {
+            return Ok(Some(((*remote).to_owned(), name.to_owned())));
+        }
+    }
+    let local_target = target.strip_prefix("refs/heads/").unwrap_or(target);
+    if let Ok(upstream) = output(repository, &["for-each-ref", "--format=%(upstream:short)",
+        &format!("refs/heads/{local_target}")])
+    {
+        for remote in &remotes {
+            if let Some(name) = upstream.strip_prefix(&format!("{remote}/")) {
+                if !name.is_empty() {
+                    return Ok(Some(((*remote).to_owned(), name.to_owned())));
+                }
+            }
+        }
+    }
+    let remote = remotes.iter().find(|remote| **remote == "origin")
+        .or_else(|| (remotes.len() == 1).then_some(&remotes[0]));
+    Ok(remote.map(|remote| ((*remote).to_owned(), local_target.to_owned())))
+}
+
+fn validate_removal(repository: &Path, tree: &Worktree) -> Result<String> {
     if !is_repository(repository) { bail!("Repository is missing"); }
-    if target.trim().is_empty() { bail!("Select the branch it was merged into"); }
     let branch = tree.branch.as_deref().context("Detached worktree cannot be removed here")?;
     if is_primary_worktree(repository, tree)? {
         bail!("The primary checkout cannot be removed");
@@ -320,24 +357,68 @@ pub fn remove_merged_worktree(repository: &Path, tree: &Worktree, target: &str) 
     if !registered.iter().any(|t| t.path == tree.path && t.branch == tree.branch) {
         bail!("Worktree is no longer registered in this repository");
     }
-    if target == branch || target == format!("refs/heads/{branch}") {
-        bail!("The merge target cannot be the worktree branch itself");
-    }
     if !tree.path.exists() { bail!("Worktree path is missing"); }
     if !status(&tree.path)?.is_empty() { bail!("Worktree has uncommitted changes"); }
-    let target_exists = command(repository,
-        &["rev-parse", "--verify", "--quiet", &format!("{}^{{commit}}", target)])?
-        .status.success();
-    if !target_exists { bail!("Merge target is unavailable: {target}"); }
-    let result = command(repository, &["merge-base", "--is-ancestor", branch, target])?;
-    if !result.status.success() {
-        bail!("Branch is not provably merged into {target}. Squash/rebase merges need manual review.");
-    }
+    Ok(branch.to_owned())
+}
+
+fn remove_validated_worktree(repository: &Path, tree: &Worktree, branch: &str) -> Result<()> {
     let path = tree.path.to_str().context("Worktree path is not valid UTF-8")?;
     output(repository, &["worktree", "remove", "--", path])?;
-    // -d checks upstream rather than our explicitly verified integration ref.
+    // The branch was checked as clean and safe for local deletion. Do not
+    // delete any remote branches or force-remove dirty or locked worktrees.
     output(repository, &["branch", "-D", "--", branch])?;
     Ok(())
+}
+
+/// Removes only after proving commit ancestry into the selected target.
+/// A stale local release branch is checked against freshly fetched
+/// remote-tracking state before returning an unconfirmed-merge error.
+pub fn remove_merged_worktree(repository: &Path, tree: &Worktree, target: &str) -> Result<()> {
+    if target.trim().is_empty() { bail!("Select the branch it was merged into"); }
+    let branch = validate_removal(repository, tree)?;
+    if target == branch || target == format!("refs/heads/{branch}")
+        || target.ends_with(&format!("/{branch}"))
+    {
+        bail!("The merge target cannot be the worktree branch itself");
+    }
+
+    if merge_status(repository, &branch, target)? == MergeStatus::Merged {
+        return remove_validated_worktree(repository, tree, &branch);
+    }
+
+    let mut checked = target.to_owned();
+    let mut refresh_error = None;
+    if let Some((remote, remote_branch)) = remote_merge_target(repository, target)? {
+        let remote_ref = format!("{remote}/{remote_branch}");
+        // An explicit deletion request can update remote-tracking refs; never
+        // switch or modify the user's current checkout.
+        let destination = format!(
+            "+refs/heads/{remote_branch}:refs/remotes/{remote}/{remote_branch}"
+        );
+        match output(repository, &["fetch", "--no-tags", "--quiet", &remote, &destination]) {
+            Ok(_) => {
+                checked = remote_ref;
+                if merge_status(repository, &branch, &checked)? == MergeStatus::Merged {
+                    return remove_validated_worktree(repository, tree, &branch);
+                }
+            }
+            Err(error) => refresh_error = Some(error.to_string()),
+        }
+    }
+
+    if let Some(error) = refresh_error {
+        bail!("{MERGE_NOT_CONFIRMED} branch {branch} into {target}. Could not refresh remote target: {error}. A completed squash/rebase PR requires manual confirmation.");
+    }
+    bail!("{MERGE_NOT_CONFIRMED} branch {branch} into {checked}, even after refreshing remote Git history. A completed squash/rebase PR requires manual confirmation.");
+}
+
+/// Only the dedicated UI's SECOND explicit destructive confirmation may call
+/// this. It does not claim Git merge ancestry or PR completion. All worktree
+/// cleanliness, registration and primary-checkout safeguards still apply.
+pub fn remove_manually_confirmed_worktree(repository: &Path, tree: &Worktree) -> Result<()> {
+    let branch = validate_removal(repository, tree)?;
+    remove_validated_worktree(repository, tree, &branch)
 }
 
 /// Ticket-specific wrapper preserves the issue-key protection in ticket UI.
@@ -504,6 +585,60 @@ mod tests {
         remove_merged(&root, &tree, "main", "ART-2272").unwrap();
         assert!(!target.exists());
         assert!(matching_branches(&root, "ART-2272").unwrap().is_empty());
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn refreshes_stale_local_release_tracking_before_removing_merged_worktree() {
+        let root = temporary_repo();
+        let remote = root.parent().unwrap().join(format!(
+            "{}-remote.git", root.file_name().unwrap().to_string_lossy()));
+        output(&root, &["init", "--bare", "--initial-branch=main",
+            "--", remote.to_str().unwrap()]).unwrap();
+        output(&root, &["remote", "add", "origin", remote.to_str().unwrap()]).unwrap();
+        output(&root, &["branch", "release/19.2"]).unwrap();
+        output(&root, &["push", "origin", "release/19.2"]).unwrap();
+        let path = root.parent().unwrap().join(format!(
+            "{}-linked-release", root.file_name().unwrap().to_string_lossy()));
+        create(&CreateWorktree {
+            repository: &root, destination: &path,
+            branch: "ART-2861-work", base: "release/19.2", fetch: false,
+        }).unwrap();
+        fs::write(path.join("new.txt"), "feature").unwrap();
+        output(&path, &["add", "."]).unwrap();
+        output(&path, &["-c", "user.name=Test", "-c", "user.email=test@example.org",
+            "commit", "-m", "feature"]).unwrap();
+        // Another contributor merges to the remote target, leaving our local
+        // release/19.2 stale. The deletion check must fetch and re-check.
+        output(&root, &["push", "origin", "ART-2861-work:release/19.2"]).unwrap();
+        let tree = matching_worktrees(&root, "ART-2861").unwrap().remove(0);
+        assert_eq!(merge_status(&root, "ART-2861-work", "release/19.2").unwrap(),
+            MergeStatus::NotConfirmed);
+        remove_merged_worktree(&root, &tree, "release/19.2").unwrap();
+        assert!(!path.exists());
+        assert!(matching_branches(&root, "ART-2861").unwrap().is_empty());
+        fs::remove_dir_all(&root).unwrap();
+        fs::remove_dir_all(&remote).unwrap();
+    }
+
+    #[test]
+    fn manual_confirmation_still_refuses_primary_or_dirty_worktrees() {
+        let root = temporary_repo();
+        let primary = worktrees(&root).unwrap().remove(0);
+        assert!(remove_manually_confirmed_worktree(&root, &primary).is_err());
+        let path = root.parent().unwrap().join(format!(
+            "{}-manual-release", root.file_name().unwrap().to_string_lossy()));
+        create(&CreateWorktree {
+            repository: &root, destination: &path,
+            branch: "ART-2861-work", base: "main", fetch: false,
+        }).unwrap();
+        fs::write(path.join("untracked.txt"), "important").unwrap();
+        let tree = matching_worktrees(&root, "ART-2861").unwrap().remove(0);
+        assert!(remove_manually_confirmed_worktree(&root, &tree).is_err());
+        assert!(path.exists());
+        fs::remove_file(path.join("untracked.txt")).unwrap();
+        remove_manually_confirmed_worktree(&root, &tree).unwrap();
+        assert!(!path.exists());
         fs::remove_dir_all(&root).unwrap();
     }
 
