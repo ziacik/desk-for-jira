@@ -1245,3 +1245,75 @@ button.header-worktrees-action {
   padding: 3px 9px;
   font-weight: 600;
 }
+
+
+/* PRs are contextual links, not another card-within-a-card. Keep them
+   separate from local Git worktree controls and the editable issue fields. */
+.ticket-pr-section {
+  padding: 14px 22px 16px;
+  border-bottom: 1px solid alpha(@window_fg_color, 0.095);
+}
+.ticket-pr-icon {
+  color: alpha(@window_fg_color, 0.66);
+  -gtk-icon-size: 16px;
+}
+.ticket-pr-title {
+  color: @window_fg_color;
+  font-weight: 700;
+  font-size: 1em;
+}
+.ticket-pr-count {
+  color: alpha(@window_fg_color, 0.68);
+  font-size: 0.85em;
+}
+.ticket-pr-muted {
+  color: alpha(@window_fg_color, 0.65);
+  font-size: 0.92em;
+}
+.ticket-pr-row {
+  min-height: 30px;
+}
+button.ticket-pr-link {
+  padding: 5px 0;
+  min-width: 0;
+  border-radius: 5px;
+  background: none;
+  box-shadow: none;
+}
+button.ticket-pr-link label {
+  color: @accent_color;
+  font-size: 0.96em;
+  font-weight: 550;
+}
+button.ticket-pr-link:hover label {
+  text-decoration: underline;
+}
+.ticket-pr-status {
+  border-radius: 999px;
+  padding: 3px 8px;
+  font-size: 0.82em;
+  font-weight: 650;
+  color: alpha(@window_fg_color, 0.70);
+  background-color: alpha(@window_fg_color, 0.075);
+}
+.ticket-pr-status.ticket-pr-merged {
+  color: #27805e;
+  background-color: alpha(#2c9b70, 0.12);
+}
+.ticket-pr-status.ticket-pr-open {
+  color: #306fb8;
+  background-color: alpha(#4679eb, 0.12);
+}
+.ticket-pr-status.ticket-pr-closed {
+  color: alpha(@window_fg_color, 0.65);
+  background-color: alpha(@window_fg_color, 0.07);
+}
+button.ticket-pr-refresh {
+  min-width: 30px;
+  min-height: 30px;
+  padding: 4px;
+  border-radius: 8px;
+}
+button.ticket-pr-refresh:hover {
+  background-color: alpha(@window_fg_color, 0.075);
+}
