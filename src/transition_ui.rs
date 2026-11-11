@@ -9,6 +9,13 @@ pub type TransitionSubmit = Rc<dyn Fn(IssueTransition, Map<String, Value>, Map<S
 pub type FormOpened = Rc<dyn Fn(TransitionForm)>;
 pub type PrimaryChanged = Rc<dyn Fn(Option<String>)>;
 
+pub struct ActionOptions {
+    pub preferred_id: Option<String>,
+    pub on_primary_changed: Option<PrimaryChanged>,
+    pub submit: TransitionSubmit,
+    pub on_open: FormOpened,
+}
+
 #[derive(Clone)]
 pub struct TransitionForm {
     pub key: String,
@@ -185,11 +192,9 @@ pub fn render_actions(
     issue_key: &str,
     cloud: bool,
     transitions: Vec<IssueTransition>,
-    preferred_id: Option<String>,
-    on_primary_changed: Option<PrimaryChanged>,
-    submit: TransitionSubmit,
-    on_open: FormOpened,
+    options: ActionOptions,
 ) {
+    let ActionOptions { preferred_id, on_primary_changed, submit, on_open } = options;
     clear(container);
     container.set_visible(true);
 
