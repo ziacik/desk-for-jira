@@ -12,6 +12,7 @@ use gtk::glib;
 
 use crate::{
     development,
+    pull_requests,
     issue_detail,
     command_palette::{self, PaletteCommand, PaletteItem},
     jira::{Attachment, AuthMode, Credentials, Issue, IssueComment, IssueTransition, JiraClient, JiraTransitionError, Project, ProjectStatus},
@@ -56,6 +57,7 @@ struct Ui {
     pinned_count: gtk::Label,
     detail_box: gtk::Box,
     development: development::DevelopmentPanel,
+    pull_requests: pull_requests::PullRequestsPanel,
     comments_box: Rc<RefCell<gtk::Box>>,
     comments_request: Rc<Cell<u64>>,
     children_box: Rc<RefCell<gtk::Box>>,
@@ -717,6 +719,7 @@ fn build_ui(app: &adw::Application) {
     toast.set_child(Some(&workspace_split));
     window.set_content(Some(&toast));
     let development = development::DevelopmentPanel::new(&window, &toast);
+    let pull_requests = pull_requests::PullRequestsPanel::new();
 
     let ui = Ui {
         window, toast, header_title, spinner, status, projects_label, sidebar_projects,
@@ -727,7 +730,7 @@ fn build_ui(app: &adw::Application) {
         pending_direct_issue: Rc::new(RefCell::new(None)),
         search, center_title,
         board_box, pinned_section, pinned_box, pinned_scroll, pinned_count,
-        detail_box, development, comments_box: Rc::new(RefCell::new(gtk::Box::new(gtk::Orientation::Vertical, 10))),
+        detail_box, development, pull_requests, comments_box: Rc::new(RefCell::new(gtk::Box::new(gtk::Orientation::Vertical, 10))),
         comments_request: Rc::new(Cell::new(0)),
         children_box: Rc::new(RefCell::new(gtk::Box::new(gtk::Orientation::Vertical, 9))),
         children_request: Rc::new(Cell::new(0)),
@@ -3440,6 +3443,7 @@ fn open_issue(ui: &Ui, issue: &Issue, source_button: Option<&gtk::Button>) {
         ui.state.borrow().settings.pinned_issues.iter().any(|key| key == &issue.key));
     render_issue_detail(ui, issue, base_url);
     ui.development.refresh(base_url, &issue.key, &issue.summary);
+    ui.pull_requests.refresh(account.clone(), &issue.key);
     if !ui.detail_panel.is_visible() {
         // Restore after GTK has allocated the newly visible pane. Until then,
         // position notifications must not overwrite the saved user preference.
@@ -3477,10 +3481,11 @@ fn render_issue_detail(ui: &Ui, issue: &Issue, base_url: &str) {
     let detail = issue_detail::render(
         &ui.detail_box, issue, base_url, &ui.detail_actions, &on_issue_link,
     );
-    // The Development section is always visible before the ticket properties.
+    // Development and linked PRs stay above the ticket properties.
     // issue_detail::render clears old children, so reinsert the persistent panel.
     if let Some(hero) = ui.detail_box.first_child() {
         ui.detail_box.insert_child_after(ui.development.widget(), Some(&hero));
+        ui.detail_box.insert_child_after(ui.pull_requests.widget(), Some(ui.development.widget()));
     }
     *ui.image_slots.borrow_mut() = detail.images;
     *ui.comments_box.borrow_mut() = detail.comments;
