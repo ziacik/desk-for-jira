@@ -1600,6 +1600,17 @@ fn display_board(ui: &Ui, state: &Rc<RefCell<State>>, data: BoardData) {
     ui.manage_columns_button.set_sensitive(has_statuses);
     ui.manage_worktree_visibility_button.set_sensitive(has_statuses);
     render_board(ui, &state.borrow());
+    // A direct-opened issue may precede loading the selected project's status
+    // metadata. Recheck policy without rescanning Git on every filter change.
+    let selected = ui.selected_issue.borrow().clone();
+    let issue = {
+        let s = state.borrow();
+        selected.as_deref().and_then(|key| s.recent_issues.iter()
+            .find(|issue| issue.key == key).cloned())
+    };
+    if let Some(issue) = issue {
+        ui.development.refresh_if_policy_changed(should_show_worktree_panel(ui, &issue));
+    }
     if let Some(error) = pinned_error {
         show_error(ui, &format!("Could not load pinned issues: {error}"));
     }
@@ -2131,10 +2142,10 @@ fn show_worktree_visibility_editor(ui: &Ui, state: &Rc<RefCell<State>>) {
                     (state.account.as_ref().map(|account| account.base_url.clone()),
                         state.worktree_visibility.clone())
                 };
-                if let Some(site) = site {
-                    if let Err(error) = preferences::save_worktree_visibility(&site, &rules) {
-                        show_error(&ui, &format!("Could not save worktree visibility: {error}"));
-                    }
+                if let Some(site) = site
+                    && let Err(error) = preferences::save_worktree_visibility(&site, &rules)
+                {
+                    show_error(&ui, &format!("Could not save worktree visibility: {error}"));
                 }
                 refresh_current_worktree(&ui);
             });
