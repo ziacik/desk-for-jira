@@ -559,7 +559,7 @@ mod tests {
     fn status(project: &str, id: &str, name: &str) -> ProjectStatus {
         ProjectStatus {
             project_key: project.into(), id: id.into(), name: name.into(),
-            category: None, workflow_order: None,
+            category: None, workflow_order: None, workflows: Vec::new(),
         }
     }
     #[test]
