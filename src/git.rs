@@ -318,12 +318,12 @@ fn remote_merge_target(repository: &Path, target: &str) -> Result<Option<(String
     let mut remotes: Vec<&str> = remote_output.lines().collect();
     remotes.sort();
     if remotes.is_empty() { return Ok(None); }
-    if let Some(target) = target.strip_prefix("refs/remotes/") {
-        if let Some((remote, name)) = remotes.iter().find_map(|remote| {
+    if let Some(target) = target.strip_prefix("refs/remotes/")
+        && let Some((remote, name)) = remotes.iter().find_map(|remote| {
             target.strip_prefix(&format!("{remote}/")).map(|name| (*remote, name))
-        }) {
-            return Ok(Some((remote.to_owned(), name.to_owned())));
-        }
+        })
+    {
+        return Ok(Some((remote.to_owned(), name.to_owned())));
     }
     for remote in &remotes {
         if let Some(name) = target.strip_prefix(&format!("{remote}/")) {
@@ -335,10 +335,10 @@ fn remote_merge_target(repository: &Path, target: &str) -> Result<Option<(String
         &format!("refs/heads/{local_target}")])
     {
         for remote in &remotes {
-            if let Some(name) = upstream.strip_prefix(&format!("{remote}/")) {
-                if !name.is_empty() {
-                    return Ok(Some(((*remote).to_owned(), name.to_owned())));
-                }
+            if let Some(name) = upstream.strip_prefix(&format!("{remote}/"))
+                && !name.is_empty()
+            {
+                return Ok(Some(((*remote).to_owned(), name.to_owned())));
             }
         }
     }
