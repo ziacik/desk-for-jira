@@ -314,8 +314,8 @@ pub const MERGE_NOT_CONFIRMED: &str = "Git cannot confirm merge:";
 /// Returns the remote branch corresponding to a locally selected target.
 /// A named remote target takes precedence over the generic "origin" fallback.
 fn remote_merge_target(repository: &Path, target: &str) -> Result<Option<(String, String)>> {
-    let mut remotes: Vec<&str> = output(repository, &["remote"])?
-        .lines().collect::<Vec<_>>();
+    let remote_output = output(repository, &["remote"])?;
+    let mut remotes: Vec<&str> = remote_output.lines().collect();
     remotes.sort();
     if remotes.is_empty() { return Ok(None); }
     if let Some(target) = target.strip_prefix("refs/remotes/") {
