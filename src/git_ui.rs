@@ -241,6 +241,9 @@ impl View {
                 .and_then(|target| bases.iter().position(|b| b == &target.name))
                 .unwrap_or(0);
             set_choices(&self.cleanup_target, &bases, selected);
+            if suggestion.is_none() {
+                self.cleanup_target.set_selected(u32::MAX);
+            }
             if let Some(target) = suggestion {
                 self.cleanup_summary.set_text(&format!(
                     "Verify merged into: {} ({})", target.name, target.source
@@ -323,6 +326,8 @@ impl View {
             report(&self.info, &error); return;
         }
         let repo_path = repo.path.clone();
+        let origin_branch = branch.clone();
+        let origin_base = base.clone();
         let target = expand_home(&self.root.text()).join(&repo.name).join(&self.key);
         let script = if self.run_setup.is_active() { self.setup.text().to_string() }
             else { String::new() };
@@ -338,18 +343,26 @@ impl View {
                 branch: &branch, base: &base, fetch
             });
             let result = match created {
-                Ok(()) => {
+                Ok(created_branch) => {
                     let setup_result = git::run_setup(&target, &script).map_err(|e| e.to_string());
-                    (Some(target), setup_result)
+                    (Some(target), setup_result, created_branch)
                 }
-                Err(error) => (None, Err(error.to_string())),
+                Err(error) => (None, Err(error.to_string()), false),
             };
             let _ = tx.send(result);
         });
         let view = self.clone();
-        poll(rx, move |(path, result)| {
+        poll(rx, move |(path, result, created_branch)| {
             if let Some(path) = path {
-                view.settings.borrow_mut().record_usage(&view.site, &view.key, &repo_path);
+                {
+                    let mut settings = view.settings.borrow_mut();
+                    settings.record_usage(&view.site, &view.key, &repo_path);
+                    if created_branch && origin_base != "HEAD" {
+                        settings.remember_worktree_origin(
+                            &repo_path, &path.to_string_lossy(), &origin_branch, &origin_base,
+                        );
+                    }
+                }
                 if let Err(error) = preferences::save_git(&view.settings.borrow()) {
                     report(&view.info, &format!("Worktree created; failed to save preference: {error}"));
                 }
@@ -406,7 +419,12 @@ impl View {
     fn confirm_remove(self: &Rc<Self>) {
         let Some(tree) = self.active_tree.borrow().clone() else { return; };
         let Some(repo) = self.selected() else { return; };
-        let Some(base) = selected_text(&self.cleanup_target) else { return; };
+        let Some(base) = selected_text(&self.cleanup_target) else {
+            self.cleanup_choices.set_visible(true);
+            self.cleanup_change.set_label("Hide");
+            report(&self.info, "Choose the branch to verify the merge against.");
+            return;
+        };
         let confirmation = gtk::AlertDialog::builder()
             .message("Remove worktree and branch?")
             .detail(format!(
@@ -438,8 +456,17 @@ impl View {
                 view.remove.set_sensitive(true);
                 match result {
                     Ok(()) => {
+                        view.settings.borrow_mut().forget_worktree_origin(
+                            &tree.path.to_string_lossy(),
+                        );
+                        if let Err(error) = preferences::save_git(&view.settings.borrow()) {
+                            report(&view.info, &format!(
+                                "Worktree removed, but preference cleanup failed: {error}"
+                            ));
+                        } else {
+                            report(&view.info, "Worktree and local branch removed.");
+                        }
                         view.refresh();
-                        report(&view.info, "Worktree and local branch removed.");
                     }
                     Err(error) => report(&view.info, &error),
                 }
