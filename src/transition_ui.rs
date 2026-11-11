@@ -538,7 +538,7 @@ mod tests {
         };
         let transition = IssueTransition {
             id: "31".into(), name: "Done".into(), to_name: "Done".into(),
-            to_id: "3".into(), fields: vec![], edit_fields: vec![],
+            to_id: "3".into(), to_category: None, fields: vec![], edit_fields: vec![],
         };
         assert!(!transition_needs_form(&transition));
         let optional = TransitionField { required: false, ..required.clone() };
