@@ -1148,6 +1148,7 @@ button.worktree-global-ticket-link {
 }
 button.worktree-global-ticket-link:hover {
   background-color: alpha(@window_fg_color, 0.10);
+  box-shadow: inset 0 0 0 1px alpha(@window_fg_color, 0.11);
 }
 .worktree-global-ticket-key {
   color: @window_fg_color;
@@ -1194,10 +1195,6 @@ button.worktree-global-ticket-link.worktree-global-ticket-tone-6 {
 button.worktree-global-ticket-link.worktree-global-ticket-tone-7 {
   background-color: alpha(#b08b59, 0.14);
   border-color: alpha(#b08b59, 0.26);
-}
-button.worktree-global-ticket-link[class*="worktree-global-ticket-tone-"]:hover {
-  /* Keep each assigned hue while increasing contrast on hover. */
-  box-shadow: inset 0 0 0 1px alpha(@window_fg_color, 0.11);
 }
 .worktree-global-status {
   padding: 3px 9px;
