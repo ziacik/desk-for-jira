@@ -316,6 +316,12 @@ impl DevelopmentPanel {
         self.manager_button("Manage worktree…", site, key, summary)
     }
 
+    pub fn refresh_current(&self) {
+        if let Some((site, key, summary, show)) = self.context.borrow().clone() {
+            self.refresh(&site, &key, &summary, show);
+        }
+    }
+
     pub fn manage_current(&self) {
         if let Some((site, key, summary, _)) = self.context.borrow().clone() {
             self.manager(&site, &key, &summary);
