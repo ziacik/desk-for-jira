@@ -376,10 +376,26 @@ pub fn render_actions(
     container.set_visible(true);
 
     if transitions.is_empty() {
+        let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
         let message = gtk::Label::new(Some("No available workflow actions"));
         message.add_css_class("dim-label");
         message.set_xalign(0.0);
-        container.append(&message);
+        row.append(&message);
+        let report = diagnostic_report(
+            issue_key, &transitions, &workflow_note, workflow.as_ref(),
+            (None, "Jira returned no available transitions"),
+        );
+        let diagnostics = gtk::Button::from_icon_name("dialog-information-symbolic");
+        diagnostics.add_css_class("flat");
+        diagnostics.set_tooltip_text(Some("Workflow diagnostics"));
+        let parent_for_window = parent.downgrade();
+        diagnostics.connect_clicked(move |_| {
+            if let Some(parent) = parent_for_window.upgrade() {
+                show_diagnostic_window(&parent, &report);
+            }
+        });
+        row.append(&diagnostics);
+        container.append(&row);
         return;
     }
 
