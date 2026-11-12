@@ -335,8 +335,8 @@ pub struct GitSettings {
     pub scan_roots: Vec<String>,
     pub worktree_root: String,
     pub editor: String,
-    /// Optional skill invoked in the first Fix with Codex prompt.
-    pub codex_startup_skill: String,
+    /// Optional multi-line instructions included only in Fix with Codex runs.
+    pub codex_instructions: String,
     pub fetch_before_create: bool,
     /// site -> Jira project key -> repository path -> number of successful creates.
     pub usage: HashMap<String, HashMap<String, HashMap<String, u64>>>,
@@ -352,7 +352,7 @@ impl Default for GitSettings {
             scan_roots: Vec::new(),
             worktree_root: "~/Worktrees".to_owned(),
             editor: "code".to_owned(),
-            codex_startup_skill: String::new(),
+            codex_instructions: String::new(),
             fetch_before_create: true,
             usage: HashMap::new(),
             worktree_origins: HashMap::new(),
@@ -905,20 +905,20 @@ mod tests {
     }
 
     #[test]
-    fn codex_startup_skill_is_optional_and_persisted() {
+    fn codex_instructions_are_optional_and_persisted() {
         let old: GitSettings = serde_json::from_value(serde_json::json!({
             "editor": "code",
         })).unwrap();
-        assert!(old.codex_startup_skill.is_empty());
+        assert!(old.codex_instructions.is_empty());
 
         let configured = GitSettings {
-            codex_startup_skill: "superpowers:using-superpowers".into(),
+            codex_instructions: "Use $superpowers:using-superpowers.\nFollow clean code rules.".into(),
             ..GitSettings::default()
         };
         let restored: GitSettings = serde_json::from_slice(
             &serde_json::to_vec(&configured).unwrap(),
         ).unwrap();
-        assert_eq!(restored.codex_startup_skill, "superpowers:using-superpowers");
+        assert_eq!(restored.codex_instructions, configured.codex_instructions);
     }
 
     #[test]
