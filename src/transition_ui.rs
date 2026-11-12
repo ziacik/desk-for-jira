@@ -17,8 +17,6 @@ pub struct WorkflowContext {
 
 pub struct ActionOptions {
     pub workflow: Option<WorkflowContext>,
-    /// Explains graph retrieval and issue-type mapping, without account secrets.
-    pub workflow_note: String,
     pub preferred_id: Option<String>,
     pub on_primary_changed: Option<PrimaryChanged>,
     pub submit: TransitionSubmit,
@@ -128,18 +126,16 @@ fn clear(container: &gtk::Box) {
 /// Primary is the directed step that most reduces the distance to a
 /// terminal status, computed by reverse BFS over the *actual* workflow graph.
 /// Status IDs are opaque keys, never numbers for sorting.
-fn primary_transition_decision(
+fn primary_transition_index(
     transitions: &[IssueTransition],
     _cloud_sorted: bool,
     override_id: Option<&str>,
     workflow: Option<&WorkflowContext>,
-) -> (Option<usize>, &'static str) {
+) -> Option<usize> {
     if let Some(index) = override_id.and_then(|id| transitions.iter().position(|t| t.id == id)) {
-        return (Some(index), "Saved user override");
+        return Some(index);
     }
-    let Some(context) = workflow else {
-        return (None, "No matching workflow graph for this issue");
-    };
+    let context = workflow?;
     let done_distances = context.graph.distance_to_terminals(&context.terminal_status_ids);
     let frontier = context.graph.normal_frontier(&context.terminal_status_ids);
     let frontier_distances = context.graph.distance_to_terminals(&frontier);
@@ -160,20 +156,14 @@ fn primary_transition_decision(
                 && (has_forward(&frontier_distances) || distance == 0))
     });
     let distances = if use_frontier { &frontier_distances } else { &done_distances };
-    let Some(current_distance) = distances.get(&context.current_status_id).copied() else {
-        return (None, "Current status cannot reach any terminal or normal workflow frontier");
-    };
+    let current_distance = distances.get(&context.current_status_id).copied()?;
     if use_frontier && current_distance == 0 {
         let finish: Vec<usize> = transitions.iter().enumerate()
             .filter_map(|(index, transition)| (
                 context.terminal_status_ids.contains(&transition.to_id)
             ).then_some(index))
             .collect();
-        return if finish.len() == 1 {
-            (finish.first().copied(), "Sole terminal action at the normal workflow frontier")
-        } else {
-            (None, "At the normal workflow frontier, but terminal action is not unique")
-        };
+        return (finish.len() == 1).then(|| finish[0]);
     }
     let mut local: Vec<usize> = transitions.iter().enumerate()
         .filter_map(|(index, transition)| (
@@ -183,9 +173,6 @@ fn primary_transition_decision(
             && distances.contains_key(&transition.to_id)
         ).then_some(index))
         .collect();
-    if local.is_empty() {
-        return (None, "No available transition matches a directed edge with a path to the goal");
-    }
     let progress: Vec<usize> = local.iter().copied()
         .filter(|&index| {
             let destination = &transitions[index].to_id;
@@ -196,144 +183,15 @@ fn primary_transition_decision(
         local = progress;
     } else {
         if local.iter().any(|&index| !context.terminal_status_ids.contains(&transitions[index].to_id)) {
-            return (None, "No forward nonterminal transition; only backward, sideways or terminal shortcut actions");
+            return None;
         }
         local.retain(|&index| context.terminal_status_ids.contains(&transitions[index].to_id));
     }
-    let Some(nearest) = local.iter()
+    let nearest = local.iter()
         .filter_map(|&index| distances.get(&transitions[index].to_id))
-        .copied().min() else {
-        return (None, "No candidate transition has a known distance to the goal");
-    };
+        .copied().min()?;
     local.retain(|&index| distances.get(&transitions[index].to_id) == Some(&nearest));
-    if local.len() == 1 {
-        return (local.first().copied(), "Unique forward directed transition closest to workflow goal");
-    }
-    (None, "Multiple equally short directed transitions; no automatic preference")
-}
-
-#[cfg(test)]
-fn primary_transition_index(
-    transitions: &[IssueTransition],
-    cloud_sorted: bool,
-    override_id: Option<&str>,
-    workflow: Option<&WorkflowContext>,
-) -> Option<usize> {
-    primary_transition_decision(transitions, cloud_sorted, override_id, workflow).0
-}
-
-/// Snapshot of precisely the same inputs as the selector, not a guessed
-/// explanation reconstructed later. No issue descriptions, token or account URL.
-fn diagnostic_report(
-    issue_key: &str,
-    transitions: &[IssueTransition],
-    workflow_note: &str,
-    workflow: Option<&WorkflowContext>,
-    selection: (Option<usize>, &str),
-) -> String {
-    let mut report = format!(
-        "Desk for Jira — workflow primary diagnostics\nIssue: {issue_key}\n         Selection: {}\nReason: {}\n\n{workflow_note}",
-        selection.0.map_or_else(|| "none".to_owned(), |index| {
-            format!("{} (transition {})", transitions[index].name, transitions[index].id)
-        }),
-        selection.1,
-    );
-    if let Some(context) = workflow {
-        let graph = &context.graph;
-        let mut outgoing: Vec<_> = graph.edges.get(&context.current_status_id)
-            .into_iter().flatten().cloned().collect();
-        outgoing.sort();
-        let mut terminal: Vec<_> = context.terminal_status_ids.iter().cloned().collect();
-        terminal.sort();
-        let done_distances = graph.distance_to_terminals(&context.terminal_status_ids);
-        let frontier = graph.normal_frontier(&context.terminal_status_ids);
-        let frontier_distances = graph.distance_to_terminals(&frontier);
-        let mut frontier_ids: Vec<_> = frontier.iter().cloned().collect();
-        frontier_ids.sort();
-        report.push_str(&format!(
-            "\n\nCurrent workflow graph:\n  Statuses: {}\n  Directed edges: {}\n  Current status in graph: {}\n  Outgoing directed status IDs: {}\n  Done status IDs: {}\n  Normal frontier IDs: {}\n  Current distance to Done: {:?}\n  Current distance to frontier: {:?}",
-            graph.status_ids.len(),
-            graph.edges.values().map(HashSet::len).sum::<usize>(),
-            graph.status_ids.contains(&context.current_status_id),
-            outgoing.join(", "),
-            terminal.join(", "),
-            frontier_ids.join(", "),
-            done_distances.get(&context.current_status_id),
-            frontier_distances.get(&context.current_status_id),
-        ));
-        for (index, transition) in transitions.iter().enumerate() {
-            report.push_str(&format!(
-                "\n  Action {index}: {} (id {}) -> {} (id {}), category {:?}, global {:?}, opsbar {:?}, directed edge {}, distance Done {:?}, distance frontier {:?}",
-                transition.name, transition.id, transition.to_name, transition.to_id,
-                transition.to_category, transition.is_global, transition.opsbar_sequence,
-                graph.has_edge(&context.current_status_id, &transition.to_id),
-                done_distances.get(&transition.to_id),
-                frontier_distances.get(&transition.to_id),
-            ));
-        }
-    } else {
-        report.push_str("\n\nWorkflow graph: unavailable");
-        for (index, transition) in transitions.iter().enumerate() {
-            report.push_str(&format!(
-                "\n  Action {index}: {} (id {}) -> {} (id {}), category {:?}, global {:?}, opsbar {:?}",
-                transition.name, transition.id, transition.to_name, transition.to_id,
-                transition.to_category, transition.is_global, transition.opsbar_sequence,
-            ));
-        }
-    }
-    report
-}
-
-fn show_diagnostic_window(parent: &adw::ApplicationWindow, report: &str) {
-    let window = gtk::Window::builder()
-        .title("Workflow diagnostics")
-        .transient_for(parent)
-        .modal(true)
-        .default_width(760)
-        .default_height(560)
-        .resizable(true)
-        .build();
-    let root = gtk::Box::new(gtk::Orientation::Vertical, 10);
-    root.set_margin_top(14);
-    root.set_margin_bottom(14);
-    root.set_margin_start(14);
-    root.set_margin_end(14);
-    let description = gtk::Label::new(Some(
-        "These are the exact inputs and outcome of the primary-action selector.",
-    ));
-    description.set_wrap(true);
-    description.set_xalign(0.0);
-    root.append(&description);
-
-    let view = gtk::TextView::new();
-    view.set_editable(false);
-    view.set_cursor_visible(false);
-    view.set_monospace(true);
-    view.set_wrap_mode(gtk::WrapMode::WordChar);
-    view.buffer().set_text(report);
-    let scroller = gtk::ScrolledWindow::new();
-    scroller.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Automatic);
-    scroller.set_vexpand(true);
-    scroller.set_child(Some(&view));
-    root.append(&scroller);
-
-    let actions = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-    actions.set_halign(gtk::Align::End);
-    let copy = gtk::Button::with_label("Copy report");
-    let report_text = report.to_owned();
-    copy.connect_clicked(move |_| {
-        if let Some(display) = gtk::gdk::Display::default() {
-            display.clipboard().set_text(&report_text);
-        }
-    });
-    actions.append(&copy);
-    let close = gtk::Button::with_label("Close");
-    let window_for_close = window.clone();
-    close.connect_clicked(move |_| window_for_close.close());
-    actions.append(&close);
-    root.append(&actions);
-    window.set_child(Some(&root));
-    window.present();
+    (local.len() == 1).then(|| local[0])
 }
 
 fn action_button(
@@ -369,41 +227,21 @@ pub fn render_actions(
     transitions: Vec<IssueTransition>,
     options: ActionOptions,
 ) {
-    let ActionOptions {
-        workflow, workflow_note, preferred_id, on_primary_changed, submit, on_open,
-    } = options;
+    let ActionOptions { workflow, preferred_id, on_primary_changed, submit, on_open } = options;
     clear(container);
     container.set_visible(true);
 
     if transitions.is_empty() {
-        let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
         let message = gtk::Label::new(Some("No available workflow actions"));
         message.add_css_class("dim-label");
         message.set_xalign(0.0);
-        row.append(&message);
-        let report = diagnostic_report(
-            issue_key, &transitions, &workflow_note, workflow.as_ref(),
-            (None, "Jira returned no available transitions"),
-        );
-        let diagnostics = gtk::Button::from_icon_name("dialog-information-symbolic");
-        diagnostics.add_css_class("flat");
-        diagnostics.set_tooltip_text(Some("Workflow diagnostics"));
-        let parent_for_window = parent.downgrade();
-        diagnostics.connect_clicked(move |_| {
-            if let Some(parent) = parent_for_window.upgrade() {
-                show_diagnostic_window(&parent, &report);
-            }
-        });
-        row.append(&diagnostics);
-        container.append(&row);
+        container.append(&message);
         return;
     }
 
-    let decision = primary_transition_decision(
+    let primary = primary_transition_index(
         &transitions, cloud, preferred_id.as_deref(), workflow.as_ref(),
     );
-    let primary = decision.0;
-    let report = diagnostic_report(issue_key, &transitions, &workflow_note, workflow.as_ref(), decision);
     let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
     row.set_halign(gtk::Align::Start);
     row.add_css_class("workflow-actions-row");
@@ -467,19 +305,6 @@ pub fn render_actions(
             list.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
             list.append(&reset);
         }
-        list.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
-        let diagnostics = gtk::Button::with_label("Workflow diagnostics…");
-        diagnostics.add_css_class("flat");
-        let report_for_window = report.clone();
-        let parent_for_window = parent.downgrade();
-        let popover_for_diagnostics = popover.clone();
-        diagnostics.connect_clicked(move |_| {
-            popover_for_diagnostics.popdown();
-            if let Some(parent) = parent_for_window.upgrade() {
-                show_diagnostic_window(&parent, &report_for_window);
-            }
-        });
-        list.append(&diagnostics);
         popover.set_child(Some(&list));
         let more = gtk::MenuButton::new();
         more.add_css_class("workflow-actions-more");
@@ -491,18 +316,6 @@ pub fn render_actions(
         }
         more.set_popover(Some(&popover));
         row.append(&more);
-    } else {
-        // Single transition: keep diagnostics accessible without a full menu.
-        let diagnostics = gtk::Button::from_icon_name("dialog-information-symbolic");
-        diagnostics.add_css_class("flat");
-        diagnostics.set_tooltip_text(Some("Workflow diagnostics"));
-        let parent_for_window = parent.downgrade();
-        diagnostics.connect_clicked(move |_| {
-            if let Some(parent) = parent_for_window.upgrade() {
-                show_diagnostic_window(&parent, &report);
-            }
-        });
-        row.append(&diagnostics);
     }
     container.append(&row);
 }
@@ -1057,49 +870,6 @@ mod tests {
             primary_transition_index(&[first,second],true,Some("b"),Some(&context)),
             Some(1),
         );
-    }
-
-    #[test]
-    fn diagnostics_explain_missing_graph_without_fabricating_a_primary() {
-        let mut review = t("121", None, None);
-        review.name = "Review".into();
-        review.to_id = "10053".into();
-        let transitions = [review];
-        let decision = primary_transition_decision(&transitions, true, None, None);
-        let report = diagnostic_report(
-            "ART-2921", &transitions,
-            "Metadata fetch: Workflow search failed at page offset 0\nGraph match: unavailable",
-            None, decision,
-        );
-        assert_eq!(decision.0, None);
-        assert!(report.contains("No matching workflow graph"));
-        assert!(report.contains("Workflow search failed at page offset 0"));
-        assert!(report.contains("Review (id 121) ->"));
-        assert!(!report.contains("Bearer"));
-    }
-
-    #[test]
-    fn diagnostics_show_directed_steps_and_reason_for_selection() {
-        let mut review = t("121", None, None);
-        review.name = "Review".into();
-        review.to_id = "review".into();
-        let mut pause = t("161", None, None);
-        pause.name = "Pause Work".into();
-        pause.to_id = "ready".into();
-        let context = workflow(
-            "progress",
-            &[("ready", "progress"), ("progress", "ready"),
-              ("progress", "review"), ("review", "done")],
-            "done",
-        );
-        let actions = [pause, review];
-        let decision = primary_transition_decision(&actions, true, None, Some(&context));
-        assert_eq!(decision.0, Some(1));
-        let report = diagnostic_report("ART-2921", &actions, "Graph match: exact issue type",
-            Some(&context), decision);
-        assert!(report.contains("Selection: Review (transition 121)"));
-        assert!(report.contains("directed edge true"));
-        assert!(report.contains("Current distance to Done: Some(2)"));
     }
 
     #[test]
