@@ -400,14 +400,13 @@ impl DevelopmentPanel {
         button
     }
 
-    fn codex_button(&self, editor: &str, path: &Path) -> gtk::Button {
+    fn codex_button(&self, path: &Path) -> gtk::Button {
         let button = gtk::Button::with_label("Fix with Codex");
         button.add_css_class("transition-action");
         button.add_css_class("suggested-action");
         button.set_tooltip_text(Some(
-            "Open VS Code and start interactive Codex in a separate terminal with Jira context",
+            "Start interactive Codex in GNOME Console with Jira context",
         ));
-        let editor = if editor == "codium" { "codium" } else { "code" }.to_owned();
         let path = path.to_path_buf();
         let issue = self.issue.borrow().clone();
         let account = self.account.borrow().clone();
@@ -423,7 +422,6 @@ impl DevelopmentPanel {
 
             let (sender, receiver) = mpsc::channel();
             let path = path.clone();
-            let editor = editor.clone();
             let site = site.clone();
             let account = account.clone();
             thread::spawn(move || {
@@ -432,7 +430,7 @@ impl DevelopmentPanel {
                     .and_then(|credentials| JiraClient::new(credentials).ok())
                     .and_then(|client| client.issue_comments(&issue.key).ok())
                     .unwrap_or_default();
-                let result = codex::start(&path, &editor, &site, &issue, &comments);
+                let result = codex::start(&path, &site, &issue, &comments);
                 let _ = sender.send(result.map_err(|error| error.to_string()));
             });
 
@@ -511,7 +509,7 @@ impl DevelopmentPanel {
                     ));
                     self.body.append(&self.path_row(&tree.path.to_string_lossy()));
                     // All actions target the same existing worktree, in one row.
-                    let fix = self.codex_button(&editor, &tree.path);
+                    let fix = self.codex_button(&tree.path);
                     let open = self.editor_button(&editor, &tree.path);
                     let manage = self.manage_button(site, key, summary);
                     manage.add_css_class("flat");
@@ -531,7 +529,7 @@ impl DevelopmentPanel {
                         ));
                         item.append(&text(status, "ticket-development-muted"));
                         item.append(&self.path_row(&tree.path.to_string_lossy()));
-                        let fix = self.codex_button(&editor, &tree.path);
+                        let fix = self.codex_button(&tree.path);
                         let open = self.editor_button(&editor, &tree.path);
                         item.append(&Self::actions_row(&[&fix, &open]));
                         self.body.append(&item);
