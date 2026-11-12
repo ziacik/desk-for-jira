@@ -887,7 +887,7 @@ pub fn show(
     let open = gtk::Button::with_label("Open in VS Code");
     let codex = gtk::Button::with_label("Fix with Codex");
     codex.add_css_class("suggested-action");
-    codex.set_tooltip_text(Some("Start interactive Codex in a separate terminal and open VS Code"));
+    codex.set_tooltip_text(Some("Start interactive Codex in GNOME Console"));
     let create = gtk::Button::with_label("Create worktree");
     create.add_css_class("suggested-action");
     footer.append(&open);
@@ -981,11 +981,6 @@ pub fn show(
                 report(&view.info, "No Jira issue context available");
                 return;
             };
-            let editor = selected_text(&view.editor).unwrap_or_else(|| "code".to_owned());
-            if let Err(error) = view.store_preferences() {
-                report(&view.info, &error);
-                return;
-            }
             button.set_sensitive(false);
             report(&view.info, "Preparing Jira context for Codex…");
             let (tx, rx) = mpsc::channel();
@@ -996,7 +991,7 @@ pub fn show(
                     .and_then(|credentials| JiraClient::new(credentials).ok())
                     .and_then(|client| client.issue_comments(&issue.key).ok())
                     .unwrap_or_default();
-                let result = codex::start(&tree.path, &editor, &site, &issue, &comments)
+                let result = codex::start(&tree.path, &site, &issue, &comments)
                     .map_err(|error| error.to_string());
                 let _ = tx.send(result);
             });
