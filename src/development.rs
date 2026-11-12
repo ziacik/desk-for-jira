@@ -313,12 +313,11 @@ impl DevelopmentPanel {
         row
     }
 
-    fn actions_row(primary: &gtk::Button, secondary: Option<&gtk::Button>) -> gtk::Box {
+    fn actions_row(buttons: &[&gtk::Button]) -> gtk::Box {
         let actions = gtk::Box::new(gtk::Orientation::Horizontal, 8);
         actions.add_css_class("ticket-development-actions");
-        actions.append(primary);
-        if let Some(secondary) = secondary {
-            actions.append(secondary);
+        for button in buttons {
+            actions.append(*button);
         }
         actions
     }
@@ -401,17 +400,13 @@ impl DevelopmentPanel {
         button
     }
 
-    fn codex_button(&self, editor: &str, path: &Path, resume: bool) -> gtk::Button {
-        let button = gtk::Button::with_label(if resume { "Continue Codex…" } else { "Fix with Codex" });
+    fn codex_button(&self, editor: &str, path: &Path) -> gtk::Button {
+        let button = gtk::Button::with_label("Fix with Codex");
         button.add_css_class("transition-action");
-        if !resume {
-            button.add_css_class("suggested-action");
-        }
-        button.set_tooltip_text(Some(if resume {
-            "Resume a Codex session in a separate terminal, with VS Code open for reviewing changes"
-        } else {
-            "Open VS Code and start interactive Codex in a separate terminal with the Jira issue context"
-        }));
+        button.add_css_class("suggested-action");
+        button.set_tooltip_text(Some(
+            "Open VS Code and start interactive Codex in a separate terminal with Jira context",
+        ));
         let editor = if editor == "codium" { "codium" } else { "code" }.to_owned();
         let path = path.to_path_buf();
         let issue = self.issue.borrow().clone();
@@ -424,11 +419,7 @@ impl DevelopmentPanel {
                 return;
             };
             button.set_sensitive(false);
-            toast.add_toast(adw::Toast::new(if resume {
-                "Opening Codex session picker…"
-            } else {
-                "Preparing Jira context for Codex…"
-            }));
+            toast.add_toast(adw::Toast::new("Preparing Jira context for Codex…"));
 
             let (sender, receiver) = mpsc::channel();
             let path = path.clone();
@@ -436,18 +427,12 @@ impl DevelopmentPanel {
             let site = site.clone();
             let account = account.clone();
             thread::spawn(move || {
-                let result = if resume {
-                    codex::resume(&path, &editor)
-                } else {
-                    // Jira network requests must not block the GTK main thread.
-                    // If comments are unavailable, the issue description still
-                    // provides the initial task and Codex can start normally.
-                    let comments = account
-                        .and_then(|credentials| JiraClient::new(credentials).ok())
-                        .and_then(|client| client.issue_comments(&issue.key).ok())
-                        .unwrap_or_default();
-                    codex::start(&path, &editor, &site, &issue, &comments)
-                };
+                // Jira requests must not block GTK; comments are optional.
+                let comments = account
+                    .and_then(|credentials| JiraClient::new(credentials).ok())
+                    .and_then(|client| client.issue_comments(&issue.key).ok())
+                    .unwrap_or_default();
+                let result = codex::start(&path, &editor, &site, &issue, &comments);
                 let _ = sender.send(result.map_err(|error| error.to_string()));
             });
 
@@ -492,7 +477,7 @@ impl DevelopmentPanel {
                 self.body.append(&Self::info("No Git repositories configured",
                     "Add a local repository to create a ticket worktree."));
                 let create = self.manager_button("Configure repositories…", site, key, summary);
-                self.body.append(&Self::actions_row(&create, None));
+                self.body.append(&Self::actions_row(&[&create]));
             }
             Ok(Snapshot::Missing {
                 repository, branch, destination, base, matching_branches,
@@ -510,7 +495,7 @@ impl DevelopmentPanel {
                 self.body.append(&text(&format!("{base} · {note}"),
                     "ticket-development-muted"));
                 let create = self.manager_button("Create worktree…", site, key, summary);
-                self.body.append(&Self::actions_row(&create, None));
+                self.body.append(&Self::actions_row(&[&create]));
             }
             Ok(Snapshot::Existing { editor, worktrees }) => {
                 if worktrees.len() == 1 {
@@ -525,15 +510,12 @@ impl DevelopmentPanel {
                         &tree.repository, &tree.branch,
                     ));
                     self.body.append(&self.path_row(&tree.path.to_string_lossy()));
-                    // Both applications operate on the SAME existing worktree.
-                    let fix = self.codex_button(&editor, &tree.path, false);
+                    // All actions target the same existing worktree, in one row.
+                    let fix = self.codex_button(&editor, &tree.path);
                     let open = self.editor_button(&editor, &tree.path);
-                    self.body.append(&Self::actions_row(&fix, Some(&open)));
-                    let resume = self.codex_button(&editor, &tree.path, true);
-                    resume.add_css_class("flat");
                     let manage = self.manage_button(site, key, summary);
                     manage.add_css_class("flat");
-                    self.body.append(&Self::actions_row(&resume, Some(&manage)));
+                    self.body.append(&Self::actions_row(&[&fix, &open, &manage]));
                 } else {
                     self.set_state(&format!("{} worktrees", worktrees.len()), Some("ticket-development-good"));
                     for tree in &worktrees {
@@ -549,23 +531,20 @@ impl DevelopmentPanel {
                         ));
                         item.append(&text(status, "ticket-development-muted"));
                         item.append(&self.path_row(&tree.path.to_string_lossy()));
-                        let fix = self.codex_button(&editor, &tree.path, false);
+                        let fix = self.codex_button(&editor, &tree.path);
                         let open = self.editor_button(&editor, &tree.path);
-                        item.append(&Self::actions_row(&fix, Some(&open)));
-                        let resume = self.codex_button(&editor, &tree.path, true);
-                        resume.add_css_class("flat");
-                        item.append(&Self::actions_row(&resume, None));
+                        item.append(&Self::actions_row(&[&fix, &open]));
                         self.body.append(&item);
                     }
                     let manage = self.manage_button(site, key, summary);
-                    self.body.append(&Self::actions_row(&manage, None));
+                    self.body.append(&Self::actions_row(&[&manage]));
                 }
             }
             Err(error) => {
                 self.set_state("Unavailable", Some("ticket-development-warning"));
                 self.body.append(&Self::info("Git status could not be read", &error));
                 let manage = self.manager_button("Manage repositories…", site, key, summary);
-                self.body.append(&Self::actions_row(&manage, None));
+                self.body.append(&Self::actions_row(&[&manage]));
             }
         }
     }
