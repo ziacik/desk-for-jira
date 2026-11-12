@@ -58,18 +58,13 @@ pub fn issue_prompt(site: &str, issue: &Issue, comments: &[IssueComment]) -> Str
     prompt
 }
 
-fn codex_args(worktree: &Path, resume: bool, prompt: &str) -> Vec<OsString> {
+fn codex_args(worktree: &Path, prompt: &str) -> Vec<OsString> {
     let mut args = vec![
         OsString::from("-C"), worktree.as_os_str().to_os_string(),
         OsString::from("--sandbox"), OsString::from("workspace-write"),
         OsString::from("--ask-for-approval"), OsString::from("on-request"),
     ];
-    if resume {
-        // The interactive picker is restricted to sessions in this worktree.
-        args.push(OsString::from("resume"));
-    } else {
-        args.push(OsString::from(prompt));
-    }
+    args.push(OsString::from(prompt));
     args
 }
 
@@ -145,11 +140,7 @@ pub fn start(
     comments: &[IssueComment],
 ) -> Result<()> {
     let prompt = issue_prompt(site, issue, comments);
-    launch(worktree, editor, &codex_args(worktree, false, &prompt))
-}
-
-pub fn resume(worktree: &Path, editor: &str) -> Result<()> {
-    launch(worktree, editor, &codex_args(worktree, true, ""))
+    launch(worktree, editor, &codex_args(worktree, &prompt))
 }
 
 #[cfg(test)]
@@ -163,7 +154,7 @@ mod tests {
 
     #[test]
     fn codex_stays_in_the_existing_worktree_with_safe_defaults() {
-        let args = codex_args(Path::new("/tmp/worktree with spaces"), false, "Fix the issue");
+        let args = codex_args(Path::new("/tmp/worktree with spaces"), "Fix the issue");
         assert_eq!(args[0], "-C");
         assert_eq!(args[1], "/tmp/worktree with spaces");
         assert!(args.contains(&OsString::from("workspace-write")));
@@ -171,10 +162,4 @@ mod tests {
         assert_eq!(args.last(), Some(&OsString::from("Fix the issue")));
     }
 
-    #[test]
-    fn resume_opens_the_interactive_session_picker() {
-        let args = codex_args(Path::new("/tmp/example"), true, "");
-        assert_eq!(args.last(), Some(&OsString::from("resume")));
-        assert!(!args.contains(&OsString::from("--last")));
-    }
 }
