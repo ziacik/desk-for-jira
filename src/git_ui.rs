@@ -874,9 +874,8 @@ pub fn show(
     actions.add_css_class("git-menu-actions");
     let retry = gtk::Button::with_label("Run setup again");
     let terminal = gtk::Button::with_label("Open terminal");
-    let continue_codex = gtk::Button::with_label("Continue Codex…");
     let remove = gtk::Button::with_label("Remove worktree…");
-    for action in [&continue_codex, &terminal, &retry, &remove] {
+    for action in [&terminal, &retry, &remove] {
         action.add_css_class("flat");
         action.set_halign(gtk::Align::Fill);
         actions.append(action);
@@ -1010,23 +1009,6 @@ pub fn show(
                     Err(error) => report(&view.info, &format!("Cannot start Codex: {error}")),
                 }
             });
-        });
-    }
-    {
-        let view = view.clone();
-        let menu = actions_popover.clone();
-        continue_codex.connect_clicked(move |_| {
-            menu.popdown();
-            let Some(tree) = view.active_tree.borrow().clone() else { return };
-            let editor = selected_text(&view.editor).unwrap_or_else(|| "code".to_owned());
-            if let Err(error) = view.store_preferences() {
-                report(&view.info, &error);
-                return;
-            }
-            match codex::resume(&tree.path, &editor) {
-                Ok(()) => view.dialog.close(),
-                Err(error) => report(&view.info, &format!("Cannot resume Codex: {error}")),
-            }
         });
     }
     {
