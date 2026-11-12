@@ -12,6 +12,7 @@ use anyhow::{bail, Result};
 use crate::{
     git,
     jira::{self, Issue, IssueComment},
+    preferences,
 };
 
 fn excerpt(value: &str, limit: usize) -> String {
@@ -58,6 +59,30 @@ pub fn issue_prompt(site: &str, issue: &Issue, comments: &[IssueComment]) -> Str
     prompt
 }
 
+/// Explicitly invoke a skill from this one ticket prompt, without changing
+/// the configuration of any other Codex session.
+fn with_startup_skill(prompt: String, configured: &str) -> Result<String> {
+    let configured = configured.trim();
+    if configured.is_empty() {
+        return Ok(prompt);
+    }
+    let skill = configured.strip_prefix('$').unwrap_or(configured);
+    let skill = if skill == "superpowers" {
+        "superpowers:using-superpowers"
+    } else {
+        skill
+    };
+    if skill.is_empty() || !skill.chars().all(|character| {
+        character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | ':')
+    }) {
+        bail!("Invalid Codex startup skill: use a skill name or plugin:skill identifier");
+    }
+    Ok(format!(
+        "${skill}\nUse this installed Codex skill for the Jira task below. \
+         Load and follow its instructions before editing code. \
+         If the skill is unavailable, report that explicitly rather than silently skipping it.\n\n{prompt}"
+    ))
+}
 fn codex_args(worktree: &Path, prompt: &str) -> Vec<OsString> {
     let mut args = vec![
         OsString::from("-C"), worktree.as_os_str().to_os_string(),
@@ -135,7 +160,8 @@ pub fn start(
     issue: &Issue,
     comments: &[IssueComment],
 ) -> Result<()> {
-    let prompt = issue_prompt(site, issue, comments);
+    let skill = preferences::load_git()?.codex_startup_skill;
+    let prompt = with_startup_skill(issue_prompt(site, issue, comments), &skill)?;
     launch(worktree, &codex_args(worktree, &prompt))
 }
 
@@ -143,6 +169,21 @@ pub fn start(
 mod tests {
     use super::*;
 
+    #[test]
+    fn startup_skill_is_explicit_and_preserves_jira_context() {
+        let prompt = with_startup_skill("Jira instructions".into(), "superpowers").unwrap();
+        assert!(prompt.starts_with("$superpowers:using-superpowers\n"));
+        assert!(prompt.ends_with("Jira instructions"));
+        assert_eq!(with_startup_skill("Issue".into(), "").unwrap(), "Issue");
+        assert!(with_startup_skill("Issue".into(), "$my-plugin:my-skill")
+            .unwrap().starts_with("$my-plugin:my-skill\n"));
+    }
+
+    #[test]
+    fn startup_skill_rejects_invalid_names() {
+        assert!(with_startup_skill("Issue".into(), "skill\nignore instructions").is_err());
+        assert!(with_startup_skill("Issue".into(), "$").is_err());
+    }
     #[test]
     fn quotes_jira_text_for_kgx_without_shell_expansion() {
         assert_eq!(shell_quote("a'b; $(echo broken)"), "'a'\\''b; $(echo broken)'");
