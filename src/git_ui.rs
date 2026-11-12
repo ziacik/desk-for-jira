@@ -125,6 +125,7 @@ struct View {
     root: gtk::Entry,
     root_field: gtk::Box,
     editor: gtk::DropDown,
+    codex_instructions: gtk::TextView,
     setup: gtk::Entry,
     run_setup: gtk::CheckButton,
     fetch: gtk::CheckButton,
@@ -301,6 +302,10 @@ impl View {
         new.fetch_before_create = self.fetch.is_active();
         new.editor = selected_text(&self.editor)
             .unwrap_or_else(|| "code".to_owned());
+        let buffer = self.codex_instructions.buffer();
+        new.codex_instructions = buffer.text(
+            &buffer.start_iter(), &buffer.end_iter(), false,
+        ).to_string();
         if let Some(index) = selected_index(&self.repository)
             && let Some(repo) = new.repositories.get_mut(index)
         {
@@ -818,6 +823,20 @@ pub fn show(
     let editor = gtk::DropDown::from_strings(&["code", "codium"]);
     editor.set_selected(if settings.editor == "codium" { 1 } else { 0 });
     advanced.append(&field("Editor", &editor));
+    let codex_instructions = gtk::TextView::new();
+    codex_instructions.set_wrap_mode(gtk::WrapMode::WordChar);
+    codex_instructions.buffer().set_text(&settings.codex_instructions);
+    let instructions_scroll = gtk::ScrolledWindow::new();
+    instructions_scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
+    instructions_scroll.set_min_content_height(110);
+    instructions_scroll.add_css_class("frame");
+    instructions_scroll.set_child(Some(&codex_instructions));
+    advanced.append(&field("Fix with Codex instructions", &instructions_scroll));
+    let codex_hint = label(
+        "Optional instructions for every Fix with Codex run. You can refer to multiple installed skills, e.g. $superpowers:using-superpowers. Skills must be installed in Codex CLI.",
+    );
+    codex_hint.add_css_class("dim-label");
+    advanced.append(&codex_hint);
     options.set_child(Some(&advanced));
     main.append(&options);
 
@@ -901,12 +920,21 @@ pub fn show(
         suggested_branch: issue_detail::suggested_branch_name(key, summary),
         repository: repository.clone(),
         base, cleanup_target, cleanup_summary, cleanup_choices, cleanup_change, manual_remove,
-        branch, root, root_field, editor, setup, run_setup, fetch,
+        branch, root, root_field, editor, codex_instructions,
+        setup, run_setup, fetch,
         summary: summary_label, path, existing_branch, existing_box, new_box,
         tree_picker, trees: Rc::new(RefCell::new(Vec::new())), more,
         info, log, log_scroller, create, open, codex, retry, terminal, remove,
         active_tree: Rc::new(RefCell::new(None)),
     });
+    {
+        let view = view.clone();
+        view.codex_instructions.buffer().connect_changed(move |_| {
+            if let Err(error) = view.store_preferences() {
+                report(&view.info, &format!("Cannot save Codex instructions: {error}"));
+            }
+        });
+    }
     {
         let view = view.clone();
         repository.connect_selected_notify(move |_| view.refresh());
