@@ -261,9 +261,22 @@ pub fn status(worktree: &Path) -> Result<String> {
     output(worktree, &["status", "--porcelain=v1", "--untracked-files=all"])
 }
 
+fn setup_command(worktree: &Path, script: &str) -> Command {
+    // Desktop launchers do not run the user's shell startup files. Use the
+    // configured shell in interactive login mode so zshrc/bashrc and runtime
+    // managers are initialized just as they are in a terminal.
+    // Command inherits the desktop process environment by default.
+    let shell = std::env::var_os("SHELL")
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "/bin/sh".into());
+    let mut command = Command::new(shell);
+    command.args(["-l", "-i", "-c"]).arg(script).current_dir(worktree);
+    command
+}
+
 pub fn run_setup(worktree: &Path, script: &str) -> Result<String> {
     if script.trim().is_empty() { return Ok(String::new()); }
-    let result = Command::new("sh").arg("-c").arg(script).current_dir(worktree)
+    let result = setup_command(worktree, script)
         .output().with_context(|| format!("Unable to run setup in {}", worktree.display()))?;
     let mut log = String::from_utf8_lossy(&result.stdout).into_owned();
     log.push_str(&String::from_utf8_lossy(&result.stderr));
@@ -432,6 +445,21 @@ pub fn remove_merged(repository: &Path, tree: &Worktree, target: &str, key: &str
 mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn setup_uses_user_shell_in_interactive_login_mode() {
+        let project = Path::new("/tmp/example-worktree");
+        let command = setup_command(project, "npm install");
+        let shell = std::env::var_os("SHELL")
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| "/bin/sh".into());
+        assert_eq!(command.get_program(), shell);
+        assert_eq!(
+            command.get_args().collect::<Vec<_>>(),
+            ["-l", "-i", "-c", "npm install"].map(std::ffi::OsStr::new)
+        );
+        assert_eq!(command.get_current_dir(), Some(project));
+    }
 
     #[test]
     fn opening_editor_cannot_create_a_missing_worktree() {
