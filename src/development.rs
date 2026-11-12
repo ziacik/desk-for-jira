@@ -12,7 +12,7 @@ use std::{
 use adw::prelude::*;
 use gtk::glib;
 
-use crate::{git, git_ui, issue_detail, preferences};
+use crate::{codex, git, git_ui, issue_detail, jira::{Credentials, Issue, JiraClient}, preferences};
 
 type WorktreeContext = (String, String, String, bool);
 
@@ -131,6 +131,8 @@ pub struct DevelopmentPanel {
     body: gtk::Box,
     request: Rc<Cell<u64>>,
     context: Rc<RefCell<Option<WorktreeContext>>>,
+    issue: Rc<RefCell<Option<Issue>>>,
+    account: Rc<RefCell<Option<Credentials>>>,
     window: adw::ApplicationWindow,
     toast: adw::ToastOverlay,
 }
@@ -166,6 +168,8 @@ impl DevelopmentPanel {
             root, hidden_menu: hidden_menu.clone(), state, git_status, body,
             request: Rc::new(Cell::new(0)),
             context: Rc::new(RefCell::new(None)),
+            issue: Rc::new(RefCell::new(None)),
+            account: Rc::new(RefCell::new(None)),
             window: window.clone(),
             toast: toast.clone(),
         };
@@ -181,6 +185,11 @@ impl DevelopmentPanel {
 
     pub fn widget(&self) -> &gtk::Box {
         &self.root
+    }
+
+    pub fn set_issue_context(&self, issue: &Issue, account: Option<Credentials>) {
+        *self.issue.borrow_mut() = Some(issue.clone());
+        *self.account.borrow_mut() = account;
     }
 
     pub fn refresh(&self, site: &str, key: &str, summary: &str, show_when_missing: bool) {
@@ -390,6 +399,84 @@ impl DevelopmentPanel {
         button
     }
 
+    fn codex_button(&self, editor: &str, path: &Path, resume: bool) -> gtk::Button {
+        let button = gtk::Button::with_label(if resume { "Continue Codex…" } else { "Fix with Codex" });
+        button.add_css_class("transition-action");
+        if !resume {
+            button.add_css_class("suggested-action");
+        }
+        button.set_tooltip_text(Some(if resume {
+            "Resume a Codex session in a separate terminal, with VS Code open for reviewing changes"
+        } else {
+            "Open VS Code and start interactive Codex in a separate terminal with the Jira issue context"
+        }));
+        let editor = if editor == "codium" { "codium" } else { "code" }.to_owned();
+        let path = path.to_path_buf();
+        let issue = self.issue.borrow().clone();
+        let account = self.account.borrow().clone();
+        let site = self.context.borrow().as_ref().map(|ctx| ctx.0.clone()).unwrap_or_default();
+        let toast = self.toast.clone();
+        button.connect_clicked(move |button| {
+            let Some(issue) = issue.clone() else {
+                toast.add_toast(adw::Toast::new("No Jira issue selected"));
+                return;
+            };
+            button.set_sensitive(false);
+            toast.add_toast(adw::Toast::new(if resume {
+                "Opening Codex session picker…"
+            } else {
+                "Preparing Jira context for Codex…"
+            }));
+
+            let (sender, receiver) = mpsc::channel();
+            let path = path.clone();
+            let editor = editor.clone();
+            let site = site.clone();
+            let account = account.clone();
+            thread::spawn(move || {
+                let result = if resume {
+                    codex::resume(&path, &editor)
+                } else {
+                    // Jira network requests must not block the GTK main thread.
+                    // If comments are unavailable, the issue description still
+                    // provides the initial task and Codex can start normally.
+                    let comments = account
+                        .and_then(|credentials| JiraClient::new(credentials).ok())
+                        .and_then(|client| client.issue_comments(&issue.key).ok())
+                        .unwrap_or_default();
+                    codex::start(&path, &editor, &site, &issue, &comments)
+                };
+                let _ = sender.send(result.map_err(|error| error.to_string()));
+            });
+
+            let button = button.clone();
+            let toast = toast.clone();
+            glib::timeout_add_local(Duration::from_millis(90), move || {
+                match receiver.try_recv() {
+                    Ok(result) => {
+                        button.set_sensitive(true);
+                        match result {
+                            Ok(()) => toast.add_toast(adw::Toast::new(
+                                "Codex launched in a separate terminal",
+                            )),
+                            Err(error) => toast.add_toast(adw::Toast::new(
+                                &format!("Cannot start Codex: {error}"),
+                            )),
+                        }
+                        glib::ControlFlow::Break
+                    }
+                    Err(TryRecvError::Empty) => glib::ControlFlow::Continue,
+                    Err(TryRecvError::Disconnected) => {
+                        button.set_sensitive(true);
+                        toast.add_toast(adw::Toast::new("Codex launch stopped unexpectedly"));
+                        glib::ControlFlow::Break
+                    }
+                }
+            });
+        });
+        button
+    }
+
     fn paint(&self, site: &str, key: &str, summary: &str, result: Result<Snapshot, String>) {
         wipe(&self.body);
         let hidden = matches!(&result, Ok(Snapshot::Hidden))
@@ -436,11 +523,15 @@ impl DevelopmentPanel {
                         &tree.repository, &tree.branch,
                     ));
                     self.body.append(&self.path_row(&tree.path.to_string_lossy()));
-                    // Worktree management is the primary action. Editor launch is
-                    // secondary and never creates or changes a worktree.
-                    let manage = self.manage_button(site, key, summary);
+                    // Both applications operate on the SAME existing worktree.
+                    let fix = self.codex_button(&editor, &tree.path, false);
                     let open = self.editor_button(&editor, &tree.path);
-                    self.body.append(&Self::actions_row(&manage, Some(&open)));
+                    self.body.append(&Self::actions_row(&fix, Some(&open)));
+                    let resume = self.codex_button(&editor, &tree.path, true);
+                    resume.add_css_class("flat");
+                    let manage = self.manage_button(site, key, summary);
+                    manage.add_css_class("flat");
+                    self.body.append(&Self::actions_row(&resume, Some(&manage)));
                 } else {
                     self.set_state(&format!("{} worktrees", worktrees.len()), Some("ticket-development-good"));
                     for tree in &worktrees {
@@ -456,8 +547,12 @@ impl DevelopmentPanel {
                         ));
                         item.append(&text(status, "ticket-development-muted"));
                         item.append(&self.path_row(&tree.path.to_string_lossy()));
+                        let fix = self.codex_button(&editor, &tree.path, false);
                         let open = self.editor_button(&editor, &tree.path);
-                        item.append(&Self::actions_row(&open, None));
+                        item.append(&Self::actions_row(&fix, Some(&open)));
+                        let resume = self.codex_button(&editor, &tree.path, true);
+                        resume.add_css_class("flat");
+                        item.append(&Self::actions_row(&resume, None));
                         self.body.append(&item);
                     }
                     let manage = self.manage_button(site, key, summary);
