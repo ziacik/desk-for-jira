@@ -1438,7 +1438,7 @@ fn parse_issue_comment(value: &Value) -> Option<IssueComment> {
     })
 }
 
-fn format_description(value: Option<&Value>) -> String {
+pub(crate) fn format_description(value: Option<&Value>) -> String {
     let Some(value) = value else { return String::new(); };
     if let Some(text) = value.as_str() { return text.to_owned(); }
     let mut output = String::new();

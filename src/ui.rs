@@ -2120,14 +2120,15 @@ fn should_show_worktree_panel(ui: &Ui, issue: &Issue) -> bool {
 
 fn refresh_current_worktree(ui: &Ui) {
     let selected = ui.selected_issue.borrow().clone();
-    let (issue, site) = {
+    let (issue, account) = {
         let state = ui.state.borrow();
         let issue = selected.as_deref().and_then(|key| state.recent_issues.iter()
             .find(|issue| issue.key == key).cloned());
-        let site = state.account.as_ref().map(|account| account.base_url.clone());
-        (issue, site)
+        (issue, state.account.clone())
     };
-    if let (Some(issue), Some(site)) = (issue, site) {
+    if let (Some(issue), Some(account)) = (issue, account) {
+        let site = account.base_url.clone();
+        ui.development.set_issue_context(&issue, Some(account));
         ui.development.refresh(&site, &issue.key, &issue.summary,
             should_show_worktree_panel(ui, &issue));
     }
@@ -3489,6 +3490,7 @@ fn show_command_palette(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Eve
                     let site = account.base_url.clone();
                     let dialog = crate::git_ui::show(
                         &ui_for_action.window, &site, &issue.key, &issue.summary,
+                        Some(issue.clone()), Some(account.clone()),
                     );
                     let panel = ui_for_action.development.clone();
                     let key = issue.key;
@@ -3722,6 +3724,7 @@ fn open_issue(ui: &Ui, issue: &Issue, source_button: Option<&gtk::Button>) {
     style_pin_button(&ui.pin_detail,
         ui.state.borrow().settings.pinned_issues.iter().any(|key| key == &issue.key));
     render_issue_detail(ui, issue, base_url);
+    ui.development.set_issue_context(issue, account.clone());
     ui.development.refresh(base_url, &issue.key, &issue.summary,
         should_show_worktree_panel(ui, issue));
     ui.pull_requests.refresh(account.clone(), &issue.key);

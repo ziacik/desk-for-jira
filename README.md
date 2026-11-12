@@ -52,6 +52,12 @@ bash packaging/install-local.sh
 
 This installs into `~/.local` by default; set `PREFIX` to use a different prefix. `cargo run` remains available for development. The sidebar can be toggled from the title bar.
 
+## Codex integration
+
+With a Jira issue open, create or select its local Git worktree, then choose **Fix with Codex** in the worktree panel or worktree dialog. Desk for Jira launches interactive Codex CLI in **GNOME Console** (or a fallback external terminal) in the existing worktree, including the issue's description and recent Jira comments in the initial prompt. It does **not** open VS Code: use the separate **Open in VS Code** action when you want to inspect code or diffs. Follow-up prompts go directly into Codex's terminal.
+
+Follow-up instructions are entered directly into the running Codex terminal. To resume an old conversation later, use Codex's built-in `/resume` or `codex resume` in the worktree. The app does not create another worktree for Codex, nor does it automatically commit, push or merge. Requires `codex` in the desktop application's `PATH` and a supported terminal (`xdg-terminal-exec`, `cosmic-term`, `gnome-terminal` or `kgx`).
+
 ## Status
 
 Read-only MVP. Editing issues, comments, offline sync, OAuth and release packaging are future improvements.

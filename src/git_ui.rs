@@ -10,8 +10,10 @@ use std::{
 use adw::prelude::*;
 use gtk::glib;
 use crate::{
+    codex,
     git::{self, CreateWorktree, Worktree},
     issue_detail,
+    jira::{Credentials, Issue, JiraClient},
     preferences::{self, GitRepository, GitSettings},
 };
 
@@ -140,6 +142,7 @@ struct View {
     log_scroller: gtk::ScrolledWindow,
     create: gtk::Button,
     open: gtk::Button,
+    codex: gtk::Button,
     retry: gtk::Button,
     terminal: gtk::Button,
     remove: gtk::Button,
@@ -172,6 +175,7 @@ impl View {
             self.root_field.set_visible(false);
             self.after_open.set_visible(false);
             self.open.set_visible(false);
+            self.codex.set_visible(false);
             self.more.set_visible(false);
             self.summary.set_text("Add a local Git repository to get started.");
             self.summary.set_visible(true);
@@ -209,6 +213,7 @@ impl View {
             self.create.set_visible(true);
             self.create.set_sensitive(true);
             self.open.set_visible(false);
+            self.codex.set_visible(false);
             self.more.set_visible(false);
             self.update_path();
         } else {
@@ -281,6 +286,7 @@ impl View {
         self.after_open.set_visible(false);
         self.create.set_visible(false);
         self.open.set_visible(true);
+        self.codex.set_visible(true);
         self.more.set_visible(true);
     }
 
@@ -627,7 +633,14 @@ fn scan_dialog(view: &Rc<View>, root: PathBuf, results: Vec<PathBuf>) {
     window.present();
 }
 
-pub fn show(parent: &adw::ApplicationWindow, site: &str, key: &str, summary: &str) -> gtk::Window {
+pub fn show(
+    parent: &adw::ApplicationWindow,
+    site: &str,
+    key: &str,
+    summary: &str,
+    issue: Option<Issue>,
+    account: Option<Credentials>,
+) -> gtk::Window {
     let settings = match preferences::load_git() {
         Ok(s) => s,
         Err(error) => {
@@ -872,10 +885,13 @@ pub fn show(parent: &adw::ApplicationWindow, site: &str, key: &str, summary: &st
     more.set_popover(Some(&actions_popover));
     footer.append(&more);
     let open = gtk::Button::with_label("Open in VS Code");
-    open.add_css_class("suggested-action");
+    let codex = gtk::Button::with_label("Fix with Codex");
+    codex.add_css_class("suggested-action");
+    codex.set_tooltip_text(Some("Start interactive Codex in GNOME Console"));
     let create = gtk::Button::with_label("Create worktree");
     create.add_css_class("suggested-action");
     footer.append(&open);
+    footer.append(&codex);
     footer.append(&create);
     surface.append(&footer);
     dialog.set_child(Some(&surface));
@@ -906,7 +922,7 @@ pub fn show(parent: &adw::ApplicationWindow, site: &str, key: &str, summary: &st
         branch, root, root_field, editor, setup, run_setup, fetch, after_open,
         summary: summary_label, path, existing_branch, existing_box, new_box,
         tree_picker, trees: Rc::new(RefCell::new(Vec::new())), more,
-        info, log, log_scroller, create, open, retry, terminal, remove,
+        info, log, log_scroller, create, open, codex, retry, terminal, remove,
         active_tree: Rc::new(RefCell::new(None)),
     });
     {
@@ -953,6 +969,42 @@ pub fn show(parent: &adw::ApplicationWindow, site: &str, key: &str, summary: &st
     {
         let view = view.clone();
         view.open.clone().connect_clicked(move |_| open_selected(&view));
+    }
+    {
+        let view = view.clone();
+        let issue = issue.clone();
+        let account = account.clone();
+        let site = site.to_owned();
+        view.codex.clone().connect_clicked(move |button| {
+            let Some(tree) = view.active_tree.borrow().clone() else { return };
+            let Some(issue) = issue.clone() else {
+                report(&view.info, "No Jira issue context available");
+                return;
+            };
+            button.set_sensitive(false);
+            report(&view.info, "Preparing Jira context for Codex…");
+            let (tx, rx) = mpsc::channel();
+            let account = account.clone();
+            let site = site.clone();
+            thread::spawn(move || {
+                let comments = account
+                    .and_then(|credentials| JiraClient::new(credentials).ok())
+                    .and_then(|client| client.issue_comments(&issue.key).ok())
+                    .unwrap_or_default();
+                let result = codex::start(&tree.path, &site, &issue, &comments)
+                    .map_err(|error| error.to_string());
+                let _ = tx.send(result);
+            });
+            let view = view.clone();
+            let button = button.clone();
+            poll(rx, move |result| {
+                button.set_sensitive(true);
+                match result {
+                    Ok(()) => view.dialog.close(),
+                    Err(error) => report(&view.info, &format!("Cannot start Codex: {error}")),
+                }
+            });
+        });
     }
     {
         let view = view.clone();

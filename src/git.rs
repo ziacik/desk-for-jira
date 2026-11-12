@@ -301,14 +301,22 @@ pub fn open_editor(worktree: &Path, editor: &str) -> Result<()> {
     Ok(())
 }
 
+// Prefer GNOME Console over the older GNOME Terminal. Keep this list shared
+// between plain terminal opening and the interactive Codex launcher.
+pub const TERMINAL_PROGRAMS: [&str; 4] =
+    ["kgx", "xdg-terminal-exec", "cosmic-term", "gnome-terminal"];
+
 pub fn open_terminal(worktree: &Path) -> Result<()> {
-    for program in ["cosmic-term", "kgx", "gnome-terminal"] {
-        let result = Command::new(program)
-            .arg(format!("--working-directory={}", worktree.display()))
-            .spawn();
-        if result.is_ok() { return Ok(()); }
+    for program in TERMINAL_PROGRAMS {
+        let mut command = Command::new(program);
+        if program == "xdg-terminal-exec" {
+            command.arg(format!("--dir={}", worktree.display()));
+        } else {
+            command.arg(format!("--working-directory={}", worktree.display()));
+        }
+        if command.spawn().is_ok() { return Ok(()); }
     }
-    bail!("No supported terminal found (cosmic-term, kgx, gnome-terminal)")
+    bail!("No supported terminal found (kgx, xdg-terminal-exec, cosmic-term, gnome-terminal)")
 }
 
 /// True for the primary checkout. Git lists it first, even when called
