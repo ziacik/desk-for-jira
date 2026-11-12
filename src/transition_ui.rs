@@ -1,12 +1,27 @@
-use std::{cell::{Cell, RefCell}, rc::Rc};
+use std::{cell::{Cell, RefCell}, collections::{HashMap, HashSet}, rc::Rc, sync::Arc};
 
 use adw::prelude::*;
 use serde_json::{Map, Value};
 
-use crate::jira::{IssueTransition, TransitionField};
+use crate::jira::{IssueTransition, TransitionField, WorkflowGraph};
 
 pub type TransitionSubmit = Rc<dyn Fn(IssueTransition, Map<String, Value>, Map<String, Value>, Option<Value>) -> bool>;
 pub type FormOpened = Rc<dyn Fn(TransitionForm)>;
+pub type PrimaryChanged = Rc<dyn Fn(Option<String>)>;
+
+pub struct WorkflowContext {
+    pub current_status_id: String,
+    pub graph: Arc<WorkflowGraph>,
+    pub terminal_status_ids: HashSet<String>,
+}
+
+pub struct ActionOptions {
+    pub workflow: Option<WorkflowContext>,
+    pub preferred_id: Option<String>,
+    pub on_primary_changed: Option<PrimaryChanged>,
+    pub submit: TransitionSubmit,
+    pub on_open: FormOpened,
+}
 
 #[derive(Clone)]
 pub struct TransitionForm {
@@ -108,15 +123,111 @@ fn clear(container: &gtk::Box) {
     }
 }
 
+/// Primary is the directed step that most reduces the distance to a
+/// terminal status, computed by reverse BFS over the *actual* workflow graph.
+/// Status IDs are opaque keys, never numbers for sorting.
+fn primary_transition_index(
+    transitions: &[IssueTransition],
+    _cloud_sorted: bool,
+    override_id: Option<&str>,
+    workflow: Option<&WorkflowContext>,
+) -> Option<usize> {
+    if let Some(index) = override_id.and_then(|id| transitions.iter().position(|t| t.id == id)) {
+        return Some(index);
+    }
+    let context = workflow?;
+    let done_distances = context.graph.distance_to_terminals(&context.terminal_status_ids);
+    let frontier = context.graph.normal_frontier(&context.terminal_status_ids);
+    let frontier_distances = context.graph.distance_to_terminals(&frontier);
+    let has_forward = |distances: &HashMap<String, usize>| {
+        let Some(current) = distances.get(&context.current_status_id) else {
+            return false;
+        };
+        transitions.iter().any(|transition| {
+            !context.terminal_status_ids.contains(&transition.to_id)
+                && context.graph.has_edge(&context.current_status_id, &transition.to_id)
+                && distances.get(&transition.to_id).is_some_and(|next| next < current)
+        })
+    };
+    let frontier_distance = frontier_distances.get(&context.current_status_id).copied();
+    let use_frontier = frontier_distance.is_some_and(|distance| {
+        !done_distances.contains_key(&context.current_status_id)
+            || (!has_forward(&done_distances)
+                && (has_forward(&frontier_distances) || distance == 0))
+    });
+    let distances = if use_frontier { &frontier_distances } else { &done_distances };
+    let current_distance = distances.get(&context.current_status_id).copied()?;
+    if use_frontier && current_distance == 0 {
+        let finish: Vec<usize> = transitions.iter().enumerate()
+            .filter_map(|(index, transition)| (
+                context.terminal_status_ids.contains(&transition.to_id)
+            ).then_some(index))
+            .collect();
+        return (finish.len() == 1).then(|| finish[0]);
+    }
+    let mut local: Vec<usize> = transitions.iter().enumerate()
+        .filter_map(|(index, transition)| (
+            transition.is_global != Some(true)
+            && transition.to_id != context.current_status_id
+            && context.graph.has_edge(&context.current_status_id, &transition.to_id)
+            && distances.contains_key(&transition.to_id)
+        ).then_some(index))
+        .collect();
+    let progress: Vec<usize> = local.iter().copied()
+        .filter(|&index| {
+            let destination = &transitions[index].to_id;
+            !context.terminal_status_ids.contains(destination)
+                && distances.get(destination).is_some_and(|distance| *distance < current_distance)
+        }).collect();
+    if !progress.is_empty() {
+        local = progress;
+    } else {
+        if local.iter().any(|&index| !context.terminal_status_ids.contains(&transitions[index].to_id)) {
+            return None;
+        }
+        local.retain(|&index| context.terminal_status_ids.contains(&transitions[index].to_id));
+    }
+    let nearest = local.iter()
+        .filter_map(|&index| distances.get(&transitions[index].to_id))
+        .copied().min()?;
+    local.retain(|&index| distances.get(&transitions[index].to_id) == Some(&nearest));
+    (local.len() == 1).then(|| local[0])
+}
+
+fn action_button(
+    parent: &adw::ApplicationWindow,
+    issue_key: &str,
+    cloud: bool,
+    transition: IssueTransition,
+    submit: &TransitionSubmit,
+    on_open: &FormOpened,
+) -> gtk::Button {
+    let button = gtk::Button::with_label(&transition.name);
+    button.add_css_class("transition-action");
+    button.set_tooltip_text(Some(&format!("Move to {}", transition.to_name)));
+    let parent = parent.downgrade();
+    let key = issue_key.to_owned();
+    let submit = submit.clone();
+    let on_open = on_open.clone();
+    button.connect_clicked(move |_| {
+        if let Some(parent) = parent.upgrade() {
+            activate_transition(
+                &parent, &key, cloud, transition.clone(), submit.clone(), on_open.clone(),
+            );
+        }
+    });
+    button
+}
+
 pub fn render_actions(
     container: &gtk::Box,
     parent: &adw::ApplicationWindow,
     issue_key: &str,
     cloud: bool,
     transitions: Vec<IssueTransition>,
-    submit: TransitionSubmit,
-    on_open: FormOpened,
+    options: ActionOptions,
 ) {
+    let ActionOptions { workflow, preferred_id, on_primary_changed, submit, on_open } = options;
     clear(container);
     container.set_visible(true);
 
@@ -128,30 +239,85 @@ pub fn render_actions(
         return;
     }
 
-    let actions = gtk::FlowBox::new();
-    actions.set_selection_mode(gtk::SelectionMode::None);
-    actions.set_max_children_per_line(3);
-    actions.set_column_spacing(7);
-    actions.set_row_spacing(7);
-    actions.set_halign(gtk::Align::Start);
-    for transition in transitions {
-        let button = gtk::Button::with_label(&transition.name);
-        button.add_css_class("transition-action");
-        button.set_tooltip_text(Some(&format!("Move to {}", transition.to_name)));
-        let parent = parent.downgrade();
-        let key = issue_key.to_owned();
-        let submit = submit.clone();
-        let on_open = on_open.clone();
-        button.connect_clicked(move |_| {
-            if let Some(parent) = parent.upgrade() {
-                activate_transition(
-                    &parent, &key, cloud, transition.clone(), submit.clone(), on_open.clone(),
-                );
-            }
-        });
-        actions.insert(&button, -1);
+    let primary = primary_transition_index(
+        &transitions, cloud, preferred_id.as_deref(), workflow.as_ref(),
+    );
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    row.set_halign(gtk::Align::Start);
+    row.add_css_class("workflow-actions-row");
+    if let Some(index) = primary {
+        let button = action_button(
+            parent, issue_key, cloud, transitions[index].clone(), &submit, &on_open,
+        );
+        button.add_css_class("transition-primary");
+        row.append(&button);
     }
-    container.append(&actions);
+
+    if transitions.len() > 1 || primary.is_none() {
+        let popover = gtk::Popover::new();
+        let list = gtk::Box::new(gtk::Orientation::Vertical, 3);
+        list.add_css_class("workflow-actions-menu");
+        list.set_margin_top(7);
+        list.set_margin_bottom(7);
+        list.set_margin_start(7);
+        list.set_margin_end(7);
+        for (index, transition) in transitions.iter().enumerate() {
+            if Some(index) == primary {
+                continue;
+            }
+            let item = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+            let button = action_button(
+                parent, issue_key, cloud, transition.clone(), &submit, &on_open,
+            );
+            button.add_css_class("flat");
+            button.add_css_class("transition-secondary");
+            button.set_hexpand(true);
+            let popover_for_action = popover.clone();
+            button.connect_clicked(move |_| popover_for_action.popdown());
+            item.append(&button);
+
+            if let Some(change) = &on_primary_changed {
+                let choose = gtk::Button::from_icon_name("starred-symbolic");
+                choose.add_css_class("flat");
+                choose.add_css_class("transition-prefer");
+                choose.set_tooltip_text(Some("Make primary action for this workflow status"));
+                let id = transition.id.clone();
+                let change = change.clone();
+                let popover_for_change = popover.clone();
+                choose.connect_clicked(move |_| {
+                    popover_for_change.popdown();
+                    change(Some(id.clone()));
+                });
+                item.append(&choose);
+            }
+            list.append(&item);
+        }
+        if preferred_id.is_some() && let Some(change) = &on_primary_changed {
+            let reset = gtk::Button::with_label("Use Jira's default priority");
+            reset.add_css_class("flat");
+            reset.add_css_class("transition-reset");
+            let change = change.clone();
+            let popover_for_reset = popover.clone();
+            reset.connect_clicked(move |_| {
+                popover_for_reset.popdown();
+                change(None);
+            });
+            list.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
+            list.append(&reset);
+        }
+        popover.set_child(Some(&list));
+        let more = gtk::MenuButton::new();
+        more.add_css_class("workflow-actions-more");
+        if primary.is_some() {
+            more.set_icon_name("pan-down-symbolic");
+            more.set_tooltip_text(Some("Other workflow actions"));
+        } else {
+            more.set_label("Workflow actions");
+        }
+        more.set_popover(Some(&popover));
+        row.append(&more);
+    }
+    container.append(&row);
 }
 
 /// Execute a workflow action from either the inspector or the command palette.
@@ -538,7 +704,8 @@ mod tests {
         };
         let transition = IssueTransition {
             id: "31".into(), name: "Done".into(), to_name: "Done".into(),
-            to_id: "3".into(), to_category: None, fields: vec![], edit_fields: vec![],
+            to_id: "3".into(), to_category: None, is_global: None,
+            opsbar_sequence: None, fields: vec![], edit_fields: vec![],
         };
         assert!(!transition_needs_form(&transition));
         let optional = TransitionField { required: false, ..required.clone() };
@@ -546,6 +713,170 @@ mod tests {
         assert!(!transition_needs_form(&with_optional));
         let with_required = IssueTransition { fields: vec![required], ..transition };
         assert!(transition_needs_form(&with_required));
+    }
+
+    fn t(id: &str, is_global: Option<bool>, priority: Option<i64>) -> IssueTransition {
+        IssueTransition {
+            id: id.into(), name: format!("Localized {id}"), to_name: format!("State {id}"),
+            to_id: id.into(), to_category: None, is_global,
+            opsbar_sequence: priority, fields: vec![], edit_fields: vec![],
+        }
+    }
+
+    fn workflow(
+        current: &str, edges: &[(&str, &str)], terminal: &str,
+    ) -> WorkflowContext {
+        let mut graph = WorkflowGraph::default();
+        graph.status_ids.insert(current.into());
+        graph.status_ids.insert(terminal.into());
+        for (source, target) in edges {
+            graph.status_ids.insert((*source).into());
+            graph.status_ids.insert((*target).into());
+            graph.edges.entry((*source).into()).or_default().insert((*target).into());
+        }
+        WorkflowContext {
+            current_status_id: current.into(),
+            graph: Arc::new(graph),
+            terminal_status_ids: HashSet::from([terminal.into()]),
+        }
+    }
+
+    #[test]
+    fn art_1885_begin_work_is_primary_not_stash_or_global_close() {
+        // Ready for Dev -> Open is a rollback; the Jira opsbar lists it first.
+        let mut stash = t("211", Some(false), Some(1));
+        stash.to_id = "1".into();
+        let mut begin_work = t("11", Some(false), Some(20));
+        begin_work.to_id = "3".into();
+        let mut close = t("141", Some(true), Some(10));
+        close.to_id = "6".into();
+        let context = workflow("10291", &[
+            ("10291","1"),("1","10291"),("10291","3"),
+            ("3","10053"),("10053","10069"),("10069","10054"),
+            ("10054","6"),
+        ], "6");
+        assert_eq!(
+            primary_transition_index(&[stash,begin_work,close], true, None, Some(&context)),
+            Some(1),
+        );
+    }
+
+    #[test]
+    fn art_2921_review_is_primary_not_pause_work() {
+        let mut pause = t("161", Some(false), Some(1));
+        pause.to_id = "10291".into();
+        let mut review = t("121", Some(false), Some(20));
+        review.to_id = "10053".into();
+        let mut close = t("141", Some(true), Some(10));
+        close.to_id = "6".into();
+        let context = workflow("3", &[
+            ("10291","3"),("3","10291"),("3","10053"),
+            ("10053","10069"),("10069","10054"),("10054","6"),
+        ], "6");
+        assert_eq!(
+            primary_transition_index(&[pause,review,close],true,None,Some(&context)),Some(1),
+        );
+    }
+
+    #[test]
+    fn global_close_only_still_selects_normal_steps_then_close_at_frontier() {
+        let mut start = t("begin", None, Some(25));
+        start.to_id = "progress".into();
+        let mut stash = t("stash", None, Some(1));
+        stash.to_id = "open".into();
+        let mut close = t("close", Some(true), Some(2));
+        close.to_id = "done".into();
+        let mut ready = workflow("ready", &[
+            ("open","ready"),("ready","open"),("ready","progress"),
+            ("progress","review"),("review","testing"),("testing","review"),
+        ], "done");
+        let graph = Arc::make_mut(&mut ready.graph);
+        graph.initial_status_ids.insert("open".into());
+        assert_eq!(
+            primary_transition_index(&[stash,start,close.clone()],true,None,Some(&ready)),
+            Some(1),
+        );
+        let mut review = t("review", None, None);
+        review.to_id = "review".into();
+        let mut pause = t("pause", None, None);
+        pause.to_id = "ready".into();
+        let progressing = WorkflowContext {
+            current_status_id: "progress".into(), graph: ready.graph.clone(),
+            terminal_status_ids: ready.terminal_status_ids.clone(),
+        };
+        assert_eq!(
+            primary_transition_index(&[pause,review,close.clone()],true,None,Some(&progressing)),
+            Some(1),
+        );
+        let testing = WorkflowContext {
+            current_status_id: "testing".into(), graph: ready.graph.clone(),
+            terminal_status_ids: ready.terminal_status_ids.clone(),
+        };
+        assert_eq!(primary_transition_index(&[close],true,None,Some(&testing)),Some(0));
+    }
+
+    #[test]
+    fn terminal_step_is_primary_only_at_end_of_normal_workflow() {
+        let mut close = t("finish", Some(false), None);
+        close.to_id = "done".into();
+        let context = workflow("testing", &[("testing","done")], "done");
+        assert_eq!(primary_transition_index(&[close],true,None,Some(&context)),Some(0));
+    }
+
+    #[test]
+    fn terminal_shortcut_cannot_override_a_forward_step() {
+        let mut close = t("finish", None, Some(1));
+        close.to_id = "done".into();
+        let mut next = t("next", None, Some(50));
+        next.to_id = "review".into();
+        let context = workflow("progress", &[
+            ("progress","done"),("progress","review"),("review","done")
+        ],"done");
+        // Direct Close makes the shortest distance 1. Instead of promoting
+        // that shortcut, use the last normally reachable stage as the goal.
+        assert_eq!(primary_transition_index(&[close,next],true,None,Some(&context)),Some(1));
+    }
+
+    #[test]
+    fn competing_forward_paths_use_distance_to_terminal() {
+        let mut long_way = t("long", None, Some(1));
+        long_way.to_id = "a".into();
+        let mut short_way = t("short", None, Some(20));
+        short_way.to_id = "b".into();
+        let context = workflow("start", &[
+            ("start","a"),("start","b"),("a","x"),("x","y"),
+            ("y","done"),("b","done"),
+        ], "done");
+        assert_eq!(
+            primary_transition_index(&[long_way,short_way],true,None,Some(&context)),
+            Some(1),
+        );
+    }
+
+    #[test]
+    fn equal_distance_branches_do_not_invent_primary() {
+        let mut first = t("a", None, None);
+        first.to_id = "left".into();
+        let mut second = t("b", None, None);
+        second.to_id = "right".into();
+        let context = workflow("start", &[
+            ("start","left"),("start","right"),("left","done"),("right","done"),
+        ], "done");
+        assert_eq!(
+            primary_transition_index(&[first.clone(),second.clone()],true,None,Some(&context)),
+            None,
+        );
+        assert_eq!(
+            primary_transition_index(&[first,second],true,Some("b"),Some(&context)),
+            Some(1),
+        );
+    }
+
+    #[test]
+    fn no_directed_workflow_metadata_never_promotes_unknown_action() {
+        let context = workflow("ready",&[], "done");
+        assert_eq!(primary_transition_index(&[t("action",None,None)],true,None,Some(&context)),None);
+        assert_eq!(primary_transition_index(&[t("action",None,None)],true,Some("action"),None),Some(0));
     }
 
     #[test]

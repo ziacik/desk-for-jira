@@ -1,4 +1,4 @@
-use std::{collections::{HashMap, HashSet}, fmt, io::Read, time::Duration};
+use std::{collections::{HashMap, HashSet, VecDeque}, fmt, io::Read, sync::Arc, time::Duration};
 
 use anyhow::{Context, Result, bail, ensure};
 use reqwest::blocking::{Client, RequestBuilder};
@@ -266,6 +266,10 @@ pub struct IssueTransition {
     pub to_name: String,
     pub to_id: String,
     pub to_category: Option<StatusCategory>,
+    /// Jira Cloud exposes whether a transition is global; absent on older servers.
+    pub is_global: Option<bool>,
+    /// Explicit Jira Data Center opsbar ordering, when returned by the API.
+    pub opsbar_sequence: Option<i64>,
     pub fields: Vec<TransitionField>,
     // Fields editable on the issue but absent from this transition screen.
     pub edit_fields: Vec<TransitionField>,
@@ -290,7 +294,95 @@ pub struct ProjectStatus {
     pub id: String,
     pub name: String,
     pub category: Option<StatusCategory>,
+    /// Board-column presentation hint only; never used to infer action direction.
     pub workflow_order: Option<usize>,
+    /// Directed workflow definitions involving this status. Shared cheaply.
+    pub workflows: Vec<Arc<WorkflowGraph>>,
+}
+
+/// Actual Jira workflow edges, separate from the board's total status order.
+/// Global transitions are intentionally excluded: they are shortcuts, not steps.
+#[derive(Clone, Debug, Default)]
+pub struct WorkflowGraph {
+    pub status_ids: HashSet<String>,
+    pub edges: HashMap<String, HashSet<String>>,
+    pub initial_status_ids: HashSet<String>,
+    pub issue_types: HashSet<String>,
+}
+
+impl WorkflowGraph {
+    pub fn has_edge(&self, source: &str, target: &str) -> bool {
+        self.edges.get(source).is_some_and(|destinations| destinations.contains(target))
+    }
+
+    /// If the only way to close is a GLOBAL action, Done is disconnected from
+    /// directed edges. The furthest normally reachable statuses form the last
+    /// stage before that action. Never use numeric IDs or display names.
+    pub fn normal_frontier(&self, terminal_statuses: &HashSet<String>) -> HashSet<String> {
+        let mut initial = self.initial_status_ids.clone();
+        if initial.is_empty() {
+            let targets: HashSet<&str> = self.edges.values()
+                .flat_map(|destinations| destinations.iter().map(String::as_str)).collect();
+            initial = self.status_ids.iter()
+                .filter(|status| !targets.contains(status.as_str()))
+                .cloned().collect();
+        }
+        if initial.is_empty() {
+            return HashSet::new();
+        }
+        let mut visited = HashMap::new();
+        let mut queue = VecDeque::new();
+        for status in initial {
+            if self.status_ids.contains(&status) {
+                visited.insert(status.clone(), 0usize);
+                queue.push_back(status);
+            }
+        }
+        while let Some(status) = queue.pop_front() {
+            let next_distance = visited[&status] + 1;
+            for next in self.edges.get(&status).into_iter().flatten() {
+                if !visited.contains_key(next) {
+                    visited.insert(next.clone(), next_distance);
+                    queue.push_back(next.clone());
+                }
+            }
+        }
+        let maximum = visited.iter()
+            .filter(|(status, _)| !terminal_statuses.contains(*status))
+            .map(|(_, distance)| *distance).max();
+        let Some(maximum) = maximum.filter(|distance| *distance > 0) else {
+            return HashSet::new();
+        };
+        visited.into_iter().filter_map(|(status, distance)| {
+            (distance == maximum && !terminal_statuses.contains(&status)).then_some(status)
+        }).collect()
+    }
+
+    /// Reverse BFS, handling cycles and multiple terminal statuses.
+    pub fn distance_to_terminals(&self, terminals: &HashSet<String>) -> HashMap<String, usize> {
+        let mut incoming: HashMap<&str, Vec<&str>> = HashMap::new();
+        for (source, destinations) in &self.edges {
+            for destination in destinations {
+                incoming.entry(destination).or_default().push(source);
+            }
+        }
+        let mut distances = HashMap::new();
+        let mut queue = VecDeque::new();
+        for terminal in terminals.intersection(&self.status_ids) {
+            distances.insert(terminal.clone(), 0usize);
+            queue.push_back(terminal.as_str());
+        }
+        while let Some(status) = queue.pop_front() {
+            let distance = distances[status];
+            for previous in incoming.get(status).into_iter().flatten() {
+                if !distances.contains_key(*previous) {
+                    distances.insert((*previous).to_owned(), distance + 1);
+                    queue.push_back(previous);
+                }
+            }
+        }
+        distances
+    }
 }
 
 fn parse_status_category(value: &Value) -> Option<StatusCategory> {
@@ -509,9 +601,23 @@ impl JiraClient {
     pub fn issue_transitions(&self, key: &str) -> Result<Vec<IssueTransition>> {
         let version = if self.account.mode == AuthMode::Cloud { "3" } else { "2" };
         let path = format!("/rest/api/{version}/issue/{key}/transitions");
-        let data = self.read_json(self.http.get(self.url(&path))
-            .query(&[("expand", "transitions.fields")]))?;
+        let request = self.http.get(self.url(&path));
+        let request = if self.account.mode == AuthMode::Cloud {
+            // Cloud can order transitions by Jira's configured OpsBar priority.
+            request.query(&[
+                ("expand", "transitions.fields"),
+                ("sortByOpsBarAndStatus", "true"),
+            ])
+        } else {
+            // Data Center exposes opsbarSequence in each transition instead.
+            request.query(&[("expand", "transitions.fields")])
+        };
+        let data = self.read_json(request)?;
         let mut transitions = parse_issue_transitions(&data);
+        if self.account.mode != AuthMode::Cloud {
+            // Stable: transitions with equal priority keep the API's ordering.
+            transitions.sort_by_key(|transition| transition.opsbar_sequence.unwrap_or(i64::MAX));
+        }
 
         // An issue field may already be populated even when its transition-screen
         // metadata says "required". Never ask the user to re-enter that value.
@@ -764,6 +870,8 @@ impl JiraClient {
         let version = if self.account.mode == AuthMode::Cloud { "3" } else { "2" };
         let mut statuses = Vec::new();
         let mut seen = HashSet::new();
+        let mut issue_type_statuses: HashMap<String, HashMap<String, HashSet<String>>> =
+            HashMap::new();
         for key in keys {
             validate_project_key(key)?;
             let data = self.read_json(self.http.get(
@@ -771,12 +879,14 @@ impl JiraClient {
             ))?;
             let types = data.as_array().context("Unexpected Jira statuses response")?;
             for issue_type in types {
+                let mut kind_statuses = HashSet::new();
                 for status in issue_type.get("statuses").and_then(Value::as_array)
                     .into_iter().flatten() {
                     let (Some(id), Some(name)) = (
                         status.get("id").and_then(Value::as_str),
                         status.get("name").and_then(Value::as_str),
                     ) else { continue };
+                    kind_statuses.insert(id.to_owned());
                     if seen.insert((key.clone(), id.to_owned())) {
                         statuses.push(ProjectStatus {
                             project_key: key.clone(),
@@ -784,8 +894,13 @@ impl JiraClient {
                             name: name.to_owned(),
                             category: status.get("statusCategory").and_then(parse_status_category),
                             workflow_order: None,
+                            workflows: Vec::new(),
                         });
                     }
+                }
+                if let Some(kind) = issue_type.get("name").and_then(Value::as_str) {
+                    issue_type_statuses.entry(key.clone()).or_default()
+                        .insert(kind.to_owned(), kind_statuses);
                 }
             }
         }
@@ -812,37 +927,60 @@ impl JiraClient {
         }
         if self.account.mode == AuthMode::Cloud {
             for key in keys {
-                let workflow_order = self.project_workflow_order(key);
+                let (workflow_order, mut graphs) = self.project_workflow_metadata(key);
+                if let Some(issue_types) = issue_type_statuses.get(key) {
+                    for graph in &mut graphs {
+                        for (kind, expected_statuses) in issue_types {
+                            if graph.status_ids == *expected_statuses {
+                                graph.issue_types.insert(kind.clone());
+                            }
+                        }
+                    }
+                }
+                let graphs: Vec<_> = graphs.into_iter().map(Arc::new).collect();
                 for status in statuses.iter_mut().filter(|s| &s.project_key == key) {
                     status.workflow_order = workflow_order.get(status.id.as_str()).copied();
+                    status.workflows = graphs.iter()
+                        .filter(|graph| graph.status_ids.contains(&status.id))
+                        .cloned().collect();
                 }
             }
         }
         Ok(statuses)
     }
 
-    // Optional best-effort workflow metadata. Many Jira users have browse access
-    // but lack View (read-only) workflow permission; never block the board on it.
-    fn project_workflow_order(&self, key: &str) -> std::collections::HashMap<String, usize> {
+    // Reuse the existing workflow-search requests, retaining the actual edges
+    // alongside the presentation ordering. Unavailable workflow metadata must
+    // never block board rendering or trigger an extra request per issue.
+    fn project_workflow_metadata(&self, key: &str) ->
+        (HashMap<String, usize>, Vec<WorkflowGraph>)
+    {
         let project = self.read_json(self.http.get(
             self.url(&format!("/rest/api/3/project/{key}"))
         ));
         let Some(project_id) = project.ok()
             .and_then(|p| p.get("id").and_then(Value::as_str).map(str::to_owned))
-        else { return std::collections::HashMap::new(); };
+        else {
+            return (HashMap::new(), Vec::new());
+        };
 
-        let mut result = std::collections::HashMap::new();
+        let mut result = HashMap::new();
+        let mut graphs = Vec::new();
         let mut start = 0usize;
         for _ in 0..10 {
             let page = self.read_json(self.http.get(
                 self.url("/rest/api/3/workflows/search")
             ).query(&[
                 ("projectId", project_id.as_str()),
+                // The new /workflows/search endpoint omits directed transition
+                // details unless values.transitions is explicitly expanded.
+                ("expand", "values.transitions"),
                 ("startAt", &start.to_string()),
                 ("maxResults", "100"),
                 ("isActive", "true"),
             ]));
             let Ok(page) = page else { break; };
+            graphs.extend(parse_workflow_graphs(&page));
             for (id, position) in parse_workflow_status_order(&page) {
                 result.entry(id).and_modify(|old: &mut usize| {
                     *old = (*old).min(position);
@@ -855,7 +993,7 @@ impl JiraClient {
             }
             start += count;
         }
-        result
+        (result, graphs)
     }
 
     /// Download a Jira attachment using the stored credentials. Only the same
@@ -1025,6 +1163,66 @@ fn project_issues_jql(keys: &[String], scope: Option<&str>, active_sprint_only: 
     }
     jql.push_str(" ORDER BY updated DESC");
     Ok(jql)
+}
+
+/// Extract directed, status-specific transitions. Global/initial transitions
+/// are not normal work progression and must not influence primary actions.
+fn parse_workflow_graphs(response: &Value) -> Vec<WorkflowGraph> {
+    let references: HashMap<&str, &str> = response.get("statuses")
+        .and_then(Value::as_array).into_iter().flatten()
+        .filter_map(|status| Some((
+            status.get("statusReference")?.as_str()?,
+            status.get("id")?.as_str()?,
+        )))
+        .collect();
+    response.get("values").and_then(Value::as_array)
+        .or_else(|| response.get("workflows").and_then(Value::as_array))
+        .into_iter().flatten().filter_map(|workflow| {
+            let ids: HashSet<String> = workflow.get("statuses").and_then(Value::as_array)?
+                .iter()
+                .filter(|status| status.get("deprecated").and_then(Value::as_bool) != Some(true))
+                .filter_map(|status| {
+                    references.get(status.get("statusReference")?.as_str()?)
+                        .map(|id| (*id).to_owned())
+                })
+                .collect();
+            if ids.is_empty() {
+                return None;
+            }
+            let mut edges: HashMap<String, HashSet<String>> = HashMap::new();
+            let mut initial_status_ids = HashSet::new();
+            for transition in workflow.get("transitions").and_then(Value::as_array)
+                .into_iter().flatten()
+            {
+                let Some(target) = transition.get("toStatusReference").and_then(Value::as_str)
+                    .and_then(|reference| references.get(reference))
+                else { continue };
+                if !ids.contains(*target) {
+                    continue;
+                }
+                match transition.get("type").and_then(Value::as_str) {
+                    Some("INITIAL") => {
+                        initial_status_ids.insert((*target).to_owned());
+                        continue;
+                    }
+                    Some("DIRECTED") => {}
+                    _ => continue,
+                }
+                for link in transition.get("links").and_then(Value::as_array)
+                    .into_iter().flatten()
+                {
+                    if let Some(source) = link.get("fromStatusReference").and_then(Value::as_str)
+                        .and_then(|reference| references.get(reference))
+                        && ids.contains(*source) && source != target
+                    {
+                        edges.entry((*source).to_owned()).or_default().insert((*target).to_owned());
+                    }
+                }
+            }
+            Some(WorkflowGraph {
+                status_ids: ids, edges, initial_status_ids, issue_types: HashSet::new(),
+            })
+        }).collect()
 }
 
 /// Derive ordering from actual workflow transitions; no status-name guesses.
@@ -1370,11 +1568,13 @@ fn parse_issue_transitions(response: &Value) -> Vec<IssueTransition> {
             let to_name = to.get("name").and_then(Value::as_str).unwrap_or(&name).to_owned();
             let to_id = to.get("id").and_then(Value::as_str).unwrap_or("").to_owned();
             let to_category = to.get("statusCategory").and_then(parse_status_category);
+            let is_global = transition.get("isGlobal").and_then(Value::as_bool);
+            let opsbar_sequence = transition.get("opsbarSequence").and_then(Value::as_i64);
             let fields = transition.get("fields").and_then(Value::as_object)
                 .map(parse_transition_fields).unwrap_or_default();
             Some(IssueTransition {
-                id, name, to_name, to_id, to_category, fields,
-                edit_fields: Vec::new(),
+                id, name, to_name, to_id, to_category, is_global, opsbar_sequence,
+                fields, edit_fields: Vec::new(),
             })
         }).collect()
 }
@@ -1498,6 +1698,112 @@ mod tests {
         assert_eq!(result.get("1"), Some(&0));
         assert_eq!(result.get("2"), Some(&1));
         assert_eq!(result.get("3"), Some(&2));
+    }
+
+    #[test]
+    fn missing_transition_expansion_produces_no_directed_edges() {
+        // Jira's /workflows/search response is not the full workflow unless
+        // expand=values.transitions is requested. Statuses alone aren't enough.
+        let response = json!({
+            "statuses": [
+                {"id": "3", "statusReference": "progress"},
+                {"id": "6", "statusReference": "done"}
+            ],
+            "values": [{
+                "statuses": [
+                    {"statusReference": "progress"},
+                    {"statusReference": "done"}
+                ]
+            }]
+        });
+        let without_expansion = parse_workflow_graphs(&response);
+        assert_eq!(without_expansion.len(), 1);
+        assert!(without_expansion[0].edges.is_empty());
+
+        let mut expanded = response;
+        expanded["values"][0]["transitions"] = json!([{
+            "id": "121",
+            "type": "DIRECTED",
+            "toStatusReference": "done",
+            "links": [{"fromStatusReference": "progress"}]
+        }]);
+        let with_expansion = parse_workflow_graphs(&expanded);
+        assert!(with_expansion[0].has_edge("3", "6"));
+    }
+
+    #[test]
+    fn workflow_graph_keeps_directed_edges_and_ignores_global_shortcuts() {
+        let response = json!({
+            "statuses": [
+                {"id":"1","statusReference":"ready"},
+                {"id":"2","statusReference":"progress"},
+                {"id":"3","statusReference":"review"},
+                {"id":"4","statusReference":"done"}
+            ],
+            "values":[{"statuses":[
+                {"statusReference":"ready"},{"statusReference":"progress"},
+                {"statusReference":"review"},{"statusReference":"done"}
+            ],"transitions":[
+                {"type":"DIRECTED","toStatusReference":"progress",
+                 "links":[{"fromStatusReference":"ready"}]},
+                {"type":"DIRECTED","toStatusReference":"review",
+                 "links":[{"fromStatusReference":"progress"}]},
+                {"type":"DIRECTED","toStatusReference":"done",
+                 "links":[{"fromStatusReference":"review"}]},
+                {"type":"DIRECTED","toStatusReference":"ready",
+                 "links":[{"fromStatusReference":"progress"}]},
+                {"type":"GLOBAL","toStatusReference":"done"}
+            ]}]
+        });
+        let graphs = parse_workflow_graphs(&response);
+        assert_eq!(graphs.len(), 1);
+        let graph = &graphs[0];
+        assert!(graph.has_edge("1","2"));
+        assert!(graph.has_edge("2","1"));
+        assert!(!graph.has_edge("1","4"));
+        let distances = graph.distance_to_terminals(&HashSet::from(["4".into()]));
+        assert_eq!(distances.get("4"), Some(&0));
+        assert_eq!(distances.get("3"), Some(&1));
+        assert_eq!(distances.get("2"), Some(&2));
+        assert_eq!(distances.get("1"), Some(&3));
+    }
+
+    #[test]
+    fn global_only_close_uses_last_reachable_normal_status_as_frontier() {
+        let response = json!({
+            "statuses":[
+                {"id":"1","statusReference":"open"},
+                {"id":"2","statusReference":"ready"},
+                {"id":"3","statusReference":"progress"},
+                {"id":"4","statusReference":"review"},
+                {"id":"5","statusReference":"done"}
+            ],
+            "values":[{"statuses":[
+                {"statusReference":"open"},{"statusReference":"ready"},
+                {"statusReference":"progress"},{"statusReference":"review"},
+                {"statusReference":"done"}
+            ],"transitions":[
+                {"type":"INITIAL","toStatusReference":"open"},
+                {"type":"DIRECTED","toStatusReference":"ready",
+                  "links":[{"fromStatusReference":"open"}]},
+                {"type":"DIRECTED","toStatusReference":"open",
+                  "links":[{"fromStatusReference":"ready"}]},
+                {"type":"DIRECTED","toStatusReference":"progress",
+                  "links":[{"fromStatusReference":"ready"}]},
+                {"type":"DIRECTED","toStatusReference":"review",
+                  "links":[{"fromStatusReference":"progress"}]},
+                {"type":"GLOBAL","toStatusReference":"done"}
+            ]}]
+        });
+        let graph = &parse_workflow_graphs(&response)[0];
+        let terminals = HashSet::from(["5".into()]);
+        assert!(!graph.distance_to_terminals(&terminals).contains_key("2"));
+        let frontier = graph.normal_frontier(&terminals);
+        assert_eq!(frontier, HashSet::from(["4".into()]));
+        let distances = graph.distance_to_terminals(&frontier);
+        assert_eq!(distances.get("2"), Some(&2));
+        assert_eq!(distances.get("3"), Some(&1));
+        assert_eq!(distances.get("1"), Some(&3));
     }
 
     #[test]
@@ -1730,6 +2036,7 @@ mod transition_tests {
         let mut transition = IssueTransition {
             id: "31".into(), name: "Review".into(),
             to_name: "Review".into(), to_id: "3".into(), to_category: None,
+            is_global: None, opsbar_sequence: None,
             fields: vec![
                 TransitionField { id: "fixVersions".into(), name: "Fix versions".into(),
                     schema_type: "array".into(), item_type: "version".into(),
@@ -1758,6 +2065,7 @@ mod transition_tests {
         let mut transition = IssueTransition {
             id: "31".into(), name: "Review".into(),
             to_name: "Review".into(), to_id: "3".into(), to_category: None,
+            is_global: None, opsbar_sequence: None,
             fields: vec![TransitionField {
                 id: "worklog".into(), name: "Log work".into(), required: true,
                 schema_type: "array".into(), item_type: "worklog".into(),
@@ -1868,6 +2176,21 @@ mod transition_tests {
         assert_eq!(body["fields"]["resolution"]["id"], "1");
         assert!(body["fields"].get("comment").is_none());
         assert_eq!(body["update"]["comment"][0]["add"]["body"], "Done");
+    }
+
+    #[test]
+    fn parses_jira_workflow_priority_without_matching_transition_names() {
+        let data = json!({"transitions": [
+            {"id":"12", "name":"Whatever", "isGlobal":false, "opsbarSequence":20,
+                "to":{"id":"4", "name":"B"}},
+            {"id":"13", "name":"Anything", "isGlobal":true, "opsbarSequence":10,
+                "to":{"id":"5", "name":"C"}}
+        ]});
+        let transitions = parse_issue_transitions(&data);
+        assert_eq!(transitions[0].is_global, Some(false));
+        assert_eq!(transitions[0].opsbar_sequence, Some(20));
+        assert_eq!(transitions[1].is_global, Some(true));
+        assert_eq!(transitions[1].opsbar_sequence, Some(10));
     }
 
     #[test]

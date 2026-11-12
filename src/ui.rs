@@ -216,6 +216,7 @@ struct State {
     settings: BoardSettings,
     statuses: Vec<ProjectStatus>,
     worktree_visibility: preferences::WorktreeVisibility,
+    primary_transitions: preferences::PrimaryTransitions,
     issues: Vec<Issue>,
     pinned_issues: Vec<Issue>,
     recent_issues: Vec<Issue>,
@@ -1226,6 +1227,11 @@ fn handle_event(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>, eve
                             show_error(ui, &format!("Could not read worktree visibility: {err}"));
                             preferences::WorktreeVisibility::default()
                         });
+                    let primary_transitions = preferences::load_primary_transitions(&account.base_url)
+                        .unwrap_or_else(|err| {
+                            show_error(ui, &format!("Could not read preferred transitions: {err}"));
+                            preferences::PrimaryTransitions::default()
+                        });
                     let project_error = loaded.projects.as_ref().err().cloned();
                     ui.restoring_view.set(true);
                     {
@@ -1234,6 +1240,7 @@ fn handle_event(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>, eve
                         s.projects = loaded.projects.unwrap_or_default();
                         s.settings = settings;
                         s.worktree_visibility = worktree_visibility;
+                        s.primary_transitions = primary_transitions;
                         s.statuses.clear();
                         s.issues.clear();
                         s.pinned_issues.clear();
@@ -1429,10 +1436,51 @@ fn handle_event(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>, eve
                     let cloud = account.mode == AuthMode::Cloud;
                     let submit = transition_submit(ui, state, sender, &key);
                     let on_open = transition_form_opened(ui);
+                    let context = {
+                        let s = state.borrow();
+                        s.recent_issues.iter().chain(s.issues.iter()).chain(s.pinned_issues.iter())
+                            .find(|issue| issue.key == key && !issue.status_id.is_empty())
+                            .map(|issue| (issue.project_key.clone(), issue.status_id.clone(), issue.kind.clone()))
+                    };
+                    let preferred = context.as_ref().and_then(|(project, status, kind)| {
+                        state.borrow().primary_transitions.get(project, status, kind).map(str::to_owned)
+                    });
+                    let mut workflow = context.as_ref().and_then(|(project, status, kind)| {
+                        resolve_workflow_context(&state.borrow().statuses, project, status, kind)
+                    });
+                    if let Some(workflow) = &mut workflow {
+                        workflow.terminal_status_ids.extend(transitions.iter()
+                            .filter(|t| t.to_category == Some(StatusCategory::Done))
+                            .map(|t| t.to_id.clone()));
+                    }
+                    let on_primary_changed: Option<transition_ui::PrimaryChanged> =
+                        context.map(|(project, status, kind)| {
+                            let ui = ui.clone();
+                            let state = state.clone();
+                            let account = account.clone();
+                            let key = key.clone();
+                            Rc::new(move |id: Option<String>| {
+                                {
+                                    let mut s = state.borrow_mut();
+                                    s.primary_transitions.set(&project, &status, &kind, id.as_deref());
+                                }
+                                if let Err(error) = preferences::save_primary_transitions(
+                                    &account.base_url, &state.borrow().primary_transitions,
+                                ) {
+                                    show_error(&ui, &format!("Could not save preferred transition: {error}"));
+                                }
+                                request_transitions(
+                                    &ui.detail_actions, &ui.detail_request, &ui.events,
+                                    Some(account.clone()), state.borrow().generation, &key,
+                                );
+                            }) as transition_ui::PrimaryChanged
+                        });
                     ui.detail_actions.set_sensitive(!ui.transition_busy.get());
                     transition_ui::render_actions(
                         &ui.detail_actions, &ui.window, &key, cloud,
-                        transitions, submit, on_open,
+                        transitions, transition_ui::ActionOptions {
+                            workflow, preferred_id: preferred, on_primary_changed, submit, on_open,
+                        },
                     );
                 }
                 Err(error) => {
@@ -1572,6 +1620,33 @@ fn start_refresh(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>, ac
         })().map_err(|err| err.to_string());
         let _ = sender.send(Event::Loaded(id, account, result));
     });
+}
+
+/// Match the graph for the issue type, rather than merging workflows
+/// sharing a status into one graph.
+fn resolve_workflow_context(
+    statuses: &[ProjectStatus],
+    project: &str,
+    status_id: &str,
+    issue_type: &str,
+) -> Option<transition_ui::WorkflowContext> {
+    let status = statuses.iter().find(|s| s.project_key == project && s.id == status_id)?;
+    let matching: Vec<_> = status.workflows.iter()
+        .filter(|graph| graph.issue_types.contains(issue_type)).collect();
+    let graph = match matching.as_slice() {
+        [graph] => (*graph).clone(),
+        [] if status.workflows.len() == 1
+            && status.workflows[0].issue_types.is_empty() => status.workflows[0].clone(),
+        _ => return None,
+    };
+    let terminal_status_ids = statuses.iter()
+        .filter(|s| s.project_key == project
+            && s.category == Some(StatusCategory::Done)
+            && graph.status_ids.contains(&s.id))
+        .map(|s| s.id.clone()).collect();
+    Some(transition_ui::WorkflowContext {
+        current_status_id: status_id.to_owned(), graph, terminal_status_ids,
+    })
 }
 
 fn display_board(ui: &Ui, state: &Rc<RefCell<State>>, data: BoardData) {
@@ -3923,6 +3998,32 @@ fn show_error(ui: &Ui, error: &str) {
 }
 
 #[cfg(test)]
+mod workflow_context_tests {
+    use super::*;
+
+    #[test]
+    fn requires_a_workflow_containing_the_issue_status() {
+        assert!(resolve_workflow_context(&[], "ART", "3", "Bug").is_none());
+    }
+
+    #[test]
+    fn chooses_only_the_workflow_matching_the_issue_type() {
+        let mut graph = crate::jira::WorkflowGraph::default();
+        graph.status_ids.insert("3".into());
+        graph.issue_types.insert("Task".into());
+        let status = ProjectStatus {
+            project_key: "ART".into(),
+            id: "3".into(),
+            name: "In Progress".into(),
+            category: Some(StatusCategory::InProgress),
+            workflow_order: None,
+            workflows: vec![std::sync::Arc::new(graph)],
+        };
+        assert!(resolve_workflow_context(&[status], "ART", "3", "Bug").is_none());
+    }
+}
+
+#[cfg(test)]
 mod detail_layout_tests {
     use super::*;
     use std::time::{Duration, Instant};
@@ -4006,6 +4107,7 @@ mod workflow_error_tests {
         let transition = IssueTransition {
             id: "121".into(), name: "Review".into(),
             to_name: "In Review".into(), to_id: "10".into(), to_category: None,
+            is_global: None, opsbar_sequence: None,
             fields: vec![], edit_fields: vec![],
         };
         assert!(!transition_error_needs_input(&error, &transition));
