@@ -115,10 +115,8 @@ fn launch(worktree: &Path, args: &[OsString]) -> Result<()> {
         bail!("Codex CLI was not found in the app's PATH");
     }
 
-    // Prefer GNOME Console (kgx), not the legacy GNOME Terminal.
-    // xdg-terminal-exec remains a fallback for non-GNOME desktops.
     let mut errors = Vec::new();
-    for program in ["kgx", "xdg-terminal-exec", "cosmic-term", "gnome-terminal"] {
+    for program in git::TERMINAL_PROGRAMS {
         match terminal_command(program, worktree, args).spawn() {
             Ok(_) => return Ok(()),
             Err(error) if error.kind() == ErrorKind::NotFound => {}
