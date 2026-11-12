@@ -107,7 +107,7 @@ fn codex_available() -> bool {
     })
 }
 
-fn launch(worktree: &Path, editor: &str, args: &[OsString]) -> Result<()> {
+fn launch(worktree: &Path, args: &[OsString]) -> Result<()> {
     if !git::is_repository(worktree) {
         bail!("Worktree is missing or is no longer a Git repository: {}", worktree.display());
     }
@@ -115,11 +115,10 @@ fn launch(worktree: &Path, editor: &str, args: &[OsString]) -> Result<()> {
         bail!("Codex CLI was not found in the app's PATH");
     }
 
-    // Open VS Code normally: Codex always runs in a separate terminal process.
-    git::open_editor(worktree, editor)?;
-
+    // Prefer GNOME Console (kgx), not the legacy GNOME Terminal.
+    // xdg-terminal-exec remains a fallback for non-GNOME desktops.
     let mut errors = Vec::new();
-    for program in ["xdg-terminal-exec", "cosmic-term", "gnome-terminal", "kgx"] {
+    for program in ["kgx", "xdg-terminal-exec", "cosmic-term", "gnome-terminal"] {
         match terminal_command(program, worktree, args).spawn() {
             Ok(_) => return Ok(()),
             Err(error) if error.kind() == ErrorKind::NotFound => {}
@@ -127,20 +126,19 @@ fn launch(worktree: &Path, editor: &str, args: &[OsString]) -> Result<()> {
         }
     }
     if errors.is_empty() {
-        bail!("No supported external terminal found (xdg-terminal-exec, cosmic-term, gnome-terminal, kgx)");
+        bail!("No supported external terminal found (GNOME Console / kgx, xdg-terminal-exec, cosmic-term, gnome-terminal)");
     }
     bail!("Cannot open external terminal: {}", errors.join("; "))
 }
 
 pub fn start(
     worktree: &Path,
-    editor: &str,
     site: &str,
     issue: &Issue,
     comments: &[IssueComment],
 ) -> Result<()> {
     let prompt = issue_prompt(site, issue, comments);
-    launch(worktree, editor, &codex_args(worktree, &prompt))
+    launch(worktree, &codex_args(worktree, &prompt))
 }
 
 #[cfg(test)]
@@ -150,6 +148,20 @@ mod tests {
     #[test]
     fn quotes_jira_text_for_kgx_without_shell_expansion() {
         assert_eq!(shell_quote("a'b; $(echo broken)"), "'a'\\''b; $(echo broken)'");
+    }
+
+    #[test]
+    fn gnome_console_receives_a_single_quoted_command() {
+        let worktree = Path::new("/tmp/worktree with spaces");
+        let args = codex_args(worktree, "Fix O'Brien's issue; $(echo unsafe)");
+        let command = terminal_command("kgx", worktree, &args);
+        let argv: Vec<_> = command.get_args()
+            .map(|argument| argument.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(argv[0], "--working-directory=/tmp/worktree with spaces");
+        assert_eq!(argv[1], "-e");
+        assert!(argv[2].contains("'Fix O'\\''Brien'"));
+        assert!(argv[2].contains("$(echo unsafe)"));
     }
 
     #[test]
