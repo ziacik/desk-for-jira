@@ -128,7 +128,6 @@ struct View {
     setup: gtk::Entry,
     run_setup: gtk::CheckButton,
     fetch: gtk::CheckButton,
-    after_open: gtk::CheckButton,
     summary: gtk::Label,
     path: gtk::Label,
     existing_branch: gtk::Label,
@@ -173,7 +172,6 @@ impl View {
             self.new_box.set_visible(false);
             self.existing_box.set_visible(false);
             self.root_field.set_visible(false);
-            self.after_open.set_visible(false);
             self.open.set_visible(false);
             self.codex.set_visible(false);
             self.more.set_visible(false);
@@ -209,7 +207,6 @@ impl View {
             self.new_box.set_visible(true);
             self.existing_box.set_visible(false);
             self.root_field.set_visible(true);
-            self.after_open.set_visible(true);
             self.create.set_visible(true);
             self.create.set_sensitive(true);
             self.open.set_visible(false);
@@ -283,7 +280,6 @@ impl View {
         self.new_box.set_visible(false);
         self.existing_box.set_visible(true);
         self.root_field.set_visible(false);
-        self.after_open.set_visible(false);
         self.create.set_visible(false);
         self.open.set_visible(true);
         self.codex.set_visible(true);
@@ -340,8 +336,6 @@ impl View {
         let script = if self.run_setup.is_active() { self.setup.text().to_string() }
             else { String::new() };
         let fetch = self.fetch.is_active();
-        let open = self.after_open.is_active();
-        let editor = self.settings.borrow().editor.clone();
         self.create.set_sensitive(false);
         report(&self.info, "Creating worktree and running setup…");
         let (tx, rx) = mpsc::channel();
@@ -379,13 +373,6 @@ impl View {
                     Ok(log) => {
                         view.show_log(&log);
                         report(&view.info, "Worktree created.");
-                        if open {
-                            if let Err(error) = git::open_editor(&path, &editor) {
-                                report(&view.info, &error.to_string());
-                            } else {
-                                view.dialog.close();
-                            }
-                        }
                     }
                     Err(error) => {
                         view.show_log(&error);
@@ -831,11 +818,6 @@ pub fn show(
     let editor = gtk::DropDown::from_strings(&["code", "codium"]);
     editor.set_selected(if settings.editor == "codium" { 1 } else { 0 });
     advanced.append(&field("Editor", &editor));
-    let after_open = gtk::CheckButton::with_label("Open in editor after worktree creation");
-    after_open.set_active(true);
-    // This causes an additional action when Create worktree is pressed.
-    // Keep it visible during creation rather than hiding it in Advanced.
-    new_box.append(&after_open);
     options.set_child(Some(&advanced));
     main.append(&options);
 
@@ -919,7 +901,7 @@ pub fn show(
         suggested_branch: issue_detail::suggested_branch_name(key, summary),
         repository: repository.clone(),
         base, cleanup_target, cleanup_summary, cleanup_choices, cleanup_change, manual_remove,
-        branch, root, root_field, editor, setup, run_setup, fetch, after_open,
+        branch, root, root_field, editor, setup, run_setup, fetch,
         summary: summary_label, path, existing_branch, existing_box, new_box,
         tree_picker, trees: Rc::new(RefCell::new(Vec::new())), more,
         info, log, log_scroller, create, open, codex, retry, terminal, remove,
