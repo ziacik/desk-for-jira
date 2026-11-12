@@ -3490,6 +3490,7 @@ fn show_command_palette(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Eve
                     let site = account.base_url.clone();
                     let dialog = crate::git_ui::show(
                         &ui_for_action.window, &site, &issue.key, &issue.summary,
+                        Some(issue.clone()), Some(account.clone()),
                     );
                     let panel = ui_for_action.development.clone();
                     let key = issue.key;
