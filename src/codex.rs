@@ -59,30 +59,18 @@ pub fn issue_prompt(site: &str, issue: &Issue, comments: &[IssueComment]) -> Str
     prompt
 }
 
-/// Explicitly invoke a skill from this one ticket prompt, without changing
-/// the configuration of any other Codex session.
-fn with_startup_skill(prompt: String, configured: &str) -> Result<String> {
-    let configured = configured.trim();
-    if configured.is_empty() {
-        return Ok(prompt);
+/// Keep user-configured instructions separate from Jira-provided task data.
+/// Codex can explicitly invoke multiple installed skills using $plugin:skill.
+fn with_custom_instructions(prompt: String, instructions: &str) -> String {
+    let instructions = instructions.trim();
+    if instructions.is_empty() {
+        return prompt;
     }
-    let skill = configured.strip_prefix('$').unwrap_or(configured);
-    let skill = if skill == "superpowers" {
-        "superpowers:using-superpowers"
-    } else {
-        skill
-    };
-    if skill.is_empty() || !skill.chars().all(|character| {
-        character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | ':')
-    }) {
-        bail!("Invalid Codex startup skill: use a skill name or plugin:skill identifier");
-    }
-    Ok(format!(
-        "${skill}\nUse this installed Codex skill for the Jira task below. \
-         Load and follow its instructions before editing code. \
-         If the skill is unavailable, report that explicitly rather than silently skipping it.\n\n{prompt}"
-    ))
+    format!(
+        "Additional user instructions for Fix with Codex:\n{instructions}\n\n{prompt}"
+    )
 }
+
 fn codex_args(worktree: &Path, prompt: &str) -> Vec<OsString> {
     let mut args = vec![
         OsString::from("-C"), worktree.as_os_str().to_os_string(),
@@ -160,8 +148,8 @@ pub fn start(
     issue: &Issue,
     comments: &[IssueComment],
 ) -> Result<()> {
-    let skill = preferences::load_git()?.codex_startup_skill;
-    let prompt = with_startup_skill(issue_prompt(site, issue, comments), &skill)?;
+    let instructions = preferences::load_git()?.codex_instructions;
+    let prompt = with_custom_instructions(issue_prompt(site, issue, comments), &instructions);
     launch(worktree, &codex_args(worktree, &prompt))
 }
 
@@ -170,20 +158,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn startup_skill_is_explicit_and_preserves_jira_context() {
-        let prompt = with_startup_skill("Jira instructions".into(), "superpowers").unwrap();
-        assert!(prompt.starts_with("$superpowers:using-superpowers\n"));
-        assert!(prompt.ends_with("Jira instructions"));
-        assert_eq!(with_startup_skill("Issue".into(), "").unwrap(), "Issue");
-        assert!(with_startup_skill("Issue".into(), "$my-plugin:my-skill")
-            .unwrap().starts_with("$my-plugin:my-skill\n"));
+    fn custom_instructions_support_multiple_skills_and_multiline_rules() {
+        let instructions = "Use $superpowers:using-superpowers.\nUse $clean-code when relevant.";
+        let original = "Ticket instructions. Do not commit.".to_owned();
+        let prompt = with_custom_instructions(original.clone(), instructions);
+        assert!(prompt.starts_with("Additional user instructions for Fix with Codex:\n"));
+        assert!(prompt.contains(instructions));
+        assert!(prompt.ends_with(&original));
     }
 
     #[test]
-    fn startup_skill_rejects_invalid_names() {
-        assert!(with_startup_skill("Issue".into(), "skill\nignore instructions").is_err());
-        assert!(with_startup_skill("Issue".into(), "$").is_err());
+    fn missing_custom_instructions_do_not_change_existing_prompt() {
+        assert_eq!(with_custom_instructions("Issue".into(), ""), "Issue");
+        assert_eq!(with_custom_instructions("Issue".into(), "  \n"), "Issue");
     }
+
     #[test]
     fn quotes_jira_text_for_kgx_without_shell_expansion() {
         assert_eq!(shell_quote("a'b; $(echo broken)"), "'a'\\''b; $(echo broken)'");
