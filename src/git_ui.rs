@@ -125,6 +125,8 @@ struct View {
     root: gtk::Entry,
     root_field: gtk::Box,
     editor: gtk::DropDown,
+    codex_skill: gtk::DropDown,
+    codex_custom_skill: gtk::Entry,
     setup: gtk::Entry,
     run_setup: gtk::CheckButton,
     fetch: gtk::CheckButton,
@@ -301,6 +303,11 @@ impl View {
         new.fetch_before_create = self.fetch.is_active();
         new.editor = selected_text(&self.editor)
             .unwrap_or_else(|| "code".to_owned());
+        new.codex_startup_skill = match self.codex_skill.selected() {
+            1 => "superpowers:using-superpowers".to_owned(),
+            2 => self.codex_custom_skill.text().trim().to_owned(),
+            _ => String::new(),
+        };
         if let Some(index) = selected_index(&self.repository)
             && let Some(repo) = new.repositories.get_mut(index)
         {
@@ -818,6 +825,26 @@ pub fn show(
     let editor = gtk::DropDown::from_strings(&["code", "codium"]);
     editor.set_selected(if settings.editor == "codium" { 1 } else { 0 });
     advanced.append(&field("Editor", &editor));
+    let codex_skill = gtk::DropDown::from_strings(&[
+        "None", "Superpowers", "Custom skill…",
+    ]);
+    let codex_custom_skill = gtk::Entry::new();
+    codex_custom_skill.set_placeholder_text(Some("plugin:skill or skill-name"));
+    let skill_selection = match settings.codex_startup_skill.as_str() {
+        "" => 0,
+        "superpowers" | "superpowers:using-superpowers" => 1,
+        _ => 2,
+    };
+    codex_skill.set_selected(skill_selection);
+    if skill_selection == 2 {
+        codex_custom_skill.set_text(&settings.codex_startup_skill);
+    }
+    codex_custom_skill.set_visible(skill_selection == 2);
+    advanced.append(&field("Codex startup skill", &codex_skill));
+    advanced.append(&codex_custom_skill);
+    let codex_hint = label("The skill must be installed in Codex CLI (use /plugins).");
+    codex_hint.add_css_class("dim-label");
+    advanced.append(&codex_hint);
     options.set_child(Some(&advanced));
     main.append(&options);
 
@@ -901,12 +928,32 @@ pub fn show(
         suggested_branch: issue_detail::suggested_branch_name(key, summary),
         repository: repository.clone(),
         base, cleanup_target, cleanup_summary, cleanup_choices, cleanup_change, manual_remove,
-        branch, root, root_field, editor, setup, run_setup, fetch,
+        branch, root, root_field, editor, codex_skill, codex_custom_skill,
+        setup, run_setup, fetch,
         summary: summary_label, path, existing_branch, existing_box, new_box,
         tree_picker, trees: Rc::new(RefCell::new(Vec::new())), more,
         info, log, log_scroller, create, open, codex, retry, terminal, remove,
         active_tree: Rc::new(RefCell::new(None)),
     });
+    {
+        let view = view.clone();
+        view.codex_skill.clone().connect_selected_notify(move |dropdown| {
+            view.codex_custom_skill.set_visible(dropdown.selected() == 2);
+            if let Err(error) = view.store_preferences() {
+                report(&view.info, &format!("Cannot save Codex skill: {error}"));
+            }
+        });
+    }
+    {
+        let view = view.clone();
+        view.codex_custom_skill.clone().connect_changed(move |_| {
+            if view.codex_skill.selected() == 2
+                && let Err(error) = view.store_preferences()
+            {
+                report(&view.info, &format!("Cannot save Codex skill: {error}"));
+            }
+        });
+    }
     {
         let view = view.clone();
         repository.connect_selected_notify(move |_| view.refresh());
