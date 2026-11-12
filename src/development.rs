@@ -351,7 +351,9 @@ impl DevelopmentPanel {
     }
 
     fn manager(&self, site: &str, key: &str, summary: &str) {
-        let dialog = git_ui::show(&self.window, site, key, summary);
+        let issue = self.issue.borrow().clone();
+        let account = self.account.borrow().clone();
+        let dialog = git_ui::show(&self.window, site, key, summary, issue, account);
         let panel = self.clone();
         let site = site.to_owned();
         let key = key.to_owned();
