@@ -560,7 +560,6 @@ mod tests {
         ProjectStatus {
             project_key: project.into(), id: id.into(), name: name.into(),
             category: None, workflow_order: None, workflows: Vec::new(),
-            workflow_metadata_note: String::new(),
         }
     }
     #[test]
