@@ -4018,7 +4018,6 @@ mod workflow_context_tests {
             category: Some(StatusCategory::InProgress),
             workflow_order: None,
             workflows: vec![std::sync::Arc::new(graph)],
-            workflow_metadata_note: String::new(),
         };
         assert!(resolve_workflow_context(&[status], "ART", "3", "Bug").is_none());
     }
