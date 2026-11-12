@@ -1445,11 +1445,9 @@ fn handle_event(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>, eve
                     let preferred = context.as_ref().and_then(|(project, status, kind)| {
                         state.borrow().primary_transitions.get(project, status, kind).map(str::to_owned)
                     });
-                    let (mut workflow, workflow_note) = if let Some((project, status, kind)) = &context {
+                    let mut workflow = context.as_ref().and_then(|(project, status, kind)| {
                         resolve_workflow_context(&state.borrow().statuses, project, status, kind)
-                    } else {
-                        (None, "Issue context missing: project, status ID or issue type unavailable".into())
-                    };
+                    });
                     if let Some(workflow) = &mut workflow {
                         workflow.terminal_status_ids.extend(transitions.iter()
                             .filter(|t| t.to_category == Some(StatusCategory::Done))
@@ -1481,8 +1479,7 @@ fn handle_event(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>, eve
                     transition_ui::render_actions(
                         &ui.detail_actions, &ui.window, &key, cloud,
                         transitions, transition_ui::ActionOptions {
-                            workflow, workflow_note, preferred_id: preferred,
-                            on_primary_changed, submit, on_open,
+                            workflow, preferred_id: preferred, on_primary_changed, submit, on_open,
                         },
                     );
                 }
@@ -1625,74 +1622,31 @@ fn start_refresh(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>, ac
     });
 }
 
-/// Reports exactly why the project workflow graph could/couldn't be associated
-/// with this issue type. Never infer an association from workflow/display names.
+/// Match the graph for the issue type, rather than merging workflows
+/// sharing a status into one graph.
 fn resolve_workflow_context(
     statuses: &[ProjectStatus],
     project: &str,
     status_id: &str,
     issue_type: &str,
-) -> (Option<transition_ui::WorkflowContext>, String) {
-    let mut report = format!(
-        "Project: {project}\nStatus ID: {status_id}\nIssue type: {issue_type}\nProject statuses loaded: {}",
-        statuses.iter().filter(|s| s.project_key == project).count()
-    );
-    let Some(status) = statuses.iter().find(|s| s.project_key == project && s.id == status_id) else {
-        report.push_str("\nWorkflow context: unavailable (current status is not in loaded project statuses)");
-        return (None, report);
-    };
-    report.push_str(&format!(
-        "\nMetadata fetch: {}\nWorkflow graphs containing current status: {}",
-        status.workflow_metadata_note, status.workflows.len()
-    ));
-    for (index, graph) in status.workflows.iter().enumerate() {
-        let mut types: Vec<_> = graph.issue_types.iter().map(String::as_str).collect();
-        types.sort_unstable();
-        report.push_str(&format!(
-            "\n  Graph {}: {} statuses, {} directed edges, issue types: {:?}",
-            index + 1, graph.status_ids.len(),
-            graph.edges.values().map(HashSet::len).sum::<usize>(),
-            types,
-        ));
-    }
+) -> Option<transition_ui::WorkflowContext> {
+    let status = statuses.iter().find(|s| s.project_key == project && s.id == status_id)?;
     let matching: Vec<_> = status.workflows.iter()
         .filter(|graph| graph.issue_types.contains(issue_type)).collect();
     let graph = match matching.as_slice() {
-        [graph] => {
-            report.push_str("\nGraph match: exact issue type");
-            (*graph).clone()
-        }
+        [graph] => (*graph).clone(),
         [] if status.workflows.len() == 1
-            && status.workflows[0].issue_types.is_empty() => {
-            report.push_str("\nGraph match: sole untyped graph");
-            status.workflows[0].clone()
-        }
-        [] => {
-            report.push_str("\nWorkflow context: unavailable (no uniquely matching issue-type graph)");
-            return (None, report);
-        }
-        _ => {
-            report.push_str("\nWorkflow context: unavailable (multiple matching graphs)");
-            return (None, report);
-        }
+            && status.workflows[0].issue_types.is_empty() => status.workflows[0].clone(),
+        _ => return None,
     };
-    let mut terminal_status_ids: HashSet<String> = statuses.iter()
+    let terminal_status_ids = statuses.iter()
         .filter(|s| s.project_key == project
             && s.category == Some(StatusCategory::Done)
             && graph.status_ids.contains(&s.id))
         .map(|s| s.id.clone()).collect();
-    // Unknown terminal statuses may still be present in the graph; this
-    // report exposes exactly which known Done statuses are used.
-    let mut terminal_list: Vec<_> = terminal_status_ids.iter().cloned().collect();
-    terminal_list.sort();
-    report.push_str(&format!("\nKnown Done status IDs: {}", terminal_list.join(", ")));
-    // If the graph's statuses aren't fully loaded, the selector remains
-    // conservative; it will not invent a terminal status.
-    terminal_status_ids.retain(|id| graph.status_ids.contains(id));
-    report.push_str("\nWorkflow context: resolved");
-    (Some(transition_ui::WorkflowContext {
+    Some(transition_ui::WorkflowContext {
         current_status_id: status_id.to_owned(), graph, terminal_status_ids,
-    }), report)
+    })
 }
 
 fn display_board(ui: &Ui, state: &Rc<RefCell<State>>, data: BoardData) {
@@ -4044,19 +3998,16 @@ fn show_error(ui: &Ui, error: &str) {
 }
 
 #[cfg(test)]
-mod workflow_diagnostics_tests {
+mod workflow_context_tests {
     use super::*;
 
     #[test]
-    fn missing_project_status_explains_unavailable_graph() {
-        let (context, reason) = resolve_workflow_context(&[], "ART", "3", "Bug");
-        assert!(context.is_none());
-        assert!(reason.contains("current status is not in loaded project statuses"));
-        assert!(reason.contains("Project statuses loaded: 0"));
+    fn requires_a_workflow_containing_the_issue_status() {
+        assert!(resolve_workflow_context(&[], "ART", "3", "Bug").is_none());
     }
 
     #[test]
-    fn ambiguous_issue_type_mapping_is_visible_in_report() {
+    fn chooses_only_the_workflow_matching_the_issue_type() {
         let mut graph = crate::jira::WorkflowGraph::default();
         graph.status_ids.insert("3".into());
         graph.issue_types.insert("Task".into());
@@ -4067,13 +4018,9 @@ mod workflow_diagnostics_tests {
             category: Some(StatusCategory::InProgress),
             workflow_order: None,
             workflows: vec![std::sync::Arc::new(graph)],
-            workflow_metadata_note: "Workflow search: 1 page(s), 1 definition(s), 1 graph(s) parsed".into(),
+            workflow_metadata_note: String::new(),
         };
-        let (context, reason) = resolve_workflow_context(&[status], "ART", "3", "Bug");
-        assert!(context.is_none());
-        assert!(reason.contains("no uniquely matching issue-type graph"));
-        assert!(reason.contains("Task"));
-        assert!(reason.contains("Workflow search: 1 page(s)"));
+        assert!(resolve_workflow_context(&[status], "ART", "3", "Bug").is_none());
     }
 }
 
