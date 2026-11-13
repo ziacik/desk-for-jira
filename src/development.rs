@@ -313,11 +313,17 @@ impl DevelopmentPanel {
         row
     }
 
-    fn actions_row(buttons: &[&gtk::Button]) -> gtk::Box {
-        let actions = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    fn actions_row(buttons: &[&gtk::Button]) -> gtk::FlowBox {
+        // Worktree actions should wrap rather than force a wide detail panel.
+        let actions = gtk::FlowBox::new();
+        actions.set_selection_mode(gtk::SelectionMode::None);
+        actions.set_min_children_per_line(1);
+        actions.set_max_children_per_line(4);
+        actions.set_column_spacing(8);
+        actions.set_row_spacing(8);
         actions.add_css_class("ticket-development-actions");
         for button in buttons {
-            actions.append(*button);
+            actions.insert(*button, -1);
         }
         actions
     }
@@ -395,6 +401,19 @@ impl DevelopmentPanel {
         button.connect_clicked(move |_| {
             if let Err(error) = git::open_editor(&path, editor) {
                 toast.add_toast(adw::Toast::new(&format!("Cannot open worktree: {error}")));
+            }
+        });
+        button
+    }
+
+    fn terminal_button(&self, path: &Path) -> gtk::Button {
+        let button = gtk::Button::with_label("Open in Terminal");
+        button.add_css_class("transition-action");
+        let path = path.to_path_buf();
+        let toast = self.toast.clone();
+        button.connect_clicked(move |_| {
+            if let Err(error) = git::open_terminal(&path) {
+                toast.add_toast(adw::Toast::new(&format!("Cannot open terminal: {error}")));
             }
         });
         button
@@ -508,12 +527,13 @@ impl DevelopmentPanel {
                         &tree.repository, &tree.branch,
                     ));
                     self.body.append(&self.path_row(&tree.path.to_string_lossy()));
-                    // All actions target the same existing worktree, in one row.
+                    // All actions target the same existing worktree.
                     let fix = self.codex_button(&tree.path);
                     let open = self.editor_button(&editor, &tree.path);
+                    let terminal = self.terminal_button(&tree.path);
                     let manage = self.manage_button(site, key, summary);
                     manage.add_css_class("flat");
-                    self.body.append(&Self::actions_row(&[&fix, &open, &manage]));
+                    self.body.append(&Self::actions_row(&[&fix, &open, &terminal, &manage]));
                 } else {
                     self.set_state(&format!("{} worktrees", worktrees.len()), Some("ticket-development-good"));
                     for tree in &worktrees {
@@ -531,7 +551,8 @@ impl DevelopmentPanel {
                         item.append(&self.path_row(&tree.path.to_string_lossy()));
                         let fix = self.codex_button(&tree.path);
                         let open = self.editor_button(&editor, &tree.path);
-                        item.append(&Self::actions_row(&[&fix, &open]));
+                        let terminal = self.terminal_button(&tree.path);
+                        item.append(&Self::actions_row(&[&fix, &open, &terminal]));
                         self.body.append(&item);
                     }
                     let manage = self.manage_button(site, key, summary);
