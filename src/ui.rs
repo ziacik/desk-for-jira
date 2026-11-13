@@ -295,8 +295,6 @@ enum Event {
 }
 
 pub fn run() -> glib::ExitCode {
-    gtk::gio::resources_register_include!("desk-for-jira.gresource")
-        .expect("Could not register application icons");
     let app = adw::Application::builder()
         .application_id("com.github.ziacik.DeskForJira")
         .build();
@@ -326,11 +324,6 @@ fn unassigned_scope_icon() -> gtk::Label {
 }
 
 fn build_ui(app: &adw::Application) {
-    // Make bundled GNOME symbolic icons available to the normal GTK icon pipeline.
-    if let Some(display) = gtk::gdk::Display::default() {
-        gtk::IconTheme::for_display(&display)
-            .add_resource_path("/com/github/ziacik/DeskForJira/icons");
-    }
     let initial_layout = preferences::load_layout().unwrap_or_else(|error| {
         eprintln!("Could not load UI layout: {error}");
         UiLayout::default()
@@ -536,7 +529,7 @@ fn build_ui(app: &adw::Application) {
     detail_heading.add_css_class("detail-header-key");
     detail_heading.set_xalign(0.5);
     detail_header.set_title_widget(Some(&detail_heading));
-    let open_in_jira = gtk::Button::from_icon_name("external-link-symbolic");
+    let open_in_jira = gtk::Button::from_icon_name("window-new-symbolic");
     open_in_jira.add_css_class("flat");
     open_in_jira.add_css_class("detail-header-action");
     open_in_jira.set_tooltip_text(Some("Open this issue in Jira"));
