@@ -37,13 +37,14 @@ fn scale_css_dimensions(source: &str, percent: i32) -> String {
                     i += 1;
                 }
             }
-            if bytes.get(i) == Some(&b'p') && bytes.get(i + 1) == Some(&b'x') {
-                if let Ok(value) = source[start..i].parse::<f64>() {
-                    result.push_str(&source[copy_from..start]);
-                    result.push_str(&format!("{:.2}px", value * f64::from(percent) / 100.0));
-                    i += 2;
-                    copy_from = i;
-                }
+            if bytes.get(i) == Some(&b'p')
+                && bytes.get(i + 1) == Some(&b'x')
+                && let Ok(value) = source[start..i].parse::<f64>()
+            {
+                result.push_str(&source[copy_from..start]);
+                result.push_str(&format!("{:.2}px", value * f64::from(percent) / 100.0));
+                i += 2;
+                copy_from = i;
             }
         } else {
             i += 1;
