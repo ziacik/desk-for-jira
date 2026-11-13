@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<gresources>
+  <gresource prefix="/com/github/ziacik/DeskForJira/icons">
+    <file>scalable/actions/external-link-symbolic.svg</file>
+  </gresource>
+</gresources>
