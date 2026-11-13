@@ -309,6 +309,10 @@ pub const TERMINAL_PROGRAMS: [&str; 4] =
     ["kgx", "xdg-terminal-exec", "cosmic-term", "gnome-terminal"];
 
 pub fn open_terminal(worktree: &Path) -> Result<()> {
+    // Never launch a terminal in a removed or otherwise invalid worktree.
+    if !is_repository(worktree) {
+        bail!("Worktree directory is missing or is not a Git repository: {}", worktree.display());
+    }
     for program in TERMINAL_PROGRAMS {
         let mut command = Command::new(program);
         if program == "xdg-terminal-exec" {

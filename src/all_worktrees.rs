@@ -502,7 +502,7 @@ impl Manager {
         });
         buttons.append(&open);
 
-        let terminal = gtk::Button::with_label("Terminal");
+        let terminal = gtk::Button::with_label("Open in Terminal");
         terminal.add_css_class("transition-action");
         terminal.set_sensitive(snapshot.tree.path.exists());
         let terminal_path = snapshot.tree.path.clone();

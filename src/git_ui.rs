@@ -174,6 +174,7 @@ impl View {
             self.existing_box.set_visible(false);
             self.root_field.set_visible(false);
             self.open.set_visible(false);
+            self.terminal.set_visible(false);
             self.codex.set_visible(false);
             self.more.set_visible(false);
             self.summary.set_text("Add a local Git repository to get started.");
@@ -211,6 +212,7 @@ impl View {
             self.create.set_visible(true);
             self.create.set_sensitive(true);
             self.open.set_visible(false);
+            self.terminal.set_visible(false);
             self.codex.set_visible(false);
             self.more.set_visible(false);
             self.update_path();
@@ -283,6 +285,7 @@ impl View {
         self.root_field.set_visible(false);
         self.create.set_visible(false);
         self.open.set_visible(true);
+        self.terminal.set_visible(true);
         self.codex.set_visible(true);
         self.more.set_visible(true);
     }
@@ -644,7 +647,7 @@ pub fn show(
         }
     };
     let dialog = gtk::Window::builder().title(format!("Development · {key}"))
-        .transient_for(parent).modal(true).default_width(500)
+        .transient_for(parent).modal(true).default_width(620)
         // Tall enough to show the normal create/existing-worktree form without scrolling.
         // Smaller displays can still scroll the content with the footer always visible.
         .default_height(650).build();
@@ -874,9 +877,8 @@ pub fn show(
     let actions = gtk::Box::new(gtk::Orientation::Vertical, 4);
     actions.add_css_class("git-menu-actions");
     let retry = gtk::Button::with_label("Run setup again");
-    let terminal = gtk::Button::with_label("Open terminal");
     let remove = gtk::Button::with_label("Remove worktree…");
-    for action in [&terminal, &retry, &remove] {
+    for action in [&retry, &remove] {
         action.add_css_class("flat");
         action.set_halign(gtk::Align::Fill);
         actions.append(action);
@@ -886,12 +888,14 @@ pub fn show(
     more.set_popover(Some(&actions_popover));
     footer.append(&more);
     let open = gtk::Button::with_label("Open in VS Code");
+    let terminal = gtk::Button::with_label("Open in Terminal");
     let codex = gtk::Button::with_label("Fix with Codex");
     codex.add_css_class("suggested-action");
     codex.set_tooltip_text(Some("Start interactive Codex in GNOME Console"));
     let create = gtk::Button::with_label("Create worktree");
     create.add_css_class("suggested-action");
     footer.append(&open);
+    footer.append(&terminal);
     footer.append(&codex);
     footer.append(&create);
     surface.append(&footer);
@@ -1034,9 +1038,7 @@ pub fn show(
     }
     {
         let view = view.clone();
-        let menu = actions_popover.clone();
         view.terminal.clone().connect_clicked(move |_| {
-            menu.popdown();
             if let Some(tree) = view.active_tree.borrow().clone()
                 && let Err(error) = git::open_terminal(&tree.path)
             {
