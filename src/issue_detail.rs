@@ -15,65 +15,6 @@ pub struct DetailRender {
     pub children: gtk::Box,
 }
 
-/// Draw a theme-aware external-link action with a fixed visual size.
-#[derive(Clone, Copy)]
-pub(crate) enum HeaderActionIcon {
-    ExternalLink,
-}
-
-pub(crate) fn header_action_icon(kind: HeaderActionIcon) -> gtk::DrawingArea {
-    let icon = gtk::DrawingArea::new();
-    icon.set_content_width(16);
-    icon.set_content_height(16);
-    icon.set_halign(gtk::Align::Center);
-    icon.set_valign(gtk::Align::Center);
-    icon.set_draw_func(move |area, cr, width, height| {
-        // DrawingArea's content size is a minimum, not a maximum: GtkButton
-        // can allocate much more than 16px. Keep the glyph fixed-size even
-        // if the widget is ever expanded by its parent.
-        let size = f64::from(width.min(height)).min(16.0);
-        let offset_x = (f64::from(width) - size) / 2.0;
-        let offset_y = (f64::from(height) - size) / 2.0;
-        // The glyph only occupies x/y 4..16 of its 20-unit design space.
-        // Fill the standard 16px icon area, centered like GTK symbolic icons.
-        cr.translate(offset_x + size / 2.0, offset_y + size / 2.0);
-        cr.scale(size / 16.0, size / 16.0);
-        cr.translate(-10.0, -10.0);
-        let color = area.color();
-        cr.set_source_rgba(
-            f64::from(color.red()),
-            f64::from(color.green()),
-            f64::from(color.blue()),
-            f64::from(color.alpha()),
-        );
-        cr.set_line_width(1.8);
-        cr.set_line_cap(gtk::cairo::LineCap::Round);
-        cr.set_line_join(gtk::cairo::LineJoin::Round);
-
-        match kind {
-            HeaderActionIcon::ExternalLink => {
-                // Conventional external-link glyph: a square with an arrow
-                // pointing out through its open upper-right corner.
-                cr.move_to(8.0, 5.0);
-                cr.line_to(5.5, 5.0);
-                cr.curve_to(4.7, 5.0, 4.0, 5.7, 4.0, 6.5);
-                cr.line_to(4.0, 14.5);
-                cr.curve_to(4.0, 15.3, 4.7, 16.0, 5.5, 16.0);
-                cr.line_to(13.5, 16.0);
-                cr.curve_to(14.3, 16.0, 15.0, 15.3, 15.0, 14.5);
-                cr.line_to(15.0, 12.0);
-                cr.move_to(10.0, 4.0);
-                cr.line_to(16.0, 4.0);
-                cr.line_to(16.0, 10.0);
-                cr.move_to(16.0, 4.0);
-                cr.line_to(8.0, 12.0);
-                cr.stroke().expect("External link icon stroke");
-            }
-        }
-    });
-    icon
-}
-
 fn section_heading(title: &str, icon: &str, count: Option<usize>) -> gtk::Box {
     let heading = gtk::Box::new(gtk::Orientation::Horizontal, 9);
     heading.add_css_class("detail-section-heading");
