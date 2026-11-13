@@ -34,8 +34,11 @@ pub(crate) fn header_action_icon(kind: HeaderActionIcon) -> gtk::DrawingArea {
         let size = f64::from(width.min(height)).min(16.0);
         let offset_x = (f64::from(width) - size) / 2.0;
         let offset_y = (f64::from(height) - size) / 2.0;
-        cr.translate(offset_x, offset_y);
-        cr.scale(size / 20.0, size / 20.0);
+        // The glyph only occupies x/y 4..16 of its 20-unit design space.
+        // Fill the standard 16px icon area, centered like GTK symbolic icons.
+        cr.translate(offset_x + size / 2.0, offset_y + size / 2.0);
+        cr.scale(size / 16.0, size / 16.0);
+        cr.translate(-10.0, -10.0);
         let color = area.color();
         cr.set_source_rgba(
             f64::from(color.red()),
