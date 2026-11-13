@@ -251,7 +251,9 @@ pub fn create(request: &CreateWorktree<'_>) -> Result<bool> {
         if occupied { bail!("Branch is already checked out in another worktree"); }
         output(request.repository, &["worktree", "add", "--", path, request.branch])?;
     } else {
-        output(request.repository, &["worktree", "add", "-b", request.branch, "--",
+        // A new ticket branch starts from the selected base, but must not track it:
+        // its upstream is the same-named remote branch, set by the first push -u.
+        output(request.repository, &["worktree", "add", "--no-track", "-b", request.branch, "--",
             path, request.base])?;
     }
     Ok(!exists)
@@ -590,6 +592,29 @@ mod tests {
         let choice = suggested_merge_target(&root, "ART-33-work", None).unwrap();
         assert_eq!(choice.name, "main");
         assert_eq!(choice.source, "Repository default");
+
+        output(&root, &["worktree", "remove", "--", target.to_str().unwrap()]).unwrap();
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn new_worktree_does_not_track_its_base_branch() {
+        let root = temporary_repo();
+        // Simulate a remote-tracking base that would normally be adopted as upstream.
+        output(&root, &["remote", "add", "origin", "."]).unwrap();
+        output(&root, &["config", "branch.autoSetupMerge", "true"]).unwrap();
+        let base_commit = output(&root, &["rev-parse", "main"]).unwrap();
+        output(&root, &["update-ref", "refs/remotes/origin/main", &base_commit]).unwrap();
+        let target = root.parent().unwrap().join(format!(
+            "{}-no-track-worktree", root.file_name().unwrap().to_string_lossy()
+        ));
+        assert!(create(&CreateWorktree {
+            repository: &root, destination: &target,
+            branch: "ART-55-feature", base: "origin/main", fetch: false,
+        }).unwrap());
+        assert_eq!(output(&target, &[
+            "for-each-ref", "--format=%(upstream:short)", "refs/heads/ART-55-feature",
+        ]).unwrap(), "");
 
         output(&root, &["worktree", "remove", "--", target.to_str().unwrap()]).unwrap();
         fs::remove_dir_all(&root).unwrap();
