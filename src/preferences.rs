@@ -282,6 +282,7 @@ pub struct UiLayout {
     pub sidebar_visible: bool,
     pub sidebar_width: i32,
     pub detail_width: i32,
+    pub zoom_percent: i32,
     pub worktrees_window_width: i32,
     pub worktrees_window_height: i32,
 }
@@ -294,6 +295,7 @@ impl Default for UiLayout {
             sidebar_visible: true,
             sidebar_width: 224,
             detail_width: 470,
+            zoom_percent: 100,
             worktrees_window_width: 980,
             worktrees_window_height: 760,
         }
@@ -306,6 +308,7 @@ impl UiLayout {
         self.window_height = self.window_height.max(580);
         self.sidebar_width = self.sidebar_width.clamp(184, 800);
         self.detail_width = self.detail_width.clamp(320, 2048);
+        self.zoom_percent = self.zoom_percent.clamp(70, 160);
         self.worktrees_window_width = self.worktrees_window_width.clamp(640, 2400);
         self.worktrees_window_height = self.worktrees_window_height.clamp(480, 1600);
         self
@@ -565,6 +568,13 @@ mod tests {
             category: None, workflow_order: None, workflows: Vec::new(),
         }
     }
+    #[test]
+    fn zoom_defaults_and_clamps() {
+        assert_eq!(UiLayout::default().zoom_percent, 100);
+        assert_eq!(UiLayout { zoom_percent: 20, ..UiLayout::default() }.sanitized().zoom_percent, 70);
+        assert_eq!(UiLayout { zoom_percent: 250, ..UiLayout::default() }.sanitized().zoom_percent, 160);
+    }
+
     #[test]
     fn worktrees_window_size_defaults_and_clamps() {
         let defaults = UiLayout::default();

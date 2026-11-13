@@ -12,6 +12,7 @@ mod preferences;
 mod secrets;
 mod transition_ui;
 mod ui;
+mod zoom;
 
 fn main() -> gtk::glib::ExitCode {
     ui::run()

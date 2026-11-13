@@ -19,6 +19,7 @@ use crate::{
     transition_ui,
     preferences::{self, BoardSettings, IssueScope, UiLayout, ViewSettings},
     secrets,
+    zoom,
 };
 
 const COLUMN_WIDTH: i32 = 302;
@@ -912,13 +913,7 @@ fn build_ui(app: &adw::Application) {
             glib::Propagation::Proceed
         }
     });
-    let css = gtk::CssProvider::new();
-    css.load_from_string(include_str!("board.css"));
-    if let Some(display) = gtk::gdk::Display::default() {
-        gtk::style_context_add_provider_for_display(
-            &display, &css, gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
-        );
-    }
+    zoom::install(&ui.window, layout.clone());
     update_project_label(&ui, &state);
     show_empty(&ui.board_box, "Connect to Jira", "Your unified project board will appear here.");
     wire_actions(&ui, &state, &sender);
