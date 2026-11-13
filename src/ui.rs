@@ -530,10 +530,7 @@ fn build_ui(app: &adw::Application) {
     detail_heading.add_css_class("detail-header-key");
     detail_heading.set_xalign(0.5);
     detail_header.set_title_widget(Some(&detail_heading));
-    let open_in_jira = gtk::Button::new();
-    open_in_jira.set_child(Some(&issue_detail::header_action_icon(
-        issue_detail::HeaderActionIcon::ExternalLink,
-    )));
+    let open_in_jira = gtk::Button::from_icon_name("document-export-symbolic");
     open_in_jira.add_css_class("flat");
     open_in_jira.add_css_class("detail-header-action");
     open_in_jira.set_tooltip_text(Some("Open this issue in Jira"));
