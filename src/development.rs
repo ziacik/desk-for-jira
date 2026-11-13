@@ -317,12 +317,17 @@ impl DevelopmentPanel {
         // Worktree actions should wrap rather than force a wide detail panel.
         let actions = gtk::FlowBox::new();
         actions.set_selection_mode(gtk::SelectionMode::None);
+        actions.set_homogeneous(false);
         actions.set_min_children_per_line(1);
         actions.set_max_children_per_line(4);
         actions.set_column_spacing(8);
         actions.set_row_spacing(8);
         actions.add_css_class("ticket-development-actions");
         for button in buttons {
+            // FlowBox cells may be wider than their content; buttons must not
+            // stretch to fill those cells (including a single Create button).
+            button.set_halign(gtk::Align::Start);
+            button.set_hexpand(false);
             actions.insert(*button, -1);
         }
         actions
