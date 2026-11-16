@@ -114,11 +114,8 @@ pub fn blocks(markdown: &str) -> Vec<Block> {
                 TagEnd::Emphasis => text.push_str("</i>"),
                 TagEnd::Strong => text.push_str("</b>"),
                 TagEnd::Strikethrough => text.push_str("</s>"),
-                TagEnd::Link => {
-                    if links.pop() == Some(true) {
-                        text.push_str("</a>");
-                    }
-                }
+                TagEnd::Link if links.pop() == Some(true) => text.push_str("</a>"),
+                TagEnd::Link => {}
                 _ => {}
             },
             Event::Text(value) => {
