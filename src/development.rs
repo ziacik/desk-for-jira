@@ -423,12 +423,13 @@ impl DevelopmentPanel {
     }
 
     fn codex_button(&self, path: &Path) -> gtk::Button {
-        let button = gtk::Button::with_label("Fix with Codex");
+        let mode = self.issue.borrow().as_ref()
+            .map(codex::CodexMode::for_issue)
+            .unwrap_or(codex::CodexMode::Fix);
+        let button = gtk::Button::with_label(mode.label());
         button.add_css_class("transition-action");
         button.add_css_class("suggested-action");
-        button.set_tooltip_text(Some(
-            "Start interactive Codex in GNOME Console with Jira context",
-        ));
+        button.set_tooltip_text(Some(mode.tooltip()));
         let path = path.to_path_buf();
         let issue = self.issue.borrow().clone();
         let account = self.account.borrow().clone();
