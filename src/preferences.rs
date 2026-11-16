@@ -419,6 +419,8 @@ impl GitSettings {
 #[derive(Default, Serialize, Deserialize)]
 struct Preferences {
     #[serde(default)]
+    activity_by_site: HashMap<String, Vec<ActivityEntry>>,
+    #[serde(default)]
     board_by_site: HashMap<String, BoardSettings>,
     #[serde(default)]
     view_by_site: HashMap<String, ViewSettings>,
@@ -431,6 +433,38 @@ struct Preferences {
     #[serde(default)]
     git: GitSettings,
 }
+/// Local actions performed in Desk for Jira; separate from Jira's server-side changelog.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActivityEntry {
+    pub key: String,
+    pub action: String,
+    pub timestamp: i64,
+}
+
+const ACTIVITY_LIMIT: usize = 300;
+
+fn push_activity(entries: &mut Vec<ActivityEntry>, entry: ActivityEntry) {
+    entries.insert(0, entry);
+    entries.truncate(ACTIVITY_LIMIT);
+}
+
+pub fn load_activity(site: &str) -> Result<Vec<ActivityEntry>> {
+    Ok(read_preferences(&preferences_path()?)?
+        .activity_by_site.get(site).cloned().unwrap_or_default())
+}
+
+pub fn record_activity(site: &str, key: &str, action: &str) -> Result<()> {
+    if site.is_empty() || key.is_empty() { return Ok(()); }
+    let path = preferences_path()?;
+    let mut prefs = read_preferences(&path)?;
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs() as i64;
+    push_activity(prefs.activity_by_site.entry(site.to_owned()).or_default(), ActivityEntry {
+        key: key.to_owned(), action: action.to_owned(), timestamp,
+    });
+    write_preferences(&path, &prefs)
+}
+
 fn preferences_path() -> Result<PathBuf> {
     let root = env::var_os("XDG_CONFIG_HOME").filter(|p| !p.is_empty()).map(PathBuf::from)
         .or_else(|| env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")));
@@ -526,6 +560,23 @@ pub fn save_git(settings: &GitSettings) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn activity_is_scoped_to_site_and_bounded() {
+        let mut prefs = Preferences::default();
+        for n in 0..(ACTIVITY_LIMIT + 2) {
+            push_activity(prefs.activity_by_site.entry("https://jira.one".into()).or_default(),
+                ActivityEntry { key: format!("ART-{n}"), action: "Created worktree".into(), timestamp: n as i64 });
+        }
+        push_activity(prefs.activity_by_site.entry("https://jira.two".into()).or_default(),
+            ActivityEntry { key: "AFB-1".into(), action: "Moved to Done".into(), timestamp: 1 });
+        let entries = &prefs.activity_by_site["https://jira.one"];
+        assert_eq!(entries.len(), ACTIVITY_LIMIT);
+        assert_eq!(entries[0].key, format!("ART-{}", ACTIVITY_LIMIT + 1));
+        assert_eq!(entries.last().unwrap().key, "ART-2");
+        let restored: Preferences = serde_json::from_str(&serde_json::to_string(&prefs).unwrap()).unwrap();
+        assert_eq!(restored.activity_by_site["https://jira.two"][0].key, "AFB-1");
+    }
 
     #[test]
     fn primary_transition_overrides_are_scoped_and_removable() {
