@@ -338,7 +338,7 @@ pub struct GitSettings {
     pub scan_roots: Vec<String>,
     pub worktree_root: String,
     pub editor: String,
-    /// Optional multi-line instructions included only in Fix with Codex runs.
+    /// Optional multi-line instructions included in every Codex run.
     pub codex_instructions: String,
     /// Disable Codex approvals and sandbox for launches from Desk for Jira.
     pub codex_yolo: bool,
