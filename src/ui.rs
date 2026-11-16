@@ -997,14 +997,49 @@ fn show_activity_history(ui: &Ui, show_jira: bool) {
             return;
         }
     };
+    // Keep the Activity window proportional to the main window. When resized,
+    // persist the proportions, so reopening after a main-window resize still fits.
+    let (activity_width, activity_height) = {
+        let layout = ui.layout.borrow();
+        let parent_width = ui.window.width().max(960);
+        let parent_height = ui.window.height().max(580);
+        (
+            (parent_width * layout.activity_window_width_percent / 100).max(620),
+            (parent_height * layout.activity_window_height_percent / 100).max(460),
+        )
+    };
     let dialog = gtk::Window::builder()
         .title("Activity")
         .transient_for(&ui.window)
         .modal(true)
-        .default_width(660)
-        .default_height(560)
+        .default_width(activity_width)
+        .default_height(activity_height)
         .build();
     crate::dialog::close_on_escape(&dialog);
+    dialog.connect_close_request({
+        let main_window = ui.window.downgrade();
+        let layout = ui.layout.clone();
+        move |dialog| {
+            if let Some(main_window) = main_window.upgrade() {
+                let parent_width = main_window.width();
+                let parent_height = main_window.height();
+                if parent_width > 0 && parent_height > 0 && dialog.width() > 0 && dialog.height() > 0 {
+                    let updated = {
+                        let mut saved = layout.borrow_mut();
+                        saved.activity_window_width_percent =
+                            ((dialog.width() * 100 + parent_width / 2) / parent_width).clamp(50, 100);
+                        saved.activity_window_height_percent =
+                            ((dialog.height() * 100 + parent_height / 2) / parent_height).clamp(50, 100);
+                        saved.clone()
+                    };
+                    if let Err(error) = preferences::save_layout(&updated) {
+                        eprintln!("Could not save Activity window size: {error}");
+                    }
+                }
+            }
+            glib::Propagation::Proceed
+        }
+    });
     let content = gtk::Box::new(gtk::Orientation::Vertical, 12);
     content.set_margin_top(16);
     content.set_margin_bottom(16);
@@ -1045,7 +1080,8 @@ fn show_activity_history(ui: &Ui, show_jira: bool) {
         line.set_margin_top(7);
         line.set_margin_bottom(7);
         let dot = gtk::Label::new(Some("●"));
-        dot.set_visible(!entry.read);
+        // Opacity retains the dot's space; hiding it would shift read rows left.
+        dot.set_opacity(if entry.read { 0.0 } else { 1.0 });
         dot.add_css_class("accent");
         unread_dots.push(dot.clone());
         line.append(&dot);
@@ -1118,7 +1154,7 @@ fn show_activity_history(ui: &Ui, show_jira: bool) {
             {
                 eprintln!("Could not save inbox read state: {error}");
             }
-            for dot in &unread_dots { dot.set_visible(false); }
+            for dot in &unread_dots { dot.set_opacity(0.0); }
             update_inbox_count(&ui);
         });
     }
