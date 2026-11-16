@@ -584,6 +584,7 @@ fn scan_dialog(view: &Rc<View>, root: PathBuf, results: Vec<PathBuf>) {
     let window = gtk::Window::builder().title("Found repositories")
         .default_width(520).default_height(420).modal(true)
         .transient_for(&view.dialog).build();
+    crate::dialog::close_on_escape(&window);
     let layout = gtk::Box::new(gtk::Orientation::Vertical, 12);
     layout.set_margin_start(18);
     layout.set_margin_end(18);
@@ -661,6 +662,7 @@ pub fn show(
         Err(error) => {
             let dialog = gtk::Window::builder().title("Git configuration error")
                 .transient_for(parent).modal(true).default_width(420).build();
+            crate::dialog::close_on_escape(&dialog);
             dialog.set_child(Some(&label(&error.to_string())));
             dialog.present();
             return dialog;
@@ -671,6 +673,7 @@ pub fn show(
         // Tall enough to show the normal create/existing-worktree form without scrolling.
         // Smaller displays can still scroll the content with the footer always visible.
         .default_height(650).build();
+    crate::dialog::close_on_escape(&dialog);
     dialog.add_css_class("git-worktree-dialog");
 
     // The title and all routine controls stay compact. Rarely used repository
