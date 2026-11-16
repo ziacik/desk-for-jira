@@ -530,13 +530,22 @@ impl Manager {
         (row, merge_badge)
     }
 
-    fn cleanup_removed(&self, confirm: &gtk::Window, worktree_path: &Path) {
+    fn cleanup_removed(&self, confirm: &gtk::Window, worktree_path: &Path,
+        branch: Option<&str>, repository: &str) {
         confirm.close();
         if let Ok(mut settings) = preferences::load_git() {
             settings.forget_worktree_origin(&worktree_path.to_string_lossy());
             if let Err(error) = preferences::save_git(&settings) {
                 eprintln!("Could not clean up worktree origin: {error}");
             }
+        }
+        if let Some(key) = branch.and_then(git::ticket_key_from_branch)
+            && let Some(account) = self.account.as_ref()
+            && let Err(error) = preferences::record_activity(
+                &account.base_url, &key, &format!("Removed worktree · {repository}"),
+            )
+        {
+            eprintln!("Could not save activity history: {error}");
         }
         self.toast.add_toast(adw::Toast::new("Worktree and local branch removed"));
         // Re-scan worktrees and their Jira tickets after a successful removal.
@@ -703,7 +712,8 @@ impl Manager {
                 poll(rx, move |result| {
                     match result {
                         Ok(()) => {
-                            manager.cleanup_removed(&confirm, &worktree_path);
+                            manager.cleanup_removed(&confirm, &worktree_path,
+                                    tree.branch.as_deref(), &repo.name);
                             manager.refresh();
                         }
                         Err(error) => {
@@ -776,7 +786,8 @@ impl Manager {
                     poll(rx, move |result| {
                         match result {
                             Ok(()) => {
-                                manager.cleanup_removed(&confirm, &worktree_path);
+                                manager.cleanup_removed(&confirm, &worktree_path,
+                                    tree.branch.as_deref(), &repo.name);
                                 manager.refresh();
                             }
                             Err(error) => {
