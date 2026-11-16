@@ -849,7 +849,7 @@ pub fn show(
     let codex_yolo = gtk::CheckButton::with_label("Run Codex in YOLO mode");
     codex_yolo.set_active(settings.codex_yolo);
     codex_yolo.set_tooltip_text(Some(
-        "No approval prompts and no sandbox (--yolo). Applies to every Fix with Codex launch.",
+        "No approval prompts and no sandbox (--yolo). Applies to every Codex launch.",
     ));
     advanced.append(&codex_yolo);
     let codex_instructions = gtk::TextView::new();
@@ -860,9 +860,9 @@ pub fn show(
     instructions_scroll.set_min_content_height(110);
     instructions_scroll.add_css_class("frame");
     instructions_scroll.set_child(Some(&codex_instructions));
-    advanced.append(&field("Fix with Codex instructions", &instructions_scroll));
+    advanced.append(&field("Codex instructions", &instructions_scroll));
     let codex_hint = label(
-        "Optional instructions for every Fix with Codex run. You can refer to multiple installed skills, e.g. $superpowers:using-superpowers. Skills must be installed in Codex CLI.",
+        "Optional instructions for every Codex run, including checks. You can refer to installed skills, e.g. $superpowers:using-superpowers. Skills must be installed in Codex CLI.",
     );
     codex_hint.add_css_class("dim-label");
     advanced.append(&codex_hint);
@@ -915,9 +915,11 @@ pub fn show(
     footer.append(&more);
     let open = gtk::Button::with_label("Open in VS Code");
     let terminal = gtk::Button::with_label("Open in Terminal");
-    let codex = gtk::Button::with_label("Fix with Codex");
+    let codex_mode = issue.as_ref().map(codex::CodexMode::for_issue)
+        .unwrap_or(codex::CodexMode::Fix);
+    let codex = gtk::Button::with_label(codex_mode.label());
     codex.add_css_class("suggested-action");
-    codex.set_tooltip_text(Some("Start interactive Codex in GNOME Console"));
+    codex.set_tooltip_text(Some(codex_mode.tooltip()));
     let create = gtk::Button::with_label("Create worktree");
     create.add_css_class("suggested-action");
     footer.append(&open);
