@@ -949,7 +949,7 @@ pub fn show(
     }
     {
         let view = view.clone();
-        view.codex_yolo.connect_toggled(move |_| {
+        view.codex_yolo.clone().connect_toggled(move |_| {
             if let Err(error) = view.store_preferences() {
                 report(&view.info, &format!("Cannot save Codex launch mode: {error}"));
             }
