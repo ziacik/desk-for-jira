@@ -373,7 +373,7 @@ fn build_ui(app: &adw::Application) {
         .build();
     let palette_button = gtk::Button::builder()
         .icon_name("system-search-symbolic")
-        .tooltip_text("Command palette (Ctrl+K)")
+        .tooltip_text("Command palette (Ctrl+K / Ctrl+Shift+P)")
         .build();
     palette_button.add_css_class("flat");
     let worktrees_button = gtk::Button::new();
@@ -851,9 +851,7 @@ fn build_ui(app: &adw::Application) {
         let keys = gtk::EventControllerKey::new();
         keys.set_propagation_phase(gtk::PropagationPhase::Capture);
         keys.connect_key_pressed(move |_, key, _, modifiers| {
-            if key == gtk::gdk::Key::k
-                && modifiers.contains(gtk::gdk::ModifierType::CONTROL_MASK)
-            {
+            if is_command_palette_shortcut(key, modifiers) {
                 show_command_palette(&command_ui, &command_state, &command_sender);
                 return glib::Propagation::Stop;
             }
@@ -1048,6 +1046,22 @@ fn show_activity_history(ui: &Ui) {
     content.append(&scroll);
     dialog.set_child(Some(&content));
     dialog.present();
+}
+
+fn is_command_palette_shortcut(key: gtk::gdk::Key, modifiers: gtk::gdk::ModifierType) -> bool {
+    use gtk::gdk::{Key, ModifierType};
+
+    if !modifiers.contains(ModifierType::CONTROL_MASK)
+        || modifiers.intersects(ModifierType::ALT_MASK | ModifierType::SUPER_MASK)
+    {
+        return false;
+    }
+
+    if modifiers.contains(ModifierType::SHIFT_MASK) {
+        matches!(key, Key::p | Key::P)
+    } else {
+        matches!(key, Key::k | Key::K)
+    }
 }
 
 fn wire_actions(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>) {
@@ -4666,6 +4680,27 @@ mod scope_tests {
         assert_eq!(history.entries.len(), ISSUE_HISTORY_LIMIT);
         assert_eq!(history.entries.first().unwrap().key, "ART-1");
         assert!(!history.can_go_forward());
+    }
+
+    #[test]
+    fn command_palette_supports_both_shortcuts_without_stealing_other_keys() {
+        use gtk::gdk::{Key, ModifierType as M};
+
+        assert!(is_command_palette_shortcut(Key::k, M::CONTROL_MASK));
+        assert!(is_command_palette_shortcut(Key::K, M::CONTROL_MASK));
+        assert!(is_command_palette_shortcut(Key::P, M::CONTROL_MASK | M::SHIFT_MASK));
+        assert!(is_command_palette_shortcut(Key::p, M::CONTROL_MASK | M::SHIFT_MASK));
+
+        for (key, modifiers) in [
+            (Key::p, M::CONTROL_MASK),
+            (Key::k, M::CONTROL_MASK | M::SHIFT_MASK),
+            (Key::P, M::SHIFT_MASK),
+            (Key::k, M::empty()),
+            (Key::k, M::CONTROL_MASK | M::ALT_MASK),
+            (Key::P, M::CONTROL_MASK | M::SHIFT_MASK | M::SUPER_MASK),
+        ] {
+            assert!(!is_command_palette_shortcut(key, modifiers));
+        }
     }
 
     #[test]
