@@ -278,10 +278,10 @@ impl Session<'_> {
                 if item["type"] == "agentMessage" {
                     let streamed = item["id"].as_str()
                         .is_some_and(|id| self.streamed_messages.remove(id));
-                    if !streamed {
-                        if let Some(text) = message_text(item) {
-                            let _ = self.events.send(Event::Output(text));
-                        }
+                    if !streamed
+                        && let Some(text) = message_text(item)
+                    {
+                        let _ = self.events.send(Event::Output(text));
                     }
                     let _ = self.events.send(Event::Output("\n\n".to_owned()));
                 }
