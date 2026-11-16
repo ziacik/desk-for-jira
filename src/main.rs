@@ -4,6 +4,7 @@ mod dialog;
 mod issue_detail;
 mod issue_links;
 mod jira;
+mod jira_inbox;
 mod git;
 mod git_ui;
 mod all_worktrees;
