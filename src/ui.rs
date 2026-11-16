@@ -48,6 +48,7 @@ struct Ui {
     manage_worktree_visibility_button: gtk::Button,
     palette_button: gtk::Button,
     worktrees_button: gtk::Button,
+    activity_button: gtk::Button,
     palette_window: Rc<RefCell<Option<gtk::Window>>>,
     pending_direct_issue: Rc<RefCell<Option<String>>>,
     search: gtk::SearchEntry,
@@ -382,6 +383,9 @@ fn build_ui(app: &adw::Application) {
     worktrees_button.add_css_class("flat");
     worktrees_button.add_css_class("header-worktrees-action");
     worktrees_button.set_tooltip_text(Some("Manage local Git worktrees across all repositories"));
+    let activity_button = gtk::Button::from_icon_name("document-open-recent-symbolic");
+    activity_button.add_css_class("flat");
+    activity_button.set_tooltip_text(Some("Activity history — actions performed in Desk for Jira"));
     let spinner = gtk::Spinner::new();
     spinner.set_visible(false);
     header.pack_start(&sidebar_toggle);
@@ -389,6 +393,7 @@ fn build_ui(app: &adw::Application) {
     header.pack_end(&refresh_button);
     header.pack_end(&palette_button);
     header.pack_end(&worktrees_button);
+    header.pack_end(&activity_button);
     header.pack_end(&spinner);
 
 
@@ -751,7 +756,7 @@ fn build_ui(app: &adw::Application) {
         project_filter: Rc::new(RefCell::new(None)),
         connect_button, disconnect_button, refresh_button,
         manage_projects_button, manage_columns_button, manage_worktree_visibility_button,
-        palette_button, worktrees_button,
+        palette_button, worktrees_button, activity_button,
         palette_window: Rc::new(RefCell::new(None)),
         pending_direct_issue: Rc::new(RefCell::new(None)),
         search, center_title,
@@ -940,7 +945,108 @@ fn show_all_worktrees(ui: &Ui) {
     }), ui.layout.clone(), ui.state.borrow().account.clone());
 }
 
+fn show_activity_history(ui: &Ui) {
+    let site = {
+        let state = ui.state.borrow();
+        state.account.as_ref().map(|account| account.base_url.clone())
+    };
+    let Some(site) = site else {
+        ui.toast.add_toast(adw::Toast::new("Connect to Jira to view activity history"));
+        return;
+    };
+    let entries = match preferences::load_activity(&site) {
+        Ok(entries) => entries,
+        Err(error) => {
+            show_error(ui, &format!("Could not load activity history: {error}"));
+            return;
+        }
+    };
+    let dialog = gtk::Window::builder()
+        .title("Activity history")
+        .transient_for(&ui.window)
+        .modal(true)
+        .default_width(620)
+        .default_height(540)
+        .build();
+    let content = gtk::Box::new(gtk::Orientation::Vertical, 12);
+    content.set_margin_top(16);
+    content.set_margin_bottom(16);
+    content.set_margin_start(16);
+    content.set_margin_end(16);
+    let subtitle = gtk::Label::new(Some("Actions performed in this Jira workspace, newest first"));
+    subtitle.set_xalign(0.0);
+    subtitle.add_css_class("dim-label");
+    content.append(&subtitle);
+    let search = gtk::SearchEntry::new();
+    search.set_placeholder_text(Some("Filter by ticket or action"));
+    content.append(&search);
+    let scroll = gtk::ScrolledWindow::new();
+    scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
+    scroll.set_vexpand(true);
+    let list = gtk::Box::new(gtk::Orientation::Vertical, 3);
+    let mut searchable = Vec::new();
+    for entry in entries {
+        let row = gtk::Button::new();
+        row.add_css_class("flat");
+        row.set_halign(gtk::Align::Fill);
+        let line = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+        line.set_margin_top(7);
+        line.set_margin_bottom(7);
+        line.append(&gtk::Image::from_icon_name("document-open-recent-symbolic"));
+        let labels = gtk::Box::new(gtk::Orientation::Vertical, 4);
+        labels.set_hexpand(true);
+        let heading = gtk::Box::new(gtk::Orientation::Horizontal, 9);
+        let ticket = gtk::Label::new(Some(&entry.key));
+        ticket.add_css_class("heading");
+        heading.append(&ticket);
+        let action = gtk::Label::new(Some(&entry.action));
+        action.set_xalign(0.0);
+        action.set_wrap(true);
+        heading.append(&action);
+        labels.append(&heading);
+        let when = glib::DateTime::from_unix_local(entry.timestamp)
+            .ok().and_then(|date| date.format("%d %b %Y, %H:%M").ok())
+            .map(|date| date.to_string()).unwrap_or_default();
+        let time = gtk::Label::new(Some(&when));
+        time.set_xalign(0.0);
+        time.add_css_class("dim-label");
+        labels.append(&time);
+        line.append(&labels);
+        row.set_child(Some(&line));
+        let key = entry.key.clone();
+        let dialog_for_row = dialog.clone();
+        let events = ui.events.clone();
+        row.connect_clicked(move |_| {
+            let _ = events.send(Event::OpenLinkedIssue(key.clone()));
+            dialog_for_row.close();
+        });
+        searchable.push((row.clone(), format!("{} {}", entry.key, entry.action).to_lowercase()));
+        list.append(&row);
+    }
+    if searchable.is_empty() {
+        let empty = gtk::Label::new(Some("No activity yet. Status changes and worktree actions will appear here."));
+        empty.set_wrap(true);
+        empty.set_margin_top(36);
+        empty.add_css_class("dim-label");
+        list.append(&empty);
+    }
+    search.connect_search_changed(move |search| {
+        let query = search.text().to_lowercase();
+        for (row, text) in &searchable {
+            row.set_visible(text.contains(query.as_str()));
+        }
+    });
+    scroll.set_child(Some(&list));
+    content.append(&scroll);
+    dialog.set_child(Some(&content));
+    dialog.present();
+}
+
 fn wire_actions(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>) {
+    {
+        let ui = ui.clone();
+        ui.activity_button.clone().connect_clicked(move |_| show_activity_history(&ui));
+    }
     {
         let ui = ui.clone();
         ui.worktrees_button.clone().connect_clicked(move |_| {
@@ -1521,6 +1627,13 @@ fn handle_event(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>, eve
                     ui.issue_history.borrow_mut().update_status(
                         &key, &transition.to_name, &transition.to_id, next_category,
                     );
+                    if let Some(account) = state.borrow().account.as_ref()
+                        && let Err(error) = preferences::record_activity(
+                            &account.base_url, &key, &format!("Moved to {}", transition.to_name),
+                        )
+                    {
+                        show_error(ui, &format!("Could not save activity history: {error}"));
+                    }
                     render_board(ui, &state.borrow());
                     if ui.selected_issue.borrow().as_deref() == Some(key.as_str()) {
                         let issue = {
@@ -3015,7 +3128,7 @@ fn style_pin_button(button: &gtk::Button, pinned: bool) {
 }
 
 fn toggle_pinned_issue(ui: &Ui, issue: &Issue) {
-    let (base_url, settings) = {
+    let (base_url, settings, pinned) = {
         let mut state = ui.state.borrow_mut();
         let pinned = state.settings.toggle_pinned(&issue.key);
         if pinned && !state.pinned_issues.iter().any(|item| item.key == issue.key) {
@@ -3024,12 +3137,17 @@ fn toggle_pinned_issue(ui: &Ui, issue: &Issue) {
         (
             state.account.as_ref().map(|account| account.base_url.clone()),
             state.settings.clone(),
+            pinned,
         )
     };
-    if let Some(base_url) = base_url
-        && let Err(error) = preferences::save(&base_url, &settings)
-    {
-        show_error(ui, &format!("Could not save pinned issues: {error}"));
+    if let Some(base_url) = base_url {
+        if let Err(error) = preferences::save(&base_url, &settings) {
+            show_error(ui, &format!("Could not save pinned issues: {error}"));
+        } else if let Err(error) = preferences::record_activity(
+            &base_url, &issue.key, if pinned { "Pinned ticket" } else { "Unpinned ticket" },
+        ) {
+            show_error(ui, &format!("Could not save activity history: {error}"));
+        }
     }
     render_board(ui, &ui.state.borrow());
 }
