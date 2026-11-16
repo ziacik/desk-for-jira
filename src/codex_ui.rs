@@ -132,6 +132,7 @@ pub fn open(
     {
         let keys = gtk::EventControllerKey::new();
         let input = input.clone();
+        let controller_target = input.clone();
         let messages = messages.clone();
         let send = send.clone();
         let stop = stop.clone();
@@ -147,7 +148,7 @@ pub fn open(
                 glib::Propagation::Proceed
             }
         });
-        input.add_controller(keys);
+        controller_target.add_controller(keys);
     }
     {
         let commands = commands.clone();
