@@ -3482,6 +3482,8 @@ fn show_command_palette(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Eve
                 "system-search-symbolic", false, PaletteCommand::FocusBoardSearch),
             PaletteItem::new("All worktrees", "Manage Git worktrees in all local repositories",
                 "Command", "folder-symbolic", true, PaletteCommand::AllWorktrees),
+            PaletteItem::new("Activity history", "Recent ticket changes and worktree actions",
+                "Command", "document-open-recent-symbolic", true, PaletteCommand::ActivityHistory),
         ];
         if !s.statuses.is_empty() {
             items.push(PaletteItem::new("Edit columns", "Reorder and configure workflow columns",
@@ -3588,6 +3590,9 @@ fn show_command_palette(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Eve
             }
             PaletteCommand::AllWorktrees => {
                 show_all_worktrees(&ui_for_action);
+            }
+            PaletteCommand::ActivityHistory => {
+                show_activity_history(&ui_for_action);
             }
             PaletteCommand::FocusBoardSearch => {
                 ui_for_action.search.grab_focus();
