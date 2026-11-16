@@ -14,6 +14,7 @@ use crate::{
     development,
     pull_requests,
     issue_detail,
+    jira_inbox,
     command_palette::{self, PaletteCommand, PaletteItem},
     jira::{Attachment, AuthMode, Credentials, Issue, IssueComment, IssueTransition, JiraClient, JiraTransitionError, Project, ProjectStatus, StatusCategory},
     transition_ui,
@@ -49,6 +50,9 @@ struct Ui {
     palette_button: gtk::Button,
     worktrees_button: gtk::Button,
     activity_button: gtk::Button,
+    inbox_button: gtk::Button,
+    inbox_count: gtk::Label,
+    inbox_polling: Rc<Cell<bool>>,
     palette_window: Rc<RefCell<Option<gtk::Window>>>,
     pending_direct_issue: Rc<RefCell<Option<String>>>,
     search: gtk::SearchEntry,
@@ -222,6 +226,7 @@ struct State {
     issues: Vec<Issue>,
     pinned_issues: Vec<Issue>,
     recent_issues: Vec<Issue>,
+    inbox: jira_inbox::Feed,
     issue_scope: IssueScope,
     active_sprint_only: bool,
     issue_cache: HashMap<BoardKey, Vec<Issue>>,
@@ -289,6 +294,7 @@ enum Event {
     PaletteIssueLoaded(u64, String, Box<Result<Issue, String>>),
     OpenLinkedIssue(String),
     ActivityChanged,
+    InboxFetched(u64, Result<Vec<jira_inbox::Entry>, String>),
     ImageLoaded(u64, String, String, Result<Vec<u8>, String>),
     CommentsLoaded(u64, u64, String, Result<Vec<IssueComment>, String>),
     ChildrenLoaded(u64, u64, String, Result<Vec<Issue>, String>),
@@ -387,6 +393,21 @@ fn build_ui(app: &adw::Application) {
     let activity_button = gtk::Button::from_icon_name("document-open-recent-symbolic");
     activity_button.add_css_class("flat");
     activity_button.set_tooltip_text(Some("Activity history — actions performed in Desk for Jira"));
+    let inbox_button = gtk::Button::new();
+    inbox_button.add_css_class("flat");
+    inbox_button.add_css_class("sidebar-action");
+    inbox_button.set_tooltip_text(Some("Recent changes by colleagues on your Jira tickets"));
+    let inbox_row = gtk::Box::new(gtk::Orientation::Horizontal, 9);
+    inbox_row.append(&gtk::Image::from_icon_name("mail-unread-symbolic"));
+    let inbox_title = gtk::Label::new(Some("Activity Inbox"));
+    inbox_title.set_xalign(0.0);
+    inbox_title.set_hexpand(true);
+    inbox_row.append(&inbox_title);
+    let inbox_count = gtk::Label::new(None);
+    inbox_count.add_css_class("pinned-count");
+    inbox_count.set_visible(false);
+    inbox_row.append(&inbox_count);
+    inbox_button.set_child(Some(&inbox_row));
     let spinner = gtk::Spinner::new();
     spinner.set_visible(false);
     header.pack_start(&sidebar_toggle);
@@ -647,6 +668,7 @@ fn build_ui(app: &adw::Application) {
     board_menu.add_css_class("board-settings-trigger");
     board_nav.append(&board_menu);
     sidebar_content.append(&board_nav);
+    sidebar_content.append(&inbox_button);
 
     let projects_heading = gtk::Label::new(Some("FILTER BY PROJECT"));
     projects_heading.add_css_class("sidebar-eyebrow");
@@ -762,6 +784,7 @@ fn build_ui(app: &adw::Application) {
         connect_button, disconnect_button, refresh_button,
         manage_projects_button, manage_columns_button, manage_worktree_visibility_button,
         palette_button, worktrees_button, activity_button,
+        inbox_button, inbox_count, inbox_polling: Rc::new(Cell::new(false)),
         palette_window: Rc::new(RefCell::new(None)),
         pending_direct_issue: Rc::new(RefCell::new(None)),
         search, center_title,
@@ -924,6 +947,13 @@ fn build_ui(app: &adw::Application) {
     wire_actions(&ui, &state, &sender);
     {
         let ui = ui.clone();
+        glib::timeout_add_local(Duration::from_secs(120), move || {
+            start_inbox_poll(&ui);
+            glib::ControlFlow::Continue
+        });
+    }
+    {
+        let ui = ui.clone();
         let state = state.clone();
         let sender = sender.clone();
         glib::timeout_add_local(Duration::from_millis(90), move || {
@@ -951,48 +981,201 @@ fn show_all_worktrees(ui: &Ui) {
     );
 }
 
-fn show_activity_history(ui: &Ui) {
-    let site = {
+fn show_activity_history(ui: &Ui, show_jira: bool) {
+    let (site, jira_entries) = {
         let state = ui.state.borrow();
-        state.account.as_ref().map(|account| account.base_url.clone())
+        (state.account.as_ref().map(|account| account.base_url.clone()), state.inbox.entries.clone())
     };
     let Some(site) = site else {
-        ui.toast.add_toast(adw::Toast::new("Connect to Jira to view activity history"));
+        ui.toast.add_toast(adw::Toast::new("Connect to Jira to view activity"));
         return;
     };
-    let entries = match preferences::load_activity(&site) {
+    let local_entries = match preferences::load_activity(&site) {
         Ok(entries) => entries,
         Err(error) => {
             show_error(ui, &format!("Could not load activity history: {error}"));
             return;
         }
     };
+    // Keep the Activity window proportional to the main window. When resized,
+    // persist the proportions, so reopening after a main-window resize still fits.
+    let (activity_width, activity_height) = {
+        let layout = ui.layout.borrow();
+        let parent_width = ui.window.width().max(960);
+        let parent_height = ui.window.height().max(580);
+        (
+            (parent_width * layout.activity_window_width_percent / 100).max(620),
+            (parent_height * layout.activity_window_height_percent / 100).max(460),
+        )
+    };
     let dialog = gtk::Window::builder()
-        .title("Activity history")
+        .title("Activity")
         .transient_for(&ui.window)
         .modal(true)
-        .default_width(620)
-        .default_height(540)
+        .default_width(activity_width)
+        .default_height(activity_height)
         .build();
     crate::dialog::close_on_escape(&dialog);
+    dialog.connect_close_request({
+        let main_window = ui.window.downgrade();
+        let layout = ui.layout.clone();
+        move |dialog| {
+            if let Some(main_window) = main_window.upgrade() {
+                let parent_width = main_window.width();
+                let parent_height = main_window.height();
+                if parent_width > 0 && parent_height > 0 && dialog.width() > 0 && dialog.height() > 0 {
+                    let updated = {
+                        let mut saved = layout.borrow_mut();
+                        saved.activity_window_width_percent =
+                            ((dialog.width() * 100 + parent_width / 2) / parent_width).clamp(50, 100);
+                        saved.activity_window_height_percent =
+                            ((dialog.height() * 100 + parent_height / 2) / parent_height).clamp(50, 100);
+                        saved.clone()
+                    };
+                    if let Err(error) = preferences::save_layout(&updated) {
+                        eprintln!("Could not save Activity window size: {error}");
+                    }
+                }
+            }
+            glib::Propagation::Proceed
+        }
+    });
     let content = gtk::Box::new(gtk::Orientation::Vertical, 12);
     content.set_margin_top(16);
     content.set_margin_bottom(16);
     content.set_margin_start(16);
     content.set_margin_end(16);
-    let subtitle = gtk::Label::new(Some("Actions performed in this Jira workspace, newest first"));
+    let stack = gtk::Stack::new();
+    stack.set_vexpand(true);
+    let switcher = gtk::StackSwitcher::new();
+    switcher.set_stack(Some(&stack));
+    content.append(&switcher);
+
+    let remote_page = gtk::Box::new(gtk::Orientation::Vertical, 9);
+    let remote_heading = gtk::Box::new(gtk::Orientation::Horizontal, 10);
+    let remote_hint = gtk::Label::new(Some("Changes by colleagues on tickets assigned to you, now or previously"));
+    remote_hint.set_wrap(true);
+    remote_hint.set_xalign(0.0);
+    remote_hint.add_css_class("dim-label");
+    remote_hint.set_hexpand(true);
+    remote_heading.append(&remote_hint);
+    let mark_all = gtk::Button::with_label("Mark all read");
+    mark_all.add_css_class("flat");
+    remote_heading.append(&mark_all);
+    remote_page.append(&remote_heading);
+    let remote_search = gtk::SearchEntry::new();
+    remote_search.set_placeholder_text(Some("Filter by ticket, author or change"));
+    remote_page.append(&remote_search);
+    let remote_scroll = gtk::ScrolledWindow::new();
+    remote_scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
+    remote_scroll.set_vexpand(true);
+    let remote_list = gtk::Box::new(gtk::Orientation::Vertical, 3);
+    let mut remote_rows = Vec::new();
+    let mut unread_dots = Vec::new();
+    for entry in jira_entries {
+        let row = gtk::Button::new();
+        row.add_css_class("flat");
+        row.set_halign(gtk::Align::Fill);
+        let line = gtk::Box::new(gtk::Orientation::Horizontal, 10);
+        line.set_margin_top(7);
+        line.set_margin_bottom(7);
+        let dot = gtk::Label::new(Some("●"));
+        // Opacity retains the dot's space; hiding it would shift read rows left.
+        dot.set_opacity(if entry.read { 0.0 } else { 1.0 });
+        dot.add_css_class("accent");
+        unread_dots.push(dot.clone());
+        line.append(&dot);
+        line.append(&gtk::Image::from_icon_name(if entry.priority {
+            "mail-replied-symbolic"
+        } else {
+            "document-open-recent-symbolic"
+        }));
+        let labels = gtk::Box::new(gtk::Orientation::Vertical, 4);
+        labels.set_hexpand(true);
+        let title = gtk::Label::new(Some(&format!("{} · {}", entry.key, entry.summary)));
+        title.set_xalign(0.0);
+        title.set_ellipsize(gtk::pango::EllipsizeMode::End);
+        title.add_css_class("heading");
+        labels.append(&title);
+        let action = gtk::Label::new(Some(&entry.action));
+        action.set_xalign(0.0);
+        action.set_wrap(true);
+        labels.append(&action);
+        let when = entry.created.get(..16).unwrap_or(&entry.created).replace('T', " ");
+        let detail = gtk::Label::new(Some(&format!("{} · {}", entry.author, when)));
+        detail.set_xalign(0.0);
+        detail.add_css_class("dim-label");
+        labels.append(&detail);
+        line.append(&labels);
+        row.set_child(Some(&line));
+        let ui = ui.clone();
+        let id = entry.id.clone();
+        let key = entry.key.clone();
+        let dialog_for_row = dialog.clone();
+        row.connect_clicked(move |_| {
+            let (site, feed) = {
+                let mut state = ui.state.borrow_mut();
+                state.inbox.read(&id);
+                (state.account.as_ref().map(|account| account.base_url.clone()), state.inbox.clone())
+            };
+            if let Some(site) = site
+                && let Err(error) = preferences::save_jira_inbox(&site, &feed)
+            {
+                eprintln!("Could not save inbox read state: {error}");
+            }
+            update_inbox_count(&ui);
+            let _ = ui.events.send(Event::OpenLinkedIssue(key.clone()));
+            dialog_for_row.close();
+        });
+        remote_rows.push((row.clone(), format!("{} {} {} {}", entry.key, entry.summary, entry.action, entry.author).to_lowercase()));
+        remote_list.append(&row);
+    }
+    if remote_rows.is_empty() {
+        let empty = gtk::Label::new(Some("No Jira activity yet. The inbox checks for updates every two minutes."));
+        empty.set_wrap(true);
+        empty.set_margin_top(36);
+        empty.add_css_class("dim-label");
+        remote_list.append(&empty);
+    }
+    remote_search.connect_search_changed(move |search| {
+        let query = search.text().to_lowercase();
+        for (row, value) in &remote_rows { row.set_visible(value.contains(query.as_str())); }
+    });
+    {
+        let ui = ui.clone();
+        mark_all.connect_clicked(move |_| {
+            let (site, feed) = {
+                let mut state = ui.state.borrow_mut();
+                state.inbox.read_all();
+                (state.account.as_ref().map(|account| account.base_url.clone()), state.inbox.clone())
+            };
+            if let Some(site) = site
+                && let Err(error) = preferences::save_jira_inbox(&site, &feed)
+            {
+                eprintln!("Could not save inbox read state: {error}");
+            }
+            for dot in &unread_dots { dot.set_opacity(0.0); }
+            update_inbox_count(&ui);
+        });
+    }
+    remote_scroll.set_child(Some(&remote_list));
+    remote_page.append(&remote_scroll);
+    stack.add_titled(&remote_page, Some("jira"), "Jira activity");
+
+    let local_page = gtk::Box::new(gtk::Orientation::Vertical, 9);
+    let subtitle = gtk::Label::new(Some("Actions performed in Desk for Jira, newest first"));
     subtitle.set_xalign(0.0);
     subtitle.add_css_class("dim-label");
-    content.append(&subtitle);
+    local_page.append(&subtitle);
     let search = gtk::SearchEntry::new();
     search.set_placeholder_text(Some("Filter by ticket or action"));
-    content.append(&search);
+    local_page.append(&search);
     let scroll = gtk::ScrolledWindow::new();
     scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
     scroll.set_vexpand(true);
     let list = gtk::Box::new(gtk::Orientation::Vertical, 3);
     let mut searchable = Vec::new();
-    for entry in entries {
+    for entry in local_entries {
         let row = gtk::Button::new();
         row.add_css_class("flat");
         row.set_halign(gtk::Align::Fill);
@@ -1031,7 +1214,7 @@ fn show_activity_history(ui: &Ui) {
         list.append(&row);
     }
     if searchable.is_empty() {
-        let empty = gtk::Label::new(Some("No activity yet. Status changes and worktree actions will appear here."));
+        let empty = gtk::Label::new(Some("No local activity yet. Status changes and worktree actions will appear here."));
         empty.set_wrap(true);
         empty.set_margin_top(36);
         empty.add_css_class("dim-label");
@@ -1039,12 +1222,13 @@ fn show_activity_history(ui: &Ui) {
     }
     search.connect_search_changed(move |search| {
         let query = search.text().to_lowercase();
-        for (row, text) in &searchable {
-            row.set_visible(text.contains(query.as_str()));
-        }
+        for (row, value) in &searchable { row.set_visible(value.contains(query.as_str())); }
     });
     scroll.set_child(Some(&list));
-    content.append(&scroll);
+    local_page.append(&scroll);
+    stack.add_titled(&local_page, Some("mine"), "My activity");
+    stack.set_visible_child_name(if show_jira { "jira" } else { "mine" });
+    content.append(&stack);
     dialog.set_child(Some(&content));
     dialog.present();
 }
@@ -1068,7 +1252,11 @@ fn is_command_palette_shortcut(key: gtk::gdk::Key, modifiers: gtk::gdk::Modifier
 fn wire_actions(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>) {
     {
         let ui = ui.clone();
-        ui.activity_button.clone().connect_clicked(move |_| show_activity_history(&ui));
+        ui.activity_button.clone().connect_clicked(move |_| show_activity_history(&ui, false));
+    }
+    {
+        let ui = ui.clone();
+        ui.inbox_button.clone().connect_clicked(move |_| show_activity_history(&ui, true));
     }
     {
         let ui = ui.clone();
@@ -1193,6 +1381,7 @@ fn wire_actions(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>) {
                 s.issues.clear();
                 s.pinned_issues.clear();
                 s.recent_issues.clear();
+                s.inbox = jira_inbox::Feed::default();
                 s.statuses.clear();
                 s.settings = BoardSettings::default();
                 s.issue_scope = IssueScope::Mine;
@@ -1203,6 +1392,8 @@ fn wire_actions(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>) {
             set_busy(&ui, &state, false);
             ui.transition_busy.set(false);
             ui.header_title.set_subtitle("Not connected");
+            ui.inbox_polling.set(false);
+            update_inbox_count(&ui);
             ui.status.set_text("Disconnected");
             ui.projects_label.set_text("Choose projects to begin");
             clear_box(&ui.sidebar_projects);
@@ -1226,6 +1417,30 @@ fn wire_actions(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>) {
             });
         });
     }
+}
+
+fn update_inbox_count(ui: &Ui) {
+    let unread = ui.state.borrow().inbox.unread();
+    ui.inbox_count.set_label(&unread.to_string());
+    ui.inbox_count.set_visible(unread > 0);
+}
+
+fn start_inbox_poll(ui: &Ui) {
+    let (account, generation, minutes) = {
+        let s = ui.state.borrow();
+        let Some(account) = s.account.clone() else { return; };
+        (account, s.generation, jira_inbox::lookback_minutes(&s.inbox))
+    };
+    if ui.inbox_polling.replace(true) { return; }
+    let watched: Vec<String> = preferences::load_activity(&account.base_url)
+        .unwrap_or_default().into_iter().map(|entry| entry.key)
+        .collect::<HashSet<_>>().into_iter().collect();
+    let events = ui.events.clone();
+    thread::spawn(move || {
+        let result = jira_inbox::fetch(account, minutes, &watched)
+            .map_err(|error| error.to_string());
+        let _ = events.send(Event::InboxFetched(generation, result));
+    });
 }
 
 fn transition_submit(
@@ -1353,6 +1568,10 @@ fn handle_event(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>, eve
                             show_error(ui, &format!("Could not read preferred transitions: {err}"));
                             preferences::PrimaryTransitions::default()
                         });
+                    let inbox = preferences::load_jira_inbox(&account.base_url).unwrap_or_else(|error| {
+                        eprintln!("Could not load Jira activity inbox: {error}");
+                        jira_inbox::Feed::default()
+                    });
                     let project_error = loaded.projects.as_ref().err().cloned();
                     ui.restoring_view.set(true);
                     {
@@ -1366,6 +1585,7 @@ fn handle_event(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>, eve
                         s.issues.clear();
                         s.pinned_issues.clear();
                         s.recent_issues.clear();
+                        s.inbox = inbox;
                         s.clear_board_cache();
                         s.issue_scope = view.scope;
                         s.active_sprint_only = view.active_sprint_only;
@@ -1386,6 +1606,8 @@ fn handle_event(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>, eve
                     ui.manage_worktree_visibility_button.set_sensitive(false);
                     ui.header_title.set_subtitle(&loaded.user);
                     update_project_label(ui, state);
+                    update_inbox_count(ui);
+                    ui.inbox_polling.set(false);
                     ui.restoring_view.set(false);
                     close_issue_details(ui);
                     clear_issue_history(ui);
@@ -1393,6 +1615,7 @@ fn handle_event(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>, eve
                         show_error(ui, &format!("Could not list projects: {error}"));
                     }
                     start_board_load(ui, state, sender);
+                    start_inbox_poll(ui);
                     // A remembered ticket may be outside the current board, sprint,
                     // assignee scope or search. Load it directly from Jira.
                     if let Some(key) = ui.remembered_issue.borrow().clone() {
@@ -1440,6 +1663,26 @@ fn handle_event(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>, eve
         }
         Event::OpenLinkedIssue(key) => open_issue_by_key(ui, &key),
         Event::ActivityChanged => render_board(ui, &state.borrow()),
+        Event::InboxFetched(id, result) => {
+            if state.borrow().generation != id { return; }
+            ui.inbox_polling.set(false);
+            match result {
+                Ok(events) => {
+                    let (site, feed) = {
+                        let mut s = state.borrow_mut();
+                        s.inbox.merge(events);
+                        (s.account.as_ref().map(|account| account.base_url.clone()), s.inbox.clone())
+                    };
+                    if let Some(site) = site
+                        && let Err(error) = preferences::save_jira_inbox(&site, &feed)
+                    {
+                        eprintln!("Could not save Jira activity inbox: {error}");
+                    }
+                    update_inbox_count(ui);
+                }
+                Err(error) => eprintln!("Could not refresh Jira activity inbox: {error}"),
+            }
+        }
         Event::PaletteIssueLoaded(id, key, result) => {
             // A site change, another ticket selection, or closing the inspector
             // must cancel a pending direct-open result.
@@ -3651,7 +3894,7 @@ fn show_command_palette(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Eve
                 show_all_worktrees(&ui_for_action);
             }
             PaletteCommand::ActivityHistory => {
-                show_activity_history(&ui_for_action);
+                show_activity_history(&ui_for_action, false);
             }
             PaletteCommand::FocusBoardSearch => {
                 ui_for_action.search.grab_focus();
