@@ -288,6 +288,7 @@ enum Event {
     RememberedIssueLoaded(u64, String, Result<Vec<Issue>, String>),
     PaletteIssueLoaded(u64, String, Box<Result<Issue, String>>),
     OpenLinkedIssue(String),
+    ActivityChanged,
     ImageLoaded(u64, String, String, Result<Vec<u8>, String>),
     CommentsLoaded(u64, u64, String, Result<Vec<IssueComment>, String>),
     ChildrenLoaded(u64, u64, String, Result<Vec<Issue>, String>),
@@ -748,7 +749,11 @@ fn build_ui(app: &adw::Application) {
     let toast = adw::ToastOverlay::new();
     toast.set_child(Some(&workspace_split));
     window.set_content(Some(&toast));
-    let development = development::DevelopmentPanel::new(&window, &toast, &worktree_more);
+    let activity_events = sender.clone();
+    let development = development::DevelopmentPanel::new(
+        &window, &toast, &worktree_more,
+        Rc::new(move || { let _ = activity_events.send(Event::ActivityChanged); }),
+    );
     let pull_requests = pull_requests::PullRequestsPanel::new();
 
     let ui = Ui {
@@ -940,9 +945,12 @@ fn build_ui(app: &adw::Application) {
 /// are not currently cached on the board.
 fn show_all_worktrees(ui: &Ui) {
     let events = ui.events.clone();
+    let activity_events = ui.events.clone();
     crate::all_worktrees::show(&ui.window, &ui.toast, Rc::new(move |key| {
         let _ = events.send(Event::OpenLinkedIssue(key));
-    }), ui.layout.clone(), ui.state.borrow().account.clone());
+    }), ui.layout.clone(), ui.state.borrow().account.clone(),
+        Rc::new(move || { let _ = activity_events.send(Event::ActivityChanged); }),
+    );
 }
 
 fn show_activity_history(ui: &Ui) {
@@ -1416,6 +1424,7 @@ fn handle_event(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>, eve
             }
         }
         Event::OpenLinkedIssue(key) => open_issue_by_key(ui, &key),
+        Event::ActivityChanged => render_board(ui, &state.borrow()),
         Event::PaletteIssueLoaded(id, key, result) => {
             // A site change, another ticket selection, or closing the inspector
             // must cancel a pending direct-open result.
@@ -3152,7 +3161,24 @@ fn toggle_pinned_issue(ui: &Ui, issue: &Issue) {
     render_board(ui, &ui.state.borrow());
 }
 
-fn render_pinned_section(ui: &Ui, state: &State) {
+/// Show the most recent app-side action for tickets still present in the bounded history.
+fn board_activity(site: &str) -> HashMap<String, String> {
+    if site.is_empty() { return HashMap::new(); }
+    let entries = match preferences::load_activity(site) {
+        Ok(entries) => entries,
+        Err(error) => {
+            eprintln!("Could not read ticket activity indicators: {error}");
+            return HashMap::new();
+        }
+    };
+    let mut activity = HashMap::new();
+    for entry in entries {
+        activity.entry(entry.key).or_insert(entry.action);
+    }
+    activity
+}
+
+fn render_pinned_section(ui: &Ui, state: &State, activity: &HashMap<String, String>) {
     clear_box(&ui.pinned_box);
     let pinned = pinned_issue_refs(&state.settings, &state.issues, &state.pinned_issues);
     let has_pins = !pinned.is_empty();
@@ -3166,7 +3192,7 @@ fn render_pinned_section(ui: &Ui, state: &State) {
     let base_url = state.account.as_ref().map(|account| account.base_url.as_str()).unwrap_or("");
     for issue in pinned {
         ui.pinned_box.append(&pinned_issue_tile(
-            issue, ui, base_url, state.account.as_ref(), state.generation,
+            issue, ui, base_url, state.account.as_ref(), state.generation, activity,
         ));
     }
 }
@@ -3180,7 +3206,9 @@ fn render_board(ui: &Ui, state: &State) {
         show_empty(&ui.board_box, "Choose projects", "Use Projects… to set up your board.");
         return;
     }
-    render_pinned_section(ui, state);
+    let site = state.account.as_ref().map(|account| account.base_url.as_str()).unwrap_or("");
+    let activity = board_activity(site);
+    render_pinned_section(ui, state, &activity);
     if let Some(key) = ui.selected_issue.borrow().as_deref() {
         style_pin_button(
             &ui.pin_detail,
@@ -3255,7 +3283,9 @@ fn render_board(ui: &Ui, state: &State) {
 
         let item_box = gtk::Box::new(gtk::Orientation::Vertical, 7);
         for issue in issues {
-            item_box.append(&issue_button(issue, ui, url, state.account.as_ref(), state.generation));
+            item_box.append(&issue_button(
+                issue, ui, url, state.account.as_ref(), state.generation, &activity,
+            ));
         }
         let scroll = gtk::ScrolledWindow::new();
         // Reserve space for the scrollbar instead of painting it across cards.
@@ -3342,7 +3372,10 @@ fn connect_epic_card_navigation(label: &gtk::Label, key: &str, events: &Sender<E
     });
 }
 
-fn issue_button(issue: &Issue, ui: &Ui, base_url: &str, account: Option<&Credentials>, generation: u64) -> gtk::Overlay {
+fn issue_button(
+    issue: &Issue, ui: &Ui, base_url: &str, account: Option<&Credentials>,
+    generation: u64, activity: &HashMap<String, String>,
+) -> gtk::Overlay {
     let button = gtk::Button::new();
     button.add_css_class("issue-card");
     button.set_hexpand(true);
@@ -3381,6 +3414,10 @@ fn issue_button(issue: &Issue, ui: &Ui, base_url: &str, account: Option<&Credent
     key.set_hexpand(true);
     key.set_xalign(0.0);
     meta.append(&key);
+    if let Some(action) = activity.get(&issue.key) {
+        let mark = activity_indicator(action);
+        meta.append(&mark);
+    }
     if !issue.kind.is_empty() {
         let kind = gtk::Label::new(Some(&issue.kind));
         kind.add_css_class("ticket-kind");
@@ -3608,12 +3645,14 @@ fn show_command_palette(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Eve
                         Some(issue.clone()), Some(account.clone()),
                     );
                     let panel = ui_for_action.development.clone();
+                    let activity_events = ui_for_action.events.clone();
                     let key = issue.key;
                     let selected = ui_for_action.selected_issue.clone();
                     dialog.connect_close_request(move |_| {
                         if selected.borrow().as_deref() == Some(key.as_str()) {
                             panel.refresh_current();
                         }
+                        let _ = activity_events.send(Event::ActivityChanged);
                         glib::Propagation::Proceed
                     });
                 }
@@ -3937,12 +3976,21 @@ fn connect_issue_open(
     button.connect_clicked(move |button| open_issue(&ui, &issue, Some(button)));
 }
 
+fn activity_indicator(action: &str) -> gtk::Image {
+    let icon = gtk::Image::from_icon_name("document-open-recent-symbolic");
+    icon.add_css_class("ticket-activity-icon");
+    icon.set_valign(gtk::Align::Center);
+    icon.set_tooltip_text(Some(&format!("Your activity · {action}")));
+    icon
+}
+
 fn pinned_issue_tile(
     issue: &Issue,
     ui: &Ui,
     base_url: &str,
     account: Option<&Credentials>,
     generation: u64,
+    activity: &HashMap<String, String>,
 ) -> gtk::Box {
     // Separate action controls, not a second full-sized issue card or an Overlay:
     // the text stays aligned and the entire row has a predictable height.
@@ -3965,6 +4013,9 @@ fn pinned_issue_tile(
     key.add_css_class("pinned-ticket-key");
     key.set_xalign(0.0);
     row.append(&key);
+    if let Some(action) = activity.get(&issue.key) {
+        row.append(&activity_indicator(action));
+    }
     let summary = gtk::Label::new(Some(&issue.summary));
     summary.add_css_class("pinned-ticket-summary");
     summary.set_xalign(0.0);
