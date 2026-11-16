@@ -71,12 +71,19 @@ fn with_custom_instructions(prompt: String, instructions: &str) -> String {
     )
 }
 
-fn codex_args(worktree: &Path, prompt: &str) -> Vec<OsString> {
+fn codex_args(worktree: &Path, prompt: &str, yolo: bool) -> Vec<OsString> {
     let mut args = vec![
         OsString::from("-C"), worktree.as_os_str().to_os_string(),
-        OsString::from("--sandbox"), OsString::from("workspace-write"),
-        OsString::from("--ask-for-approval"), OsString::from("on-request"),
     ];
+    if yolo {
+        // YOLO replaces the sandbox and approval flags; do not pass both.
+        args.push(OsString::from("--yolo"));
+    } else {
+        args.extend([
+            OsString::from("--sandbox"), OsString::from("workspace-write"),
+            OsString::from("--ask-for-approval"), OsString::from("on-request"),
+        ]);
+    }
     args.push(OsString::from(prompt));
     args
 }
@@ -148,9 +155,9 @@ pub fn start(
     issue: &Issue,
     comments: &[IssueComment],
 ) -> Result<()> {
-    let instructions = preferences::load_git()?.codex_instructions;
-    let prompt = with_custom_instructions(issue_prompt(site, issue, comments), &instructions);
-    launch(worktree, &codex_args(worktree, &prompt))
+    let settings = preferences::load_git()?;
+    let prompt = with_custom_instructions(issue_prompt(site, issue, comments), &settings.codex_instructions);
+    launch(worktree, &codex_args(worktree, &prompt, settings.codex_yolo))
 }
 
 #[cfg(test)]
@@ -181,7 +188,7 @@ mod tests {
     #[test]
     fn gnome_console_receives_a_single_quoted_command() {
         let worktree = Path::new("/tmp/worktree with spaces");
-        let args = codex_args(worktree, "Fix O'Brien's issue; $(echo unsafe)");
+        let args = codex_args(worktree, "Fix O'Brien's issue; $(echo unsafe)", false);
         let command = terminal_command("kgx", worktree, &args);
         let argv: Vec<_> = command.get_args()
             .map(|argument| argument.to_string_lossy().into_owned())
@@ -193,8 +200,19 @@ mod tests {
     }
 
     #[test]
+    fn yolo_omits_sandbox_and_approval_flags() {
+        let args = codex_args(Path::new("/tmp/worktree"), "Fix the issue", true);
+        assert_eq!(args[0], "-C");
+        assert_eq!(args[1], "/tmp/worktree");
+        assert!(args.contains(&OsString::from("--yolo")));
+        assert!(!args.contains(&OsString::from("--sandbox")));
+        assert!(!args.contains(&OsString::from("--ask-for-approval")));
+        assert_eq!(args.last(), Some(&OsString::from("Fix the issue")));
+    }
+
+    #[test]
     fn codex_stays_in_the_existing_worktree_with_safe_defaults() {
-        let args = codex_args(Path::new("/tmp/worktree with spaces"), "Fix the issue");
+        let args = codex_args(Path::new("/tmp/worktree with spaces"), "Fix the issue", false);
         assert_eq!(args[0], "-C");
         assert_eq!(args[1], "/tmp/worktree with spaces");
         assert!(args.contains(&OsString::from("workspace-write")));
