@@ -422,10 +422,10 @@ impl DevelopmentPanel {
         button
     }
 
-    fn codex_button(&self, path: &Path) -> gtk::Button {
+    fn codex_button(&self, path: &Path, dirty: Option<bool>) -> gtk::Button {
         let mode = self.issue.borrow().as_ref()
-            .map(codex::CodexMode::for_issue)
-            .unwrap_or(codex::CodexMode::Fix);
+            .map(|issue| codex::CodexMode::for_issue(issue).for_changes(dirty))
+            .unwrap_or(codex::CodexMode::Open);
         let button = gtk::Button::with_label(mode.label());
         button.add_css_class("transition-action");
         button.add_css_class("suggested-action");
@@ -532,7 +532,7 @@ impl DevelopmentPanel {
                     ));
                     self.body.append(&self.path_row(&tree.path.to_string_lossy()));
                     // All actions target the same existing worktree.
-                    let fix = self.codex_button(&tree.path);
+                    let fix = self.codex_button(&tree.path, tree.dirty);
                     let open = self.editor_button(&editor, &tree.path);
                     let terminal = self.terminal_button(&tree.path);
                     let manage = self.manage_button(site, key, summary);
@@ -553,7 +553,7 @@ impl DevelopmentPanel {
                         ));
                         item.append(&text(status, "ticket-development-muted"));
                         item.append(&self.path_row(&tree.path.to_string_lossy()));
-                        let fix = self.codex_button(&tree.path);
+                        let fix = self.codex_button(&tree.path, tree.dirty);
                         let open = self.editor_button(&editor, &tree.path);
                         let terminal = self.terminal_button(&tree.path);
                         item.append(&Self::actions_row(&[&fix, &open, &terminal]));
