@@ -113,6 +113,7 @@ struct View {
     settings: Rc<RefCell<GitSettings>>,
     site: String,
     key: String,
+    codex_mode: codex::CodexMode,
     suggested_branch: String,
     repository: gtk::DropDown,
     base: gtk::DropDown,
@@ -264,6 +265,10 @@ impl View {
         self.cleanup_change.set_label("Change");
         self.manual_remove.set_visible(false);
         let status = git::status(&tree.path);
+        let changes = status.as_ref().ok().map(|value| !value.is_empty());
+        let codex_mode = self.codex_mode.for_changes(changes);
+        self.codex.set_label(codex_mode.label());
+        self.codex.set_tooltip_text(Some(codex_mode.tooltip()));
         self.summary.remove_css_class("git-status-clean");
         self.summary.remove_css_class("git-status-dirty");
         let message = match status {
@@ -951,7 +956,7 @@ pub fn show(
     }).or_else(|| settings.preferred_index(site, key));
     let view = Rc::new(View {
         dialog: dialog.clone(), settings: Rc::new(RefCell::new(settings)),
-        site: site.into(), key: key.into(),
+        site: site.into(), key: key.into(), codex_mode,
         suggested_branch: issue_detail::suggested_branch_name(key, summary),
         repository: repository.clone(),
         base, cleanup_target, cleanup_summary, cleanup_choices, cleanup_change, manual_remove,
