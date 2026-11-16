@@ -33,7 +33,7 @@ pub fn open(
     issue: &Issue, account: Option<Credentials>,
 ) {
     let window = gtk::Window::builder()
-        .title(&format!("Codex · {}", issue.key))
+        .title(format!("Codex · {}", issue.key))
         .transient_for(parent)
         .default_width(820).default_height(620)
         .build();
