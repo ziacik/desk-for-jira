@@ -1041,9 +1041,11 @@ mod tests {
 
     #[test]
     fn activity_window_size_is_relative_and_persisted() {
-        let mut layout = UiLayout::default();
-        layout.activity_window_width_percent = 75;
-        layout.activity_window_height_percent = 92;
+        let mut layout = UiLayout {
+            activity_window_width_percent: 75,
+            activity_window_height_percent: 92,
+            ..UiLayout::default()
+        };
         let restored: UiLayout =
             serde_json::from_str(&serde_json::to_string(&layout).unwrap()).unwrap();
         assert_eq!(restored.activity_window_width_percent, 75);
