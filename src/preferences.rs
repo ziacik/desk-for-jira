@@ -340,6 +340,8 @@ pub struct GitSettings {
     pub editor: String,
     /// Optional multi-line instructions included only in Fix with Codex runs.
     pub codex_instructions: String,
+    /// Disable Codex approvals and sandbox for launches from Desk for Jira.
+    pub codex_yolo: bool,
     pub fetch_before_create: bool,
     /// site -> Jira project key -> repository path -> number of successful creates.
     pub usage: HashMap<String, HashMap<String, HashMap<String, u64>>>,
@@ -356,6 +358,7 @@ impl Default for GitSettings {
             worktree_root: "~/Worktrees".to_owned(),
             editor: "code".to_owned(),
             codex_instructions: String::new(),
+            codex_yolo: false,
             fetch_before_create: true,
             usage: HashMap::new(),
             worktree_origins: HashMap::new(),
@@ -929,6 +932,23 @@ mod tests {
             &serde_json::to_vec(&configured).unwrap(),
         ).unwrap();
         assert_eq!(restored.codex_instructions, configured.codex_instructions);
+    }
+
+    #[test]
+    fn codex_yolo_defaults_to_off_and_survives_serialization() {
+        let old: GitSettings = serde_json::from_value(serde_json::json!({
+            "editor": "code",
+        })).unwrap();
+        assert!(!old.codex_yolo);
+
+        let enabled = GitSettings {
+            codex_yolo: true,
+            ..GitSettings::default()
+        };
+        let restored: GitSettings = serde_json::from_slice(
+            &serde_json::to_vec(&enabled).unwrap(),
+        ).unwrap();
+        assert!(restored.codex_yolo);
     }
 
     #[test]

@@ -126,6 +126,7 @@ struct View {
     root_field: gtk::Box,
     editor: gtk::DropDown,
     codex_instructions: gtk::TextView,
+    codex_yolo: gtk::CheckButton,
     setup: gtk::Entry,
     run_setup: gtk::CheckButton,
     fetch: gtk::CheckButton,
@@ -309,6 +310,7 @@ impl View {
         new.codex_instructions = buffer.text(
             &buffer.start_iter(), &buffer.end_iter(), false,
         ).to_string();
+        new.codex_yolo = self.codex_yolo.is_active();
         if let Some(index) = selected_index(&self.repository)
             && let Some(repo) = new.repositories.get_mut(index)
         {
@@ -826,6 +828,12 @@ pub fn show(
     let editor = gtk::DropDown::from_strings(&["code", "codium"]);
     editor.set_selected(if settings.editor == "codium" { 1 } else { 0 });
     advanced.append(&field("Editor", &editor));
+    let codex_yolo = gtk::CheckButton::with_label("Run Codex in YOLO mode");
+    codex_yolo.set_active(settings.codex_yolo);
+    codex_yolo.set_tooltip_text(Some(
+        "No approval prompts and no sandbox (--yolo). Applies to every Fix with Codex launch.",
+    ));
+    advanced.append(&codex_yolo);
     let codex_instructions = gtk::TextView::new();
     codex_instructions.set_wrap_mode(gtk::WrapMode::WordChar);
     codex_instructions.buffer().set_text(&settings.codex_instructions);
@@ -924,7 +932,7 @@ pub fn show(
         suggested_branch: issue_detail::suggested_branch_name(key, summary),
         repository: repository.clone(),
         base, cleanup_target, cleanup_summary, cleanup_choices, cleanup_change, manual_remove,
-        branch, root, root_field, editor, codex_instructions,
+        branch, root, root_field, editor, codex_instructions, codex_yolo,
         setup, run_setup, fetch,
         summary: summary_label, path, existing_branch, existing_box, new_box,
         tree_picker, trees: Rc::new(RefCell::new(Vec::new())), more,
@@ -936,6 +944,14 @@ pub fn show(
         view.codex_instructions.buffer().connect_changed(move |_| {
             if let Err(error) = view.store_preferences() {
                 report(&view.info, &format!("Cannot save Codex instructions: {error}"));
+            }
+        });
+    }
+    {
+        let view = view.clone();
+        view.codex_yolo.connect_toggled(move |_| {
+            if let Err(error) = view.store_preferences() {
+                report(&view.info, &format!("Cannot save Codex launch mode: {error}"));
             }
         });
     }
