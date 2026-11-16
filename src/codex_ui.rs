@@ -29,19 +29,16 @@ fn readable_label(text: &str, class: &str) -> gtk::Label {
 fn show_markdown(container: &gtk::Box, source: &str) {
     clear(container);
     for block in codex_markdown::blocks(source) {
+        let kind = match &block {
+            codex_markdown::Block::Heading(_) => "codex-chat-heading",
+            codex_markdown::Block::Quote(_) => "codex-chat-quote",
+            _ => "codex-chat-paragraph",
+        };
         match block {
             codex_markdown::Block::Paragraph(markup)
             | codex_markdown::Block::Heading(markup)
             | codex_markdown::Block::Quote(markup) => {
-                let label = readable_label("", "codex-chat-paragraph");
-                let kind = if matches!(block, codex_markdown::Block::Heading(_)) {
-                    "codex-chat-heading"
-                } else if matches!(block, codex_markdown::Block::Quote(_)) {
-                    "codex-chat-quote"
-                } else {
-                    "codex-chat-paragraph"
-                };
-                label.add_css_class(kind);
+                let label = readable_label("", kind);
                 label.set_markup(&markup);
                 container.append(&label);
             }
