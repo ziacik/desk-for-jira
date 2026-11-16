@@ -175,7 +175,7 @@ impl Session<'_> {
             }
             if let Some(error) = value.get("error") {
                 let message = error["message"].as_str().unwrap_or("Unknown Codex error");
-                if request_id == 2 && self.thread_id.is_none() {
+                if request_id.as_u64() == Some(2) && self.thread_id.is_none() {
                     // An old thread may have been deleted externally; recover with a new one.
                     let _ = self.events.send(Event::Status(format!(
                         "Cannot resume previous conversation ({message}); creating a new one…"
@@ -192,7 +192,7 @@ impl Session<'_> {
                 }
                 return Ok(());
             }
-            if request_id == 1 {
+            if request_id.as_u64() == Some(1) {
                 send(&mut self.stdin, json!({"method": "initialized", "params": {}}))?;
                 if let Some(thread_id) = preferences::codex_thread(
                     &self.site, &self.issue_key, &self.worktree.to_string_lossy(),
@@ -316,7 +316,6 @@ fn run(
         codex::issue_prompt(&site, &issue, &comments, mode),
         &settings.codex_instructions,
     );
-    let initial = if mode == CodexMode::Open { Some(prompt) } else { None };
     let automatic = mode != CodexMode::Open;
     let mut child = ProcessCommand::new("codex")
         .arg("app-server")
@@ -334,7 +333,7 @@ fn run(
     let mut session = Session {
         stdin, events, site, issue_key: issue.key, worktree,
         thread_id: None, turn_id: None,
-        initial_prompt: Some(if automatic { prompt } else { initial.unwrap_or_default() }),
+        initial_prompt: Some(prompt),
         auto_start: automatic, resuming: false, yolo: settings.codex_yolo, next_request: 2,
         streamed_messages: HashSet::new(),
     };
