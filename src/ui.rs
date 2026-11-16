@@ -3409,15 +3409,16 @@ fn issue_button(
     kind_image.set_halign(gtk::Align::Center);
     type_mark.set_center_widget(Some(&kind_image));
     meta.append(&type_mark);
+    let key_group = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    key_group.set_hexpand(true);
     let key = gtk::Label::new(Some(&issue.key));
     key.add_css_class("ticket-key");
-    key.set_hexpand(true);
     key.set_xalign(0.0);
-    meta.append(&key);
+    key_group.append(&key);
     if let Some(action) = activity.get(&issue.key) {
-        let mark = activity_indicator(action);
-        meta.append(&mark);
+        key_group.append(&activity_indicator(action));
     }
+    meta.append(&key_group);
     if !issue.kind.is_empty() {
         let kind = gtk::Label::new(Some(&issue.kind));
         kind.add_css_class("ticket-kind");
