@@ -119,6 +119,7 @@ struct Session<'a> {
     turn_id: Option<String>,
     initial_prompt: Option<String>,
     auto_start: bool,
+    resuming: bool,
     yolo: bool,
     next_request: u64,
     streamed_messages: HashSet<String>,
@@ -179,6 +180,7 @@ impl Session<'_> {
                     let _ = self.events.send(Event::Status(format!(
                         "Cannot resume previous conversation ({message}); creating a new one…"
                     )));
+                    self.resuming = false;
                     self.request("thread/start", json!({
                         "cwd": self.worktree,
                         "approvalPolicy": if self.yolo { "never" } else { "on-request" },
@@ -195,6 +197,7 @@ impl Session<'_> {
                 if let Some(thread_id) = preferences::codex_thread(
                     &self.site, &self.issue_key, &self.worktree.to_string_lossy(),
                 )? {
+                    self.resuming = true;
                     self.request("thread/resume", json!({
                         "threadId": thread_id, "excludeTurns": true
                     }))?;
@@ -206,6 +209,12 @@ impl Session<'_> {
                     }))?;
                 }
             } else if let Some(id) = value["result"]["thread"]["id"].as_str() {
+                // Resuming an existing conversation must NEVER replay the ticket prompt.
+                if self.resuming {
+                    self.resuming = false;
+                    self.auto_start = false;
+                    self.initial_prompt = None;
+                }
                 // Exactly one logical thread belongs to a site/ticket/worktree.
                 self.thread_id = Some(id.to_owned());
                 preferences::remember_codex_thread(
@@ -326,7 +335,7 @@ fn run(
         stdin, events, site, issue_key: issue.key, worktree,
         thread_id: None, turn_id: None,
         initial_prompt: Some(if automatic { prompt } else { initial.unwrap_or_default() }),
-        auto_start: automatic, yolo: settings.codex_yolo, next_request: 2,
+        auto_start: automatic, resuming: false, yolo: settings.codex_yolo, next_request: 2,
         streamed_messages: HashSet::new(),
     };
     send(&mut session.stdin, json!({
