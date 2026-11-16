@@ -2,6 +2,7 @@ use std::{collections::{HashMap, HashSet}, env, fs, io::ErrorKind, path::PathBuf
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use crate::jira::{ProjectStatus, StatusCategory};
+use crate::jira_inbox;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct StatusRef {
@@ -421,6 +422,8 @@ struct Preferences {
     #[serde(default)]
     activity_by_site: HashMap<String, Vec<ActivityEntry>>,
     #[serde(default)]
+    jira_inbox_by_site: HashMap<String, jira_inbox::Feed>,
+    #[serde(default)]
     board_by_site: HashMap<String, BoardSettings>,
     #[serde(default)]
     view_by_site: HashMap<String, ViewSettings>,
@@ -446,6 +449,18 @@ const ACTIVITY_LIMIT: usize = 300;
 fn push_activity(entries: &mut Vec<ActivityEntry>, entry: ActivityEntry) {
     entries.insert(0, entry);
     entries.truncate(ACTIVITY_LIMIT);
+}
+
+pub fn load_jira_inbox(site: &str) -> Result<jira_inbox::Feed> {
+    Ok(read_preferences(&preferences_path()?)?
+        .jira_inbox_by_site.get(site).cloned().unwrap_or_default())
+}
+
+pub fn save_jira_inbox(site: &str, feed: &jira_inbox::Feed) -> Result<()> {
+    let path = preferences_path()?;
+    let mut prefs = read_preferences(&path)?;
+    prefs.jira_inbox_by_site.insert(site.to_owned(), feed.clone());
+    write_preferences(&path, &prefs)
 }
 
 pub fn load_activity(site: &str) -> Result<Vec<ActivityEntry>> {
