@@ -5,7 +5,7 @@ use adw::prelude::*;
 use gtk::glib;
 
 use crate::{
-    codex, codex_session::{self, Control, Event}, dialog, git,
+    codex, codex_session::{self, Control, Event}, dialog,
     jira::{Credentials, Issue, JiraClient},
 };
 
@@ -33,7 +33,7 @@ pub fn open(
     issue: &Issue, account: Option<Credentials>,
 ) {
     let window = gtk::Window::builder()
-        .title(format!("Codex · {}", issue.key))
+        .title(&format!("Codex · {}", issue.key))
         .transient_for(parent)
         .default_width(820).default_height(620)
         .build();
