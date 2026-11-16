@@ -154,8 +154,9 @@ impl Transcript {
     fn command(&mut self, command: &str) {
         let follow = self.should_follow();
         self.finish_agent();
-        let summary: String = command.chars().take(95).collect();
-        let summary = if command.chars().count() > 95 {
+        let summary_line = command.lines().next().unwrap_or(command);
+        let summary: String = summary_line.chars().take(95).collect();
+        let summary = if summary_line.chars().count() > 95 {
             format!("{summary}…")
         } else { summary };
         let expander = gtk::Expander::new(Some(&format!("$ {summary}")));
