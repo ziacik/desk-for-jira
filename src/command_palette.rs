@@ -25,6 +25,7 @@ pub(crate) enum PaletteCommand {
     TogglePin(Issue),
     ManageWorktree(Issue),
     AllWorktrees,
+    ActivityHistory,
     OpenInJira(Issue),
 }
 
