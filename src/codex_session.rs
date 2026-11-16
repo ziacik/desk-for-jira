@@ -21,9 +21,19 @@ pub enum Control {
     Quit,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TranscriptItem {
+    User(String),
+    AgentDelta(String),
+    AgentEnd,
+    Command(String),
+    CommandOutput(String),
+    Info(String),
+}
+
 pub enum Event {
     Status(String),
-    Output(String),
+    Output(TranscriptItem),
     Ready,
     Busy(bool),
     Approval { request_id: Value, description: String },
@@ -56,20 +66,20 @@ fn input(text: String) -> Value {
     json!([{ "type": "text", "text": text }])
 }
 
-fn item_description(item: &Value) -> Option<String> {
+fn item_description(item: &Value) -> Option<TranscriptItem> {
     match item["type"].as_str()? {
         "commandExecution" => {
             let command = item["command"].as_str().unwrap_or("(unknown command)");
-            Some(format!("\n$ {command}\n"))
+            Some(TranscriptItem::Command(command.to_owned()))
         }
         "fileChange" => {
             let files = item["changes"].as_array()
                 .map(|changes| changes.iter().filter_map(|change| change["path"].as_str())
                     .collect::<Vec<_>>().join(", "))
                 .unwrap_or_default();
-            Some(format!("\nFiles changed: {files}\n"))
+            Some(TranscriptItem::Info(format!("Files changed: {files}")))
         }
-        "webSearch" => Some("\nWeb search\n".to_owned()),
+        "webSearch" => Some(TranscriptItem::Info("Web search".to_owned())),
         _ => None,
     }
 }
@@ -103,7 +113,7 @@ fn is_unmaterialized_history_error(
         })
 }
 
-fn historical_items(response: &Value) -> Vec<String> {
+fn historical_items(response: &Value) -> Vec<TranscriptItem> {
     let mut result = Vec::new();
     if let Some(turns) = response["result"]["data"].as_array() {
         for entry in turns.iter().rev() {
@@ -113,12 +123,21 @@ fn historical_items(response: &Value) -> Vec<String> {
                     match item["type"].as_str() {
                         Some("userMessage") | Some("agentMessage") => {
                             if let Some(text) = message_text(item) {
-                                let role = if item["type"] == "userMessage" { "You" } else { "Codex" };
-                                result.push(format!("\n{role}: {text}\n"));
+                                if item["type"] == "userMessage" {
+                                    result.push(TranscriptItem::User(text));
+                                } else {
+                                    result.push(TranscriptItem::AgentDelta(text));
+                                    result.push(TranscriptItem::AgentEnd);
+                                }
                             }
                         }
                         Some("commandExecution") => {
                             if let Some(line) = item_description(item) { result.push(line); }
+                            if let Some(output) = item["aggregatedOutput"].as_str()
+                                && !output.is_empty()
+                            {
+                                result.push(TranscriptItem::CommandOutput(output.to_owned()));
+                            }
                         }
                         _ => {}
                     }
@@ -300,12 +319,16 @@ impl Session<'_> {
                     self.streamed_messages.insert(id.to_owned());
                 }
                 if let Some(delta) = params["delta"].as_str() {
-                    let _ = self.events.send(Event::Output(delta.to_owned()));
+                    let _ = self.events.send(Event::Output(
+                        TranscriptItem::AgentDelta(delta.to_owned()),
+                    ));
                 }
             }
             "item/commandExecution/outputDelta" => {
                 if let Some(delta) = value["params"]["delta"].as_str() {
-                    let _ = self.events.send(Event::Output(delta.to_owned()));
+                    let _ = self.events.send(Event::Output(
+                        TranscriptItem::CommandOutput(delta.to_owned()),
+                    ));
                 }
             }
             "item/completed" => {
@@ -316,9 +339,9 @@ impl Session<'_> {
                     if !streamed
                         && let Some(text) = message_text(item)
                     {
-                        let _ = self.events.send(Event::Output(text));
+                        let _ = self.events.send(Event::Output(TranscriptItem::AgentDelta(text)));
                     }
-                    let _ = self.events.send(Event::Output("\n\n".to_owned()));
+                    let _ = self.events.send(Event::Output(TranscriptItem::AgentEnd));
                 }
             }
             "error" => {
@@ -464,11 +487,13 @@ mod tests {
             {"type":"commandExecution","command":"cargo test"},
             {"type":"agentMessage","text":"done"}
         ]}]}});
-        let entries = historical_items(&data).join("");
-        assert!(entries.contains("You: hello"));
-        assert!(entries.contains("$ cargo test"));
-        assert!(entries.contains("Codex: done"));
-        assert!(!entries.contains("diff"));
+        let entries = historical_items(&data);
+        assert_eq!(entries, vec![
+            TranscriptItem::User("hello".into()),
+            TranscriptItem::Command("cargo test".into()),
+            TranscriptItem::AgentDelta("done".into()),
+            TranscriptItem::AgentEnd,
+        ]);
     }
 
     #[test]
