@@ -11,9 +11,10 @@ use adw::prelude::*;
 use gtk::glib;
 use crate::{
     codex,
+    codex_ui,
     git::{self, CreateWorktree, Worktree},
     issue_detail,
-    jira::{Credentials, Issue, JiraClient},
+    jira::{Credentials, Issue},
     preferences::{self, GitRepository, GitSettings},
 };
 
@@ -1033,35 +1034,13 @@ pub fn show(
         let issue = issue.clone();
         let account = account.clone();
         let site = site.to_owned();
-        view.codex.clone().connect_clicked(move |button| {
+        view.codex.clone().connect_clicked(move |_| {
             let Some(tree) = view.active_tree.borrow().clone() else { return };
-            let Some(issue) = issue.clone() else {
+            let Some(issue) = issue.as_ref() else {
                 report(&view.info, "No Jira issue context available");
                 return;
             };
-            button.set_sensitive(false);
-            report(&view.info, "Preparing Jira context for Codex…");
-            let (tx, rx) = mpsc::channel();
-            let account = account.clone();
-            let site = site.clone();
-            thread::spawn(move || {
-                let comments = account
-                    .and_then(|credentials| JiraClient::new(credentials).ok())
-                    .and_then(|client| client.issue_comments(&issue.key).ok())
-                    .unwrap_or_default();
-                let result = codex::start(&tree.path, &site, &issue, &comments)
-                    .map_err(|error| error.to_string());
-                let _ = tx.send(result);
-            });
-            let view = view.clone();
-            let button = button.clone();
-            poll(rx, move |result| {
-                button.set_sensitive(true);
-                match result {
-                    Ok(()) => view.dialog.close(),
-                    Err(error) => report(&view.info, &format!("Cannot start Codex: {error}")),
-                }
-            });
+            codex_ui::open(&view.dialog, &tree.path, &site, issue, account.clone());
         });
     }
     {

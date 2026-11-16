@@ -1,4 +1,7 @@
 mod codex;
+mod codex_session;
+mod codex_ui;
+mod codex_markdown;
 mod command_palette;
 mod dialog;
 mod issue_detail;

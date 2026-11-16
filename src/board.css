@@ -1361,3 +1361,53 @@ button.ticket-pr-refresh {
 button.ticket-pr-refresh:hover {
   background-color: alpha(@window_fg_color, 0.075);
 }
+
+
+/* Codex chat: theme-aware Markdown with compact, collapsible command logs. */
+.codex-chat-message {
+  border-radius: 11px;
+  background-color: alpha(@window_fg_color, 0.045);
+  padding: 12px 14px;
+}
+.codex-chat-message.codex-chat-user {
+  background-color: alpha(@accent_bg_color, 0.105);
+}
+.codex-chat-role {
+  font-weight: 700;
+  font-size: 0.85em;
+  color: alpha(@window_fg_color, 0.75);
+}
+.codex-chat-body {
+  color: @window_fg_color;
+}
+.codex-chat-heading {
+  font-size: 1.12em;
+  font-weight: 700;
+}
+.codex-chat-quote {
+  color: alpha(@window_fg_color, 0.77);
+  border-left: 3px solid alpha(@window_fg_color, 0.20);
+  padding-left: 10px;
+}
+.codex-chat-code-scroll {
+  border-radius: 8px;
+  background-color: alpha(@window_fg_color, 0.065);
+}
+.codex-chat-code {
+  padding: 10px 12px;
+  font-family: monospace;
+}
+.codex-chat-command {
+  border-radius: 9px;
+  background-color: alpha(@window_fg_color, 0.043);
+  padding: 7px 11px;
+}
+.codex-chat-command textview,
+.codex-chat-command textview text {
+  background: transparent;
+  font-size: 0.92em;
+}
+.codex-chat-info {
+  font-size: 0.87em;
+  color: alpha(@window_fg_color, 0.72);
+}

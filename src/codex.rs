@@ -122,7 +122,7 @@ pub fn issue_prompt(site: &str, issue: &Issue, comments: &[IssueComment], mode: 
 
 /// Keep user-configured instructions separate from Jira-provided task data.
 /// Codex can explicitly invoke multiple installed skills using $plugin:skill.
-fn with_custom_instructions(prompt: String, instructions: &str) -> String {
+pub(crate) fn with_custom_instructions(prompt: String, instructions: &str) -> String {
     let instructions = instructions.trim();
     if instructions.is_empty() {
         return prompt;
