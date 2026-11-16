@@ -557,6 +557,7 @@ impl Manager {
             .title("Remove worktree and local branch")
             .transient_for(&self.window).modal(true)
             .default_width(480).default_height(340).build();
+        crate::dialog::close_on_escape(&confirm);
         let content = gtk::Box::new(gtk::Orientation::Vertical, 12);
         content.set_margin_start(18);
         content.set_margin_end(18);
@@ -825,6 +826,7 @@ pub fn show(
     };
     let window = gtk::Window::builder().title("Worktrees")
         .transient_for(parent).default_width(width).default_height(height).build();
+    crate::dialog::close_on_escape(&window);
     window.add_css_class("worktree-global-window");
     window.connect_close_request(move |window| {
         // Save the actual allocated size (not the requested default size).
