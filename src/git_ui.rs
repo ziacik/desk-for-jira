@@ -340,6 +340,7 @@ impl View {
             report(&self.info, &error); return;
         }
         let repo_path = repo.path.clone();
+        let repo_name = repo.name.clone();
         let origin_branch = branch.clone();
         let origin_base = base.clone();
         let target = expand_home(&self.root.text()).join(&repo.name).join(&self.key);
@@ -377,6 +378,11 @@ impl View {
                 }
                 if let Err(error) = preferences::save_git(&view.settings.borrow()) {
                     report(&view.info, &format!("Worktree created; failed to save preference: {error}"));
+                }
+                if let Err(error) = preferences::record_activity(
+                    &view.site, &view.key, &format!("Created worktree · {repo_name}"),
+                ) {
+                    eprintln!("Could not save activity history: {error}");
                 }
                 view.refresh();
                 match result {
@@ -420,6 +426,7 @@ impl View {
             report(&view.info, "Removing locally after your explicit confirmation…");
             let (tx, rx) = mpsc::channel();
             let repo_path = repo.path.clone();
+            let repo_name = repo.name.clone();
             let tree_for_git = tree.clone();
             let worktree_path = tree.path.clone();
             thread::spawn(move || {
@@ -443,6 +450,11 @@ impl View {
                             ));
                         } else {
                             report(&view.info, "Worktree and local branch removed.");
+                        }
+                        if let Err(error) = preferences::record_activity(
+                            &view.site, &view.key, &format!("Removed worktree · {repo_name}"),
+                        ) {
+                            eprintln!("Could not save activity history: {error}");
                         }
                         view.refresh();
                     }
@@ -504,6 +516,7 @@ impl View {
             view.remove.set_sensitive(false);
             report(&view.info, "Verifying merge and removing worktree…");
             let repo = repo.clone();
+            let repo_name = repo.name.clone();
             let worktree_path = tree.path.clone();
             let tree_for_git = tree.clone();
             let base = base.clone();
@@ -528,6 +541,11 @@ impl View {
                             ));
                         } else {
                             report(&view.info, "Worktree and local branch removed.");
+                        }
+                        if let Err(error) = preferences::record_activity(
+                            &view.site, &view.key, &format!("Removed worktree · {repo_name}"),
+                        ) {
+                            eprintln!("Could not save activity history: {error}");
                         }
                         view.refresh();
                     }

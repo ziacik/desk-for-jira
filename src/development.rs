@@ -135,10 +135,14 @@ pub struct DevelopmentPanel {
     account: Rc<RefCell<Option<Credentials>>>,
     window: adw::ApplicationWindow,
     toast: adw::ToastOverlay,
+    on_activity: Rc<dyn Fn()>,
 }
 
 impl DevelopmentPanel {
-    pub fn new(window: &adw::ApplicationWindow, toast: &adw::ToastOverlay, hidden_menu: &gtk::MenuButton) -> Self {
+    pub fn new(
+        window: &adw::ApplicationWindow, toast: &adw::ToastOverlay,
+        hidden_menu: &gtk::MenuButton, on_activity: Rc<dyn Fn()>,
+    ) -> Self {
         let root = gtk::Box::new(gtk::Orientation::Vertical, 9);
         root.add_css_class("ticket-development");
 
@@ -172,6 +176,7 @@ impl DevelopmentPanel {
             account: Rc::new(RefCell::new(None)),
             window: window.clone(),
             toast: toast.clone(),
+            on_activity,
         };
         let panel_for_refresh = panel.clone();
         refresh.connect_clicked(move |_| {
@@ -369,6 +374,7 @@ impl DevelopmentPanel {
                 let show = panel.context.borrow().as_ref().is_some_and(|context| context.3);
                 panel.refresh(&site, &key, &summary, show);
             }
+            (panel.on_activity)();
             glib::Propagation::Proceed
         });
     }

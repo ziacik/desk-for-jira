@@ -530,13 +530,22 @@ impl Manager {
         (row, merge_badge)
     }
 
-    fn cleanup_removed(&self, confirm: &gtk::Window, worktree_path: &Path) {
+    fn cleanup_removed(&self, confirm: &gtk::Window, worktree_path: &Path,
+        branch: Option<&str>, repository: &str) {
         confirm.close();
         if let Ok(mut settings) = preferences::load_git() {
             settings.forget_worktree_origin(&worktree_path.to_string_lossy());
             if let Err(error) = preferences::save_git(&settings) {
                 eprintln!("Could not clean up worktree origin: {error}");
             }
+        }
+        if let Some(key) = branch.and_then(git::ticket_key_from_branch)
+            && let Some(account) = self.account.as_ref()
+            && let Err(error) = preferences::record_activity(
+                &account.base_url, &key, &format!("Removed worktree · {repository}"),
+            )
+        {
+            eprintln!("Could not save activity history: {error}");
         }
         self.toast.add_toast(adw::Toast::new("Worktree and local branch removed"));
         // Re-scan worktrees and their Jira tickets after a successful removal.
@@ -686,6 +695,8 @@ impl Manager {
                 progress.set_visible(true);
                 let repo_path = repo.path.clone();
                 let worktree_path = tree.path.clone();
+                let history_branch = tree.branch.clone();
+                let history_repository = repo.name.clone();
                 let tree_for_git = tree.clone();
                 let (tx, rx) = mpsc::channel();
                 thread::spawn(move || {
@@ -703,7 +714,8 @@ impl Manager {
                 poll(rx, move |result| {
                     match result {
                         Ok(()) => {
-                            manager.cleanup_removed(&confirm, &worktree_path);
+                            manager.cleanup_removed(&confirm, &worktree_path,
+                                    history_branch.as_deref(), &history_repository);
                             manager.refresh();
                         }
                         Err(error) => {
@@ -773,10 +785,13 @@ impl Manager {
                     let remove_button = remove_button.clone();
                     let progress_label = progress_label.clone();
                     let worktree_path = tree.path.clone();
+                    let history_branch = tree.branch.clone();
+                    let history_repository = repo.name.clone();
                     poll(rx, move |result| {
                         match result {
                             Ok(()) => {
-                                manager.cleanup_removed(&confirm, &worktree_path);
+                                manager.cleanup_removed(&confirm, &worktree_path,
+                                    history_branch.as_deref(), &history_repository);
                                 manager.refresh();
                             }
                             Err(error) => {
@@ -802,6 +817,7 @@ pub fn show(
     open_issue: Rc<dyn Fn(String)>,
     layout_settings: Rc<RefCell<preferences::UiLayout>>,
     account: Option<Credentials>,
+    on_activity: Rc<dyn Fn()>,
 ) {
     let (width, height) = {
         let settings = layout_settings.borrow();
@@ -821,6 +837,7 @@ pub fn show(
                 eprintln!("Could not save Worktrees window size: {error}");
             }
         }
+        on_activity();
         glib::Propagation::Proceed
     });
 

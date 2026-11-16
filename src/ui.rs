@@ -48,6 +48,7 @@ struct Ui {
     manage_worktree_visibility_button: gtk::Button,
     palette_button: gtk::Button,
     worktrees_button: gtk::Button,
+    activity_button: gtk::Button,
     palette_window: Rc<RefCell<Option<gtk::Window>>>,
     pending_direct_issue: Rc<RefCell<Option<String>>>,
     search: gtk::SearchEntry,
@@ -287,6 +288,7 @@ enum Event {
     RememberedIssueLoaded(u64, String, Result<Vec<Issue>, String>),
     PaletteIssueLoaded(u64, String, Box<Result<Issue, String>>),
     OpenLinkedIssue(String),
+    ActivityChanged,
     ImageLoaded(u64, String, String, Result<Vec<u8>, String>),
     CommentsLoaded(u64, u64, String, Result<Vec<IssueComment>, String>),
     ChildrenLoaded(u64, u64, String, Result<Vec<Issue>, String>),
@@ -382,6 +384,9 @@ fn build_ui(app: &adw::Application) {
     worktrees_button.add_css_class("flat");
     worktrees_button.add_css_class("header-worktrees-action");
     worktrees_button.set_tooltip_text(Some("Manage local Git worktrees across all repositories"));
+    let activity_button = gtk::Button::from_icon_name("document-open-recent-symbolic");
+    activity_button.add_css_class("flat");
+    activity_button.set_tooltip_text(Some("Activity history — actions performed in Desk for Jira"));
     let spinner = gtk::Spinner::new();
     spinner.set_visible(false);
     header.pack_start(&sidebar_toggle);
@@ -389,6 +394,7 @@ fn build_ui(app: &adw::Application) {
     header.pack_end(&refresh_button);
     header.pack_end(&palette_button);
     header.pack_end(&worktrees_button);
+    header.pack_end(&activity_button);
     header.pack_end(&spinner);
 
 
@@ -743,7 +749,11 @@ fn build_ui(app: &adw::Application) {
     let toast = adw::ToastOverlay::new();
     toast.set_child(Some(&workspace_split));
     window.set_content(Some(&toast));
-    let development = development::DevelopmentPanel::new(&window, &toast, &worktree_more);
+    let activity_events = sender.clone();
+    let development = development::DevelopmentPanel::new(
+        &window, &toast, &worktree_more,
+        Rc::new(move || { let _ = activity_events.send(Event::ActivityChanged); }),
+    );
     let pull_requests = pull_requests::PullRequestsPanel::new();
 
     let ui = Ui {
@@ -751,7 +761,7 @@ fn build_ui(app: &adw::Application) {
         project_filter: Rc::new(RefCell::new(None)),
         connect_button, disconnect_button, refresh_button,
         manage_projects_button, manage_columns_button, manage_worktree_visibility_button,
-        palette_button, worktrees_button,
+        palette_button, worktrees_button, activity_button,
         palette_window: Rc::new(RefCell::new(None)),
         pending_direct_issue: Rc::new(RefCell::new(None)),
         search, center_title,
@@ -935,12 +945,116 @@ fn build_ui(app: &adw::Application) {
 /// are not currently cached on the board.
 fn show_all_worktrees(ui: &Ui) {
     let events = ui.events.clone();
+    let activity_events = ui.events.clone();
     crate::all_worktrees::show(&ui.window, &ui.toast, Rc::new(move |key| {
         let _ = events.send(Event::OpenLinkedIssue(key));
-    }), ui.layout.clone(), ui.state.borrow().account.clone());
+    }), ui.layout.clone(), ui.state.borrow().account.clone(),
+        Rc::new(move || { let _ = activity_events.send(Event::ActivityChanged); }),
+    );
+}
+
+fn show_activity_history(ui: &Ui) {
+    let site = {
+        let state = ui.state.borrow();
+        state.account.as_ref().map(|account| account.base_url.clone())
+    };
+    let Some(site) = site else {
+        ui.toast.add_toast(adw::Toast::new("Connect to Jira to view activity history"));
+        return;
+    };
+    let entries = match preferences::load_activity(&site) {
+        Ok(entries) => entries,
+        Err(error) => {
+            show_error(ui, &format!("Could not load activity history: {error}"));
+            return;
+        }
+    };
+    let dialog = gtk::Window::builder()
+        .title("Activity history")
+        .transient_for(&ui.window)
+        .modal(true)
+        .default_width(620)
+        .default_height(540)
+        .build();
+    let content = gtk::Box::new(gtk::Orientation::Vertical, 12);
+    content.set_margin_top(16);
+    content.set_margin_bottom(16);
+    content.set_margin_start(16);
+    content.set_margin_end(16);
+    let subtitle = gtk::Label::new(Some("Actions performed in this Jira workspace, newest first"));
+    subtitle.set_xalign(0.0);
+    subtitle.add_css_class("dim-label");
+    content.append(&subtitle);
+    let search = gtk::SearchEntry::new();
+    search.set_placeholder_text(Some("Filter by ticket or action"));
+    content.append(&search);
+    let scroll = gtk::ScrolledWindow::new();
+    scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
+    scroll.set_vexpand(true);
+    let list = gtk::Box::new(gtk::Orientation::Vertical, 3);
+    let mut searchable = Vec::new();
+    for entry in entries {
+        let row = gtk::Button::new();
+        row.add_css_class("flat");
+        row.set_halign(gtk::Align::Fill);
+        let line = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+        line.set_margin_top(7);
+        line.set_margin_bottom(7);
+        line.append(&gtk::Image::from_icon_name("document-open-recent-symbolic"));
+        let labels = gtk::Box::new(gtk::Orientation::Vertical, 4);
+        labels.set_hexpand(true);
+        let heading = gtk::Box::new(gtk::Orientation::Horizontal, 9);
+        let ticket = gtk::Label::new(Some(&entry.key));
+        ticket.add_css_class("heading");
+        heading.append(&ticket);
+        let action = gtk::Label::new(Some(&entry.action));
+        action.set_xalign(0.0);
+        action.set_wrap(true);
+        heading.append(&action);
+        labels.append(&heading);
+        let when = glib::DateTime::from_unix_local(entry.timestamp)
+            .ok().and_then(|date| date.format("%d %b %Y, %H:%M").ok())
+            .map(|date| date.to_string()).unwrap_or_default();
+        let time = gtk::Label::new(Some(&when));
+        time.set_xalign(0.0);
+        time.add_css_class("dim-label");
+        labels.append(&time);
+        line.append(&labels);
+        row.set_child(Some(&line));
+        let key = entry.key.clone();
+        let dialog_for_row = dialog.clone();
+        let events = ui.events.clone();
+        row.connect_clicked(move |_| {
+            let _ = events.send(Event::OpenLinkedIssue(key.clone()));
+            dialog_for_row.close();
+        });
+        searchable.push((row.clone(), format!("{} {}", entry.key, entry.action).to_lowercase()));
+        list.append(&row);
+    }
+    if searchable.is_empty() {
+        let empty = gtk::Label::new(Some("No activity yet. Status changes and worktree actions will appear here."));
+        empty.set_wrap(true);
+        empty.set_margin_top(36);
+        empty.add_css_class("dim-label");
+        list.append(&empty);
+    }
+    search.connect_search_changed(move |search| {
+        let query = search.text().to_lowercase();
+        for (row, text) in &searchable {
+            row.set_visible(text.contains(query.as_str()));
+        }
+    });
+    scroll.set_child(Some(&list));
+    content.append(&scroll);
+    dialog.set_child(Some(&content));
+    dialog.present();
 }
 
 fn wire_actions(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>) {
+    {
+        let ui = ui.clone();
+        ui.activity_button.clone().connect_clicked(move |_| show_activity_history(&ui));
+    }
     {
         let ui = ui.clone();
         ui.worktrees_button.clone().connect_clicked(move |_| {
@@ -1310,6 +1424,7 @@ fn handle_event(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>, eve
             }
         }
         Event::OpenLinkedIssue(key) => open_issue_by_key(ui, &key),
+        Event::ActivityChanged => render_board(ui, &state.borrow()),
         Event::PaletteIssueLoaded(id, key, result) => {
             // A site change, another ticket selection, or closing the inspector
             // must cancel a pending direct-open result.
@@ -1521,6 +1636,13 @@ fn handle_event(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>, eve
                     ui.issue_history.borrow_mut().update_status(
                         &key, &transition.to_name, &transition.to_id, next_category,
                     );
+                    if let Some(account) = state.borrow().account.as_ref()
+                        && let Err(error) = preferences::record_activity(
+                            &account.base_url, &key, &format!("Moved to {}", transition.to_name),
+                        )
+                    {
+                        show_error(ui, &format!("Could not save activity history: {error}"));
+                    }
                     render_board(ui, &state.borrow());
                     if ui.selected_issue.borrow().as_deref() == Some(key.as_str()) {
                         let issue = {
@@ -3015,7 +3137,7 @@ fn style_pin_button(button: &gtk::Button, pinned: bool) {
 }
 
 fn toggle_pinned_issue(ui: &Ui, issue: &Issue) {
-    let (base_url, settings) = {
+    let (base_url, settings, pinned) = {
         let mut state = ui.state.borrow_mut();
         let pinned = state.settings.toggle_pinned(&issue.key);
         if pinned && !state.pinned_issues.iter().any(|item| item.key == issue.key) {
@@ -3024,17 +3146,39 @@ fn toggle_pinned_issue(ui: &Ui, issue: &Issue) {
         (
             state.account.as_ref().map(|account| account.base_url.clone()),
             state.settings.clone(),
+            pinned,
         )
     };
-    if let Some(base_url) = base_url
-        && let Err(error) = preferences::save(&base_url, &settings)
-    {
-        show_error(ui, &format!("Could not save pinned issues: {error}"));
+    if let Some(base_url) = base_url {
+        if let Err(error) = preferences::save(&base_url, &settings) {
+            show_error(ui, &format!("Could not save pinned issues: {error}"));
+        } else if let Err(error) = preferences::record_activity(
+            &base_url, &issue.key, if pinned { "Pinned ticket" } else { "Unpinned ticket" },
+        ) {
+            show_error(ui, &format!("Could not save activity history: {error}"));
+        }
     }
     render_board(ui, &ui.state.borrow());
 }
 
-fn render_pinned_section(ui: &Ui, state: &State) {
+/// Show the most recent app-side action for tickets still present in the bounded history.
+fn board_activity(site: &str) -> HashMap<String, String> {
+    if site.is_empty() { return HashMap::new(); }
+    let entries = match preferences::load_activity(site) {
+        Ok(entries) => entries,
+        Err(error) => {
+            eprintln!("Could not read ticket activity indicators: {error}");
+            return HashMap::new();
+        }
+    };
+    let mut activity = HashMap::new();
+    for entry in entries {
+        activity.entry(entry.key).or_insert(entry.action);
+    }
+    activity
+}
+
+fn render_pinned_section(ui: &Ui, state: &State, activity: &HashMap<String, String>) {
     clear_box(&ui.pinned_box);
     let pinned = pinned_issue_refs(&state.settings, &state.issues, &state.pinned_issues);
     let has_pins = !pinned.is_empty();
@@ -3048,7 +3192,7 @@ fn render_pinned_section(ui: &Ui, state: &State) {
     let base_url = state.account.as_ref().map(|account| account.base_url.as_str()).unwrap_or("");
     for issue in pinned {
         ui.pinned_box.append(&pinned_issue_tile(
-            issue, ui, base_url, state.account.as_ref(), state.generation,
+            issue, ui, base_url, state.account.as_ref(), state.generation, activity,
         ));
     }
 }
@@ -3062,7 +3206,9 @@ fn render_board(ui: &Ui, state: &State) {
         show_empty(&ui.board_box, "Choose projects", "Use Projects… to set up your board.");
         return;
     }
-    render_pinned_section(ui, state);
+    let site = state.account.as_ref().map(|account| account.base_url.as_str()).unwrap_or("");
+    let activity = board_activity(site);
+    render_pinned_section(ui, state, &activity);
     if let Some(key) = ui.selected_issue.borrow().as_deref() {
         style_pin_button(
             &ui.pin_detail,
@@ -3137,7 +3283,9 @@ fn render_board(ui: &Ui, state: &State) {
 
         let item_box = gtk::Box::new(gtk::Orientation::Vertical, 7);
         for issue in issues {
-            item_box.append(&issue_button(issue, ui, url, state.account.as_ref(), state.generation));
+            item_box.append(&issue_button(
+                issue, ui, url, state.account.as_ref(), state.generation, &activity,
+            ));
         }
         let scroll = gtk::ScrolledWindow::new();
         // Reserve space for the scrollbar instead of painting it across cards.
@@ -3224,7 +3372,10 @@ fn connect_epic_card_navigation(label: &gtk::Label, key: &str, events: &Sender<E
     });
 }
 
-fn issue_button(issue: &Issue, ui: &Ui, base_url: &str, account: Option<&Credentials>, generation: u64) -> gtk::Overlay {
+fn issue_button(
+    issue: &Issue, ui: &Ui, base_url: &str, account: Option<&Credentials>,
+    generation: u64, activity: &HashMap<String, String>,
+) -> gtk::Overlay {
     let button = gtk::Button::new();
     button.add_css_class("issue-card");
     button.set_hexpand(true);
@@ -3258,11 +3409,16 @@ fn issue_button(issue: &Issue, ui: &Ui, base_url: &str, account: Option<&Credent
     kind_image.set_halign(gtk::Align::Center);
     type_mark.set_center_widget(Some(&kind_image));
     meta.append(&type_mark);
+    let key_group = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    key_group.set_hexpand(true);
     let key = gtk::Label::new(Some(&issue.key));
     key.add_css_class("ticket-key");
-    key.set_hexpand(true);
     key.set_xalign(0.0);
-    meta.append(&key);
+    key_group.append(&key);
+    if let Some(action) = activity.get(&issue.key) {
+        key_group.append(&activity_indicator(action));
+    }
+    meta.append(&key_group);
     if !issue.kind.is_empty() {
         let kind = gtk::Label::new(Some(&issue.kind));
         kind.add_css_class("ticket-kind");
@@ -3364,6 +3520,8 @@ fn show_command_palette(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Eve
                 "system-search-symbolic", false, PaletteCommand::FocusBoardSearch),
             PaletteItem::new("All worktrees", "Manage Git worktrees in all local repositories",
                 "Command", "folder-symbolic", true, PaletteCommand::AllWorktrees),
+            PaletteItem::new("Activity history", "Recent ticket changes and worktree actions",
+                "Command", "document-open-recent-symbolic", true, PaletteCommand::ActivityHistory),
         ];
         if !s.statuses.is_empty() {
             items.push(PaletteItem::new("Edit columns", "Reorder and configure workflow columns",
@@ -3471,6 +3629,9 @@ fn show_command_palette(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Eve
             PaletteCommand::AllWorktrees => {
                 show_all_worktrees(&ui_for_action);
             }
+            PaletteCommand::ActivityHistory => {
+                show_activity_history(&ui_for_action);
+            }
             PaletteCommand::FocusBoardSearch => {
                 ui_for_action.search.grab_focus();
             }
@@ -3485,12 +3646,14 @@ fn show_command_palette(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Eve
                         Some(issue.clone()), Some(account.clone()),
                     );
                     let panel = ui_for_action.development.clone();
+                    let activity_events = ui_for_action.events.clone();
                     let key = issue.key;
                     let selected = ui_for_action.selected_issue.clone();
                     dialog.connect_close_request(move |_| {
                         if selected.borrow().as_deref() == Some(key.as_str()) {
                             panel.refresh_current();
                         }
+                        let _ = activity_events.send(Event::ActivityChanged);
                         glib::Propagation::Proceed
                     });
                 }
@@ -3814,12 +3977,21 @@ fn connect_issue_open(
     button.connect_clicked(move |button| open_issue(&ui, &issue, Some(button)));
 }
 
+fn activity_indicator(action: &str) -> gtk::Image {
+    let icon = gtk::Image::from_icon_name("document-open-recent-symbolic");
+    icon.add_css_class("ticket-activity-icon");
+    icon.set_valign(gtk::Align::Center);
+    icon.set_tooltip_text(Some(&format!("Your activity · {action}")));
+    icon
+}
+
 fn pinned_issue_tile(
     issue: &Issue,
     ui: &Ui,
     base_url: &str,
     account: Option<&Credentials>,
     generation: u64,
+    activity: &HashMap<String, String>,
 ) -> gtk::Box {
     // Separate action controls, not a second full-sized issue card or an Overlay:
     // the text stays aligned and the entire row has a predictable height.
@@ -3842,6 +4014,9 @@ fn pinned_issue_tile(
     key.add_css_class("pinned-ticket-key");
     key.set_xalign(0.0);
     row.append(&key);
+    if let Some(action) = activity.get(&issue.key) {
+        row.append(&activity_indicator(action));
+    }
     let summary = gtk::Label::new(Some(&issue.summary));
     summary.add_css_class("pinned-ticket-summary");
     summary.set_xalign(0.0);
