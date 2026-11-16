@@ -974,6 +974,7 @@ fn show_activity_history(ui: &Ui) {
         .default_width(620)
         .default_height(540)
         .build();
+    crate::dialog::close_on_escape(&dialog);
     let content = gtk::Box::new(gtk::Orientation::Vertical, 12);
     content.set_margin_top(16);
     content.set_margin_bottom(16);
@@ -1970,6 +1971,7 @@ fn show_login(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>) {
         .default_width(460)
         .resizable(false)
         .build();
+    crate::dialog::close_on_escape(&dialog);
     let content = gtk::Box::new(gtk::Orientation::Vertical, 12);
     content.set_margin_top(22);
     content.set_margin_bottom(22);
@@ -2067,6 +2069,7 @@ fn show_project_picker(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Even
         .default_width(480)
         .default_height(560)
         .build();
+    crate::dialog::close_on_escape(&dialog);
     let content = gtk::Box::new(gtk::Orientation::Vertical, 12);
     content.set_margin_top(18);
     content.set_margin_bottom(18);
@@ -2275,6 +2278,7 @@ fn show_worktree_visibility_editor(ui: &Ui, state: &Rc<RefCell<State>>) {
         .default_width(520)
         .default_height(640)
         .build();
+    crate::dialog::close_on_escape(&dialog);
     let content = gtk::Box::new(gtk::Orientation::Vertical, 14);
     content.set_margin_top(18);
     content.set_margin_bottom(18);
@@ -2379,6 +2383,7 @@ fn show_column_editor(ui: &Ui, state: &Rc<RefCell<State>>) {
         .default_width(680)
         .default_height(720)
         .build();
+    crate::dialog::close_on_escape(&dialog);
     let content = gtk::Box::new(gtk::Orientation::Vertical, 14);
     content.set_margin_top(18);
     content.set_margin_bottom(18);
@@ -2700,6 +2705,7 @@ fn show_add_status_picker(
         .default_width(540)
         .default_height(510)
         .build();
+    crate::dialog::close_on_escape(&picker);
     let content = gtk::Box::new(gtk::Orientation::Vertical, 12);
     content.set_margin_top(18);
     content.set_margin_bottom(18);
@@ -2808,6 +2814,7 @@ fn confirm_column_reset(
         .resizable(false)
         .default_width(430)
         .build();
+    crate::dialog::close_on_escape(&dialog);
     let content = gtk::Box::new(gtk::Orientation::Vertical, 14);
     content.set_margin_top(20);
     content.set_margin_bottom(20);
