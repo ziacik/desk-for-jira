@@ -342,6 +342,8 @@ pub struct GitSettings {
     pub codex_instructions: String,
     /// Disable Codex approvals and sandbox for launches from Desk for Jira.
     pub codex_yolo: bool,
+    /// Persisted app-server conversation per Jira site, ticket and worktree.
+    pub codex_threads: HashMap<String, String>,
     pub fetch_before_create: bool,
     /// site -> Jira project key -> repository path -> number of successful creates.
     pub usage: HashMap<String, HashMap<String, HashMap<String, u64>>>,
@@ -359,6 +361,7 @@ impl Default for GitSettings {
             editor: "code".to_owned(),
             codex_instructions: String::new(),
             codex_yolo: false,
+            codex_threads: HashMap::new(),
             fetch_before_create: true,
             usage: HashMap::new(),
             worktree_origins: HashMap::new(),
@@ -546,6 +549,26 @@ pub fn save_layout(layout: &UiLayout) -> Result<()> {
     prefs.ui_layout = layout.clone().sanitized();
     write_preferences(&path, &prefs)
 }
+fn codex_thread_key(site: &str, issue: &str, worktree: &str) -> String {
+    format!("{}\\n{}\\n{}", site.trim_end_matches('/'), issue, worktree)
+}
+
+pub fn codex_thread(site: &str, issue: &str, worktree: &str) -> Result<Option<String>> {
+    let key = codex_thread_key(site, issue, worktree);
+    Ok(load_git()?.codex_threads.get(&key).cloned())
+}
+
+pub fn remember_codex_thread(
+    site: &str, issue: &str, worktree: &str, thread_id: &str,
+) -> Result<()> {
+    let path = preferences_path()?;
+    let mut prefs = read_preferences(&path)?;
+    prefs.git.codex_threads.insert(
+        codex_thread_key(site, issue, worktree), thread_id.to_owned(),
+    );
+    write_preferences(&path, &prefs)
+}
+
 pub fn load_git() -> Result<GitSettings> {
     Ok(read_preferences(&preferences_path()?)?.git)
 }
@@ -983,6 +1006,23 @@ mod tests {
             &serde_json::to_vec(&configured).unwrap(),
         ).unwrap();
         assert_eq!(restored.codex_instructions, configured.codex_instructions);
+    }
+
+    #[test]
+    fn codex_threads_are_scoped_and_backward_compatible() {
+        let mut settings = GitSettings::default();
+        let key = codex_thread_key("https://jira.test/", "ART-1", "/tmp/a");
+        settings.codex_threads.insert(key.clone(), "thread-123".into());
+        let restored: GitSettings = serde_json::from_slice(
+            &serde_json::to_vec(&settings).unwrap(),
+        ).unwrap();
+        assert_eq!(restored.codex_threads.get(&key).map(String::as_str), Some("thread-123"));
+        assert_ne!(key, codex_thread_key("https://jira.test/", "ART-2", "/tmp/a"));
+        assert_ne!(key, codex_thread_key("https://jira.test/", "ART-1", "/tmp/b"));
+        let old: GitSettings = serde_json::from_value(
+            serde_json::json!({"editor":"code"}),
+        ).unwrap();
+        assert!(old.codex_threads.is_empty());
     }
 
     #[test]
