@@ -14,6 +14,7 @@ use crate::{
     development,
     pull_requests,
     issue_detail,
+    jira_inbox,
     command_palette::{self, PaletteCommand, PaletteItem},
     jira::{Attachment, AuthMode, Credentials, Issue, IssueComment, IssueTransition, JiraClient, JiraTransitionError, Project, ProjectStatus, StatusCategory},
     transition_ui,
@@ -49,6 +50,9 @@ struct Ui {
     palette_button: gtk::Button,
     worktrees_button: gtk::Button,
     activity_button: gtk::Button,
+    inbox_button: gtk::Button,
+    inbox_count: gtk::Label,
+    inbox_polling: Rc<Cell<bool>>,
     palette_window: Rc<RefCell<Option<gtk::Window>>>,
     pending_direct_issue: Rc<RefCell<Option<String>>>,
     search: gtk::SearchEntry,
@@ -222,6 +226,7 @@ struct State {
     issues: Vec<Issue>,
     pinned_issues: Vec<Issue>,
     recent_issues: Vec<Issue>,
+    inbox: jira_inbox::Feed,
     issue_scope: IssueScope,
     active_sprint_only: bool,
     issue_cache: HashMap<BoardKey, Vec<Issue>>,
@@ -289,6 +294,7 @@ enum Event {
     PaletteIssueLoaded(u64, String, Box<Result<Issue, String>>),
     OpenLinkedIssue(String),
     ActivityChanged,
+    InboxFetched(u64, Result<Vec<jira_inbox::Entry>, String>),
     ImageLoaded(u64, String, String, Result<Vec<u8>, String>),
     CommentsLoaded(u64, u64, String, Result<Vec<IssueComment>, String>),
     ChildrenLoaded(u64, u64, String, Result<Vec<Issue>, String>),
@@ -387,6 +393,21 @@ fn build_ui(app: &adw::Application) {
     let activity_button = gtk::Button::from_icon_name("document-open-recent-symbolic");
     activity_button.add_css_class("flat");
     activity_button.set_tooltip_text(Some("Activity history — actions performed in Desk for Jira"));
+    let inbox_button = gtk::Button::new();
+    inbox_button.add_css_class("flat");
+    inbox_button.add_css_class("sidebar-action");
+    inbox_button.set_tooltip_text(Some("Recent changes by colleagues on your Jira tickets"));
+    let inbox_row = gtk::Box::new(gtk::Orientation::Horizontal, 9);
+    inbox_row.append(&gtk::Image::from_icon_name("mail-unread-symbolic"));
+    let inbox_title = gtk::Label::new(Some("Activity Inbox"));
+    inbox_title.set_xalign(0.0);
+    inbox_title.set_hexpand(true);
+    inbox_row.append(&inbox_title);
+    let inbox_count = gtk::Label::new(None);
+    inbox_count.add_css_class("pinned-count");
+    inbox_count.set_visible(false);
+    inbox_row.append(&inbox_count);
+    inbox_button.set_child(Some(&inbox_row));
     let spinner = gtk::Spinner::new();
     spinner.set_visible(false);
     header.pack_start(&sidebar_toggle);
@@ -647,6 +668,7 @@ fn build_ui(app: &adw::Application) {
     board_menu.add_css_class("board-settings-trigger");
     board_nav.append(&board_menu);
     sidebar_content.append(&board_nav);
+    sidebar_content.append(&inbox_button);
 
     let projects_heading = gtk::Label::new(Some("FILTER BY PROJECT"));
     projects_heading.add_css_class("sidebar-eyebrow");
@@ -762,6 +784,7 @@ fn build_ui(app: &adw::Application) {
         connect_button, disconnect_button, refresh_button,
         manage_projects_button, manage_columns_button, manage_worktree_visibility_button,
         palette_button, worktrees_button, activity_button,
+        inbox_button, inbox_count, inbox_polling: Rc::new(Cell::new(false)),
         palette_window: Rc::new(RefCell::new(None)),
         pending_direct_issue: Rc::new(RefCell::new(None)),
         search, center_title,
@@ -922,6 +945,13 @@ fn build_ui(app: &adw::Application) {
     update_project_label(&ui, &state);
     show_empty(&ui.board_box, "Connect to Jira", "Your unified project board will appear here.");
     wire_actions(&ui, &state, &sender);
+    {
+        let ui = ui.clone();
+        glib::timeout_add_local(Duration::from_secs(120), move || {
+            start_inbox_poll(&ui);
+            glib::ControlFlow::Continue
+        });
+    }
     {
         let ui = ui.clone();
         let state = state.clone();
@@ -1193,6 +1223,7 @@ fn wire_actions(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>) {
                 s.issues.clear();
                 s.pinned_issues.clear();
                 s.recent_issues.clear();
+                s.inbox = jira_inbox::Feed::default();
                 s.statuses.clear();
                 s.settings = BoardSettings::default();
                 s.issue_scope = IssueScope::Mine;
@@ -1203,6 +1234,8 @@ fn wire_actions(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>) {
             set_busy(&ui, &state, false);
             ui.transition_busy.set(false);
             ui.header_title.set_subtitle("Not connected");
+            ui.inbox_polling.set(false);
+            update_inbox_count(&ui);
             ui.status.set_text("Disconnected");
             ui.projects_label.set_text("Choose projects to begin");
             clear_box(&ui.sidebar_projects);
@@ -1226,6 +1259,30 @@ fn wire_actions(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>) {
             });
         });
     }
+}
+
+fn update_inbox_count(ui: &Ui) {
+    let unread = ui.state.borrow().inbox.unread();
+    ui.inbox_count.set_label(&unread.to_string());
+    ui.inbox_count.set_visible(unread > 0);
+}
+
+fn start_inbox_poll(ui: &Ui) {
+    let (account, generation, minutes) = {
+        let s = ui.state.borrow();
+        let Some(account) = s.account.clone() else { return; };
+        (account, s.generation, jira_inbox::lookback_minutes(&s.inbox))
+    };
+    if ui.inbox_polling.replace(true) { return; }
+    let watched: Vec<String> = preferences::load_activity(&account.base_url)
+        .unwrap_or_default().into_iter().map(|entry| entry.key)
+        .collect::<HashSet<_>>().into_iter().collect();
+    let events = ui.events.clone();
+    thread::spawn(move || {
+        let result = jira_inbox::fetch(account, minutes, &watched)
+            .map_err(|error| error.to_string());
+        let _ = events.send(Event::InboxFetched(generation, result));
+    });
 }
 
 fn transition_submit(
@@ -1353,6 +1410,10 @@ fn handle_event(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>, eve
                             show_error(ui, &format!("Could not read preferred transitions: {err}"));
                             preferences::PrimaryTransitions::default()
                         });
+                    let inbox = preferences::load_jira_inbox(&account.base_url).unwrap_or_else(|error| {
+                        eprintln!("Could not load Jira activity inbox: {error}");
+                        jira_inbox::Feed::default()
+                    });
                     let project_error = loaded.projects.as_ref().err().cloned();
                     ui.restoring_view.set(true);
                     {
@@ -1366,6 +1427,7 @@ fn handle_event(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>, eve
                         s.issues.clear();
                         s.pinned_issues.clear();
                         s.recent_issues.clear();
+                        s.inbox = inbox;
                         s.clear_board_cache();
                         s.issue_scope = view.scope;
                         s.active_sprint_only = view.active_sprint_only;
@@ -1386,6 +1448,8 @@ fn handle_event(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>, eve
                     ui.manage_worktree_visibility_button.set_sensitive(false);
                     ui.header_title.set_subtitle(&loaded.user);
                     update_project_label(ui, state);
+                    update_inbox_count(ui);
+                    ui.inbox_polling.set(false);
                     ui.restoring_view.set(false);
                     close_issue_details(ui);
                     clear_issue_history(ui);
@@ -1393,6 +1457,7 @@ fn handle_event(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>, eve
                         show_error(ui, &format!("Could not list projects: {error}"));
                     }
                     start_board_load(ui, state, sender);
+                    start_inbox_poll(ui);
                     // A remembered ticket may be outside the current board, sprint,
                     // assignee scope or search. Load it directly from Jira.
                     if let Some(key) = ui.remembered_issue.borrow().clone() {
@@ -1440,6 +1505,26 @@ fn handle_event(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>, eve
         }
         Event::OpenLinkedIssue(key) => open_issue_by_key(ui, &key),
         Event::ActivityChanged => render_board(ui, &state.borrow()),
+        Event::InboxFetched(id, result) => {
+            if state.borrow().generation != id { return; }
+            ui.inbox_polling.set(false);
+            match result {
+                Ok(events) => {
+                    let (site, feed) = {
+                        let mut s = state.borrow_mut();
+                        s.inbox.merge(events);
+                        (s.account.as_ref().map(|account| account.base_url.clone()), s.inbox.clone())
+                    };
+                    if let Some(site) = site
+                        && let Err(error) = preferences::save_jira_inbox(&site, &feed)
+                    {
+                        eprintln!("Could not save Jira activity inbox: {error}");
+                    }
+                    update_inbox_count(ui);
+                }
+                Err(error) => eprintln!("Could not refresh Jira activity inbox: {error}"),
+            }
+        }
         Event::PaletteIssueLoaded(id, key, result) => {
             // A site change, another ticket selection, or closing the inspector
             // must cancel a pending direct-open result.
