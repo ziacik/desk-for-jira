@@ -695,6 +695,8 @@ impl Manager {
                 progress.set_visible(true);
                 let repo_path = repo.path.clone();
                 let worktree_path = tree.path.clone();
+                let history_branch = tree.branch.clone();
+                let history_repository = repo.name.clone();
                 let tree_for_git = tree.clone();
                 let (tx, rx) = mpsc::channel();
                 thread::spawn(move || {
@@ -713,7 +715,7 @@ impl Manager {
                     match result {
                         Ok(()) => {
                             manager.cleanup_removed(&confirm, &worktree_path,
-                                    tree.branch.as_deref(), &repo.name);
+                                    history_branch.as_deref(), &history_repository);
                             manager.refresh();
                         }
                         Err(error) => {
@@ -783,11 +785,13 @@ impl Manager {
                     let remove_button = remove_button.clone();
                     let progress_label = progress_label.clone();
                     let worktree_path = tree.path.clone();
+                    let history_branch = tree.branch.clone();
+                    let history_repository = repo.name.clone();
                     poll(rx, move |result| {
                         match result {
                             Ok(()) => {
                                 manager.cleanup_removed(&confirm, &worktree_path,
-                                    tree.branch.as_deref(), &repo.name);
+                                    history_branch.as_deref(), &history_repository);
                                 manager.refresh();
                             }
                             Err(error) => {
