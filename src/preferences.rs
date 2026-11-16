@@ -286,6 +286,9 @@ pub struct UiLayout {
     pub zoom_percent: i32,
     pub worktrees_window_width: i32,
     pub worktrees_window_height: i32,
+    /// Activity dialog size as a percentage of the main window.
+    pub activity_window_width_percent: i32,
+    pub activity_window_height_percent: i32,
 }
 
 impl Default for UiLayout {
@@ -299,6 +302,8 @@ impl Default for UiLayout {
             zoom_percent: 100,
             worktrees_window_width: 980,
             worktrees_window_height: 760,
+            activity_window_width_percent: 90,
+            activity_window_height_percent: 88,
         }
     }
 }
@@ -312,6 +317,8 @@ impl UiLayout {
         self.zoom_percent = self.zoom_percent.clamp(70, 160);
         self.worktrees_window_width = self.worktrees_window_width.clamp(640, 2400);
         self.worktrees_window_height = self.worktrees_window_height.clamp(480, 1600);
+        self.activity_window_width_percent = self.activity_window_width_percent.clamp(50, 100);
+        self.activity_window_height_percent = self.activity_window_height_percent.clamp(50, 100);
         self
     }
 }
@@ -1030,6 +1037,25 @@ mod tests {
         })).unwrap();
         assert_eq!(old_view.open_issue, None);
         assert_eq!(prefs.ui_layout, UiLayout::default());
+    }
+
+    #[test]
+    fn activity_window_size_is_relative_and_persisted() {
+        let mut layout = UiLayout::default();
+        layout.activity_window_width_percent = 75;
+        layout.activity_window_height_percent = 92;
+        let restored: UiLayout =
+            serde_json::from_str(&serde_json::to_string(&layout).unwrap()).unwrap();
+        assert_eq!(restored.activity_window_width_percent, 75);
+        assert_eq!(restored.activity_window_height_percent, 92);
+        assert_eq!(restored.activity_window_width_percent * 1600 / 100, 1200);
+        assert_eq!(restored.activity_window_height_percent * 900 / 100, 828);
+
+        layout.activity_window_width_percent = -1;
+        layout.activity_window_height_percent = 999;
+        let sanitized = layout.sanitized();
+        assert_eq!(sanitized.activity_window_width_percent, 50);
+        assert_eq!(sanitized.activity_window_height_percent, 100);
     }
 
     #[test]
