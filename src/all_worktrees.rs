@@ -817,6 +817,7 @@ pub fn show(
     open_issue: Rc<dyn Fn(String)>,
     layout_settings: Rc<RefCell<preferences::UiLayout>>,
     account: Option<Credentials>,
+    on_activity: Rc<dyn Fn()>,
 ) {
     let (width, height) = {
         let settings = layout_settings.borrow();
@@ -836,6 +837,7 @@ pub fn show(
                 eprintln!("Could not save Worktrees window size: {error}");
             }
         }
+        on_activity();
         glib::Propagation::Proceed
     });
 
