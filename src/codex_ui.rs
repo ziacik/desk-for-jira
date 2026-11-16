@@ -1,28 +1,226 @@
 //! Native Codex conversation window, deliberately separate from VS Code and terminals.
-use std::{cell::Cell, path::Path, rc::Rc, sync::mpsc::{self, TryRecvError}, thread, time::Duration};
+use std::{cell::{Cell, RefCell}, path::Path, rc::Rc, sync::mpsc::{self, TryRecvError}, thread, time::Duration};
 
 use adw::prelude::*;
 use gtk::glib;
 
 use crate::{
-    codex, codex_session::{self, Control, Event}, dialog,
+    codex, codex_markdown, codex_session::{self, Control, Event, TranscriptItem}, dialog,
     jira::{Credentials, Issue, JiraClient},
 };
 
-fn append(log: &gtk::TextView, value: &str) {
-    let buffer = log.buffer();
-    let mut end = buffer.end_iter();
-    buffer.insert(&mut end, value);
-    log.scroll_to_iter(&mut end, 0.0, false, 0.0, 1.0);
+fn clear(container: &gtk::Box) {
+    while let Some(child) = container.first_child() {
+        container.remove(&child);
+    }
 }
 
-fn submit(input: &gtk::TextView, messages: &gtk::TextView, send: &gtk::Button,
+fn readable_label(text: &str, class: &str) -> gtk::Label {
+    let label = gtk::Label::new(Some(text));
+    label.set_xalign(0.0);
+    label.set_hexpand(true);
+    label.set_wrap(true);
+    label.set_wrap_mode(gtk::pango::WrapMode::WordChar);
+    label.set_selectable(true);
+    label.add_css_class(class);
+    label
+}
+
+fn show_markdown(container: &gtk::Box, source: &str) {
+    clear(container);
+    for block in codex_markdown::blocks(source) {
+        match block {
+            codex_markdown::Block::Paragraph(markup)
+            | codex_markdown::Block::Heading(markup)
+            | codex_markdown::Block::Quote(markup) => {
+                let label = readable_label("", "codex-chat-paragraph");
+                let kind = if matches!(block, codex_markdown::Block::Heading(_)) {
+                    "codex-chat-heading"
+                } else if matches!(block, codex_markdown::Block::Quote(_)) {
+                    "codex-chat-quote"
+                } else {
+                    "codex-chat-paragraph"
+                };
+                label.add_css_class(kind);
+                label.set_markup(&markup);
+                container.append(&label);
+            }
+            codex_markdown::Block::Code(code) => {
+                let label = gtk::Label::new(Some(code.trim_end_matches('\n')));
+                label.set_xalign(0.0);
+                label.set_selectable(true);
+                label.add_css_class("codex-chat-code");
+                let scroll = gtk::ScrolledWindow::new();
+                scroll.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Never);
+                scroll.set_min_content_width(1);
+                scroll.add_css_class("codex-chat-code-scroll");
+                scroll.set_child(Some(&label));
+                container.append(&scroll);
+            }
+            codex_markdown::Block::Rule => {
+                container.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
+            }
+        }
+    }
+}
+
+struct AgentMessage {
+    text: String,
+    body: gtk::Box,
+    dirty: bool,
+}
+
+struct Transcript {
+    root: gtk::Box,
+    scroll: gtk::ScrolledWindow,
+    agent: Option<AgentMessage>,
+    command_output: Option<gtk::TextBuffer>,
+}
+
+impl Transcript {
+    fn new(scroll: &gtk::ScrolledWindow) -> Self {
+        let root = gtk::Box::new(gtk::Orientation::Vertical, 12);
+        root.add_css_class("codex-chat-transcript");
+        root.set_margin_top(12);
+        root.set_margin_bottom(12);
+        root.set_margin_start(12);
+        root.set_margin_end(12);
+        scroll.set_child(Some(&root));
+        Self { root, scroll: scroll.clone(), agent: None, command_output: None }
+    }
+
+    fn should_follow(&self) -> bool {
+        let adjustment = self.scroll.vadjustment();
+        adjustment.value() + adjustment.page_size() + 72.0 >= adjustment.upper()
+    }
+
+    fn follow(&self, enabled: bool) {
+        if enabled {
+            let adjustment = self.scroll.vadjustment();
+            glib::idle_add_local_once(move || {
+                adjustment.set_value((adjustment.upper() - adjustment.page_size())
+                    .max(adjustment.lower()));
+            });
+        }
+    }
+
+    fn message(&mut self, role: &str, user: bool) -> gtk::Box {
+        self.finish_agent();
+        self.command_output = None;
+        let item = gtk::Box::new(gtk::Orientation::Vertical, 7);
+        item.add_css_class("codex-chat-message");
+        if user { item.add_css_class("codex-chat-user"); }
+        let name = readable_label(role, "codex-chat-role");
+        name.set_selectable(false);
+        item.append(&name);
+        let body = gtk::Box::new(gtk::Orientation::Vertical, 7);
+        body.add_css_class("codex-chat-body");
+        item.append(&body);
+        self.root.append(&item);
+        body
+    }
+
+    fn user(&mut self, text: &str) {
+        let follow = self.should_follow();
+        let body = self.message("You", true);
+        show_markdown(&body, text);
+        self.follow(follow);
+    }
+
+    fn agent_delta(&mut self, text: &str) {
+        if self.agent.is_none() {
+            let body = self.message("Codex", false);
+            self.agent = Some(AgentMessage { text: String::new(), body, dirty: false });
+        }
+        if let Some(agent) = self.agent.as_mut() {
+            agent.text.push_str(text);
+            agent.dirty = true;
+        }
+    }
+
+    fn flush_agent(&mut self) {
+        if self.agent.as_ref().is_some_and(|agent| agent.dirty) {
+            let follow = self.should_follow();
+            if let Some(agent) = self.agent.as_mut() {
+                show_markdown(&agent.body, &agent.text);
+                agent.dirty = false;
+            }
+            self.follow(follow);
+        }
+    }
+
+    fn finish_agent(&mut self) {
+        self.flush_agent();
+        self.agent = None;
+    }
+
+    fn command(&mut self, command: &str) {
+        let follow = self.should_follow();
+        self.finish_agent();
+        let summary: String = command.chars().take(95).collect();
+        let summary = if command.chars().count() > 95 {
+            format!("{summary}…")
+        } else { summary };
+        let expander = gtk::Expander::new(Some(&format!("$ {summary}")));
+        expander.add_css_class("codex-chat-command");
+        let scroller = gtk::ScrolledWindow::new();
+        scroller.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Automatic);
+        scroller.set_min_content_height(70);
+        scroller.set_max_content_height(260);
+        scroller.set_propagate_natural_height(true);
+        let output = gtk::TextView::new();
+        output.set_editable(false);
+        output.set_cursor_visible(false);
+        output.set_monospace(true);
+        output.set_wrap_mode(gtk::WrapMode::WordChar);
+        output.set_top_margin(9);
+        output.set_bottom_margin(9);
+        output.set_left_margin(10);
+        output.set_right_margin(10);
+        let buffer = output.buffer();
+        buffer.set_text(&format!("$ {command}\n"));
+        scroller.set_child(Some(&output));
+        expander.set_child(Some(&scroller));
+        self.root.append(&expander);
+        self.command_output = Some(buffer);
+        self.follow(follow);
+    }
+
+    fn command_delta(&mut self, chunk: &str) {
+        if let Some(buffer) = self.command_output.as_ref() {
+            let mut end = buffer.end_iter();
+            buffer.insert(&mut end, chunk);
+        }
+    }
+
+    fn info(&mut self, text: &str) {
+        let follow = self.should_follow();
+        self.finish_agent();
+        self.command_output = None;
+        let label = readable_label(text, "codex-chat-info");
+        self.root.append(&label);
+        self.follow(follow);
+    }
+
+    fn output(&mut self, value: TranscriptItem) {
+        match value {
+            TranscriptItem::User(text) => self.user(&text),
+            TranscriptItem::AgentDelta(text) => self.agent_delta(&text),
+            TranscriptItem::AgentEnd => self.finish_agent(),
+            TranscriptItem::Command(text) => self.command(&text),
+            TranscriptItem::CommandOutput(text) => self.command_delta(&text),
+            TranscriptItem::Info(text) => self.info(&text),
+        }
+    }
+}
+
+fn submit(input: &gtk::TextView, transcript: &Rc<RefCell<Transcript>>, send: &gtk::Button,
           stop: &gtk::Button, commands: &mpsc::Sender<Control>) {
     let buffer = input.buffer();
     let message = buffer.text(&buffer.start_iter(), &buffer.end_iter(), false).to_string();
     if message.trim().is_empty() { return; }
     if commands.send(Control::Send(message.clone())).is_err() { return; }
-    append(messages, &format!("\nYou: {}\n\n", message.trim()));
+    transcript.borrow_mut().user(message.trim());
     buffer.set_text("");
     send.set_sensitive(false);
     stop.set_sensitive(true);
@@ -69,15 +267,7 @@ pub fn open(
     scroller.set_hexpand(true);
     scroller.add_css_class("frame");
     scroller.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
-    let messages = gtk::TextView::new();
-    messages.set_editable(false);
-    messages.set_cursor_visible(false);
-    messages.set_wrap_mode(gtk::WrapMode::WordChar);
-    messages.set_top_margin(12);
-    messages.set_bottom_margin(12);
-    messages.set_left_margin(12);
-    messages.set_right_margin(12);
-    scroller.set_child(Some(&messages));
+    let transcript = Rc::new(RefCell::new(Transcript::new(&scroller)));
     body.append(&scroller);
 
     let approvals = gtk::Box::new(gtk::Orientation::Vertical, 8);
@@ -121,19 +311,19 @@ pub fn open(
 
     {
         let input = input.clone();
-        let messages = messages.clone();
+        let transcript = transcript.clone();
         let send_button = send.clone();
         let stop_button = stop.clone();
         let commands = commands.clone();
         send.connect_clicked(move |_| {
-            submit(&input, &messages, &send_button, &stop_button, &commands);
+            submit(&input, &transcript, &send_button, &stop_button, &commands);
         });
     }
     {
         let keys = gtk::EventControllerKey::new();
         let input = input.clone();
         let controller_target = input.clone();
-        let messages = messages.clone();
+        let transcript = transcript.clone();
         let send = send.clone();
         let stop = stop.clone();
         let commands = commands.clone();
@@ -142,7 +332,7 @@ pub fn open(
                 && modifiers.contains(gtk::gdk::ModifierType::CONTROL_MASK)
                 && send.is_sensitive()
             {
-                submit(&input, &messages, &send, &stop, &commands);
+                submit(&input, &transcript, &send, &stop, &commands);
                 glib::Propagation::Stop
             } else {
                 glib::Propagation::Proceed
@@ -219,11 +409,11 @@ pub fn open(
                     stop.set_sensitive(value);
                     if value { status.set_text("Codex is working…"); }
                 }
-                Ok(Event::Output(value)) => append(&messages, &value),
+                Ok(Event::Output(value)) => transcript.borrow_mut().output(value),
                 Ok(Event::Status(value)) => status.set_text(&value),
                 Ok(Event::Error(value)) => {
                     status.set_text(&value);
-                    append(&messages, &format!("\nCodex error: {value}\n"));
+                    transcript.borrow_mut().info(&format!("Codex error: {value}"));
                 }
                 Ok(Event::Approval {request_id, description}) => {
                     let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
@@ -268,6 +458,7 @@ pub fn open(
                 Err(TryRecvError::Disconnected) => return glib::ControlFlow::Break,
             }
         }
+        transcript.borrow_mut().flush_agent();
         glib::ControlFlow::Continue
     });
     window.present();
