@@ -83,6 +83,26 @@ fn message_text(item: &Value) -> Option<String> {
     (!parts.is_empty()).then(|| parts.join("\n"))
 }
 
+/// A fresh thread has no durable turn history. On resume, Codex can also
+/// report a null backwards cursor until the first user message arrives.
+fn should_load_history(was_resuming: bool, response: &Value) -> bool {
+    was_resuming
+        && response["result"].get("turnsBackwardsCursor")
+            .is_none_or(|cursor| !cursor.is_null())
+}
+
+/// The persisted thread ID can outlive its first message. Treat the Codex
+/// empty-history error as an empty transcript, not a failed session.
+fn is_unmaterialized_history_error(
+    request_id: &Value, error: &Value, history_request_id: Option<u64>,
+) -> bool {
+    history_request_id.is_some_and(|id| request_id.as_u64() == Some(id))
+        && error["message"].as_str().is_some_and(|message| {
+            message.contains("not materialized yet")
+                || message.contains("unavailable before first user message")
+        })
+}
+
 fn historical_items(response: &Value) -> Vec<String> {
     let mut result = Vec::new();
     if let Some(turns) = response["result"]["data"].as_array() {
@@ -120,6 +140,7 @@ struct Session<'a> {
     initial_prompt: Option<String>,
     auto_start: bool,
     resuming: bool,
+    history_request_id: Option<u64>,
     yolo: bool,
     next_request: u64,
     streamed_messages: HashSet<String>,
@@ -174,6 +195,15 @@ impl Session<'_> {
                 return Ok(());
             }
             if let Some(error) = value.get("error") {
+                if is_unmaterialized_history_error(
+                    request_id, error, self.history_request_id,
+                ) {
+                    self.history_request_id = None;
+                    return Ok(());
+                }
+                if self.history_request_id == request_id.as_u64() {
+                    self.history_request_id = None;
+                }
                 let message = error["message"].as_str().unwrap_or("Unknown Codex error");
                 if request_id.as_u64() == Some(2) && self.thread_id.is_none() {
                     // An old thread may have been deleted externally; recover with a new one.
@@ -192,6 +222,9 @@ impl Session<'_> {
                 }
                 return Ok(());
             }
+            if self.history_request_id == request_id.as_u64() {
+                self.history_request_id = None;
+            }
             if request_id.as_u64() == Some(1) {
                 send(&mut self.stdin, json!({"method": "initialized", "params": {}}))?;
                 if let Some(thread_id) = preferences::codex_thread(
@@ -209,6 +242,7 @@ impl Session<'_> {
                     }))?;
                 }
             } else if let Some(id) = value["result"]["thread"]["id"].as_str() {
+                let was_resuming = self.resuming;
                 // Resuming an existing conversation must NEVER replay the ticket prompt.
                 if self.resuming {
                     self.resuming = false;
@@ -226,7 +260,8 @@ impl Session<'_> {
                     if let Some(prompt) = self.initial_prompt.take() {
                         self.begin_turn(prompt)?;
                     }
-                } else {
+                } else if should_load_history(was_resuming, value) {
+                    self.history_request_id = Some(self.next_request);
                     self.request("thread/turns/list", json!({
                         "threadId": id, "limit": 30, "sortDirection": "desc", "itemsView": "full"
                     }))?;
@@ -334,7 +369,8 @@ fn run(
         stdin, events, site, issue_key: issue.key, worktree,
         thread_id: None, turn_id: None,
         initial_prompt: Some(prompt),
-        auto_start: automatic, resuming: false, yolo: settings.codex_yolo, next_request: 2,
+        auto_start: automatic, resuming: false, history_request_id: None,
+        yolo: settings.codex_yolo, next_request: 2,
         streamed_messages: HashSet::new(),
     };
     send(&mut session.stdin, json!({
@@ -394,6 +430,32 @@ fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn new_and_unmaterialized_threads_do_not_request_history() {
+        let fresh = json!({"result":{"thread":{"id":"new"}}});
+        assert!(!should_load_history(false, &fresh));
+        // Older app-server versions may omit pagination cursors on resume.
+        assert!(should_load_history(true, &fresh));
+        let unmaterialized = json!({"result":{
+            "thread":{"id":"saved"}, "turnsBackwardsCursor":null
+        }});
+        assert!(!should_load_history(true, &unmaterialized));
+        let materialized = json!({"result":{
+            "thread":{"id":"saved"}, "turnsBackwardsCursor":"cursor123"
+        }});
+        assert!(should_load_history(true, &materialized));
+    }
+
+    #[test]
+    fn empty_history_response_does_not_hide_unrelated_errors() {
+        let empty = json!({"message":"thread 01a1 is not materialized yet; thread/turns/list is unavailable before first user message"});
+        assert!(is_unmaterialized_history_error(&json!(5), &empty, Some(5)));
+        assert!(!is_unmaterialized_history_error(&json!(4), &empty, Some(5)));
+        assert!(!is_unmaterialized_history_error(&json!(5), &empty, None));
+        let other = json!({"message":"permission denied"});
+        assert!(!is_unmaterialized_history_error(&json!(5), &other, Some(5)));
+    }
 
     #[test]
     fn item_history_contains_text_and_commands_without_diffs() {
