@@ -14,7 +14,7 @@ use crate::{
     codex_ui,
     git::{self, CreateWorktree, Worktree},
     issue_detail,
-    jira::{Credentials, Issue, JiraClient},
+    jira::{Credentials, Issue},
     preferences::{self, GitRepository, GitSettings},
 };
 
