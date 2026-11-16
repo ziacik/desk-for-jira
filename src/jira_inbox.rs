@@ -3,6 +3,7 @@
 use std::{collections::HashSet, time::{Duration, SystemTime, UNIX_EPOCH}};
 
 use anyhow::{Context, Result, bail};
+use gtk::glib;
 use reqwest::blocking::{Client, RequestBuilder};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -88,23 +89,38 @@ fn json_response(request: RequestBuilder, account: &Credentials) -> Result<Value
     response.json().context("Invalid Jira activity response")
 }
 
+/// Parse Jira's ISO-8601 timestamps; the REST API commonly omits the timezone colon.
+fn created_at_unix(created: &str) -> Option<i64> {
+    let mut iso = created.to_owned();
+    if iso.len() >= 5 {
+        let offset = iso.len() - 5;
+        let suffix = iso.as_bytes();
+        if matches!(suffix[offset], b'+' | b'-')
+            && suffix[offset + 1..].iter().all(u8::is_ascii_digit)
+        {
+            iso.insert(iso.len() - 2, ':');
+        }
+    }
+    glib::DateTime::from_iso8601(&iso, None).ok().map(|date| date.to_unix())
+}
+
 fn user_id(user: &Value) -> Option<&str> {
     ["accountId", "key", "name"].iter()
-        .find_map(|field| user.get(field).and_then(Value::as_str).filter(|id| !id.is_empty()))
+        .find_map(|field| user.get(*field).and_then(Value::as_str).filter(|id| !id.is_empty()))
 }
 
 fn same_user(user: &Value, me: &Value) -> bool {
     ["accountId", "key", "name"].iter().any(|field| {
-        user.get(field).and_then(Value::as_str)
+        user.get(*field).and_then(Value::as_str)
             .filter(|id| !id.is_empty())
-            .is_some_and(|id| me.get(field).and_then(Value::as_str) == Some(id))
+            .is_some_and(|id| me.get(*field).and_then(Value::as_str) == Some(id))
     })
 }
 
 fn assigned_to_me(item: &Value, me: &Value) -> bool {
     let to = item.get("to").and_then(Value::as_str);
     let ids = ["accountId", "key", "name"];
-    ids.iter().any(|field| to.is_some() && to == me.get(field).and_then(Value::as_str))
+    ids.iter().any(|field| to.is_some() && to == me.get(*field).and_then(Value::as_str))
 }
 
 /// Whitelist issue keys before inserting the locally tracked set into JQL.
@@ -172,11 +188,12 @@ fn changelogs(client: &Client, account: &Credentials, key: &str) -> Result<Vec<V
         .cloned().unwrap_or_default())
 }
 
-fn parse_events(key: &str, summary: &str, issue: &Value, histories: &[Value], comments: &[Value], me: &Value) -> Vec<Entry> {
+fn parse_events(key: &str, summary: &str, issue: &Value, histories: &[Value], comments: &[Value], me: &Value, oldest: i64) -> Vec<Entry> {
     let is_bug = issue.pointer("/fields/issuetype/name").and_then(Value::as_str)
         .is_some_and(|kind| kind.eq_ignore_ascii_case("bug"));
     let current_todo = issue.pointer("/fields/status/statusCategory/key").and_then(Value::as_str) == Some("new");
     let assignee_is_me = issue.pointer("/fields/assignee").is_some_and(|user| same_user(user, me));
+    let current_status = issue.pointer("/fields/status/id").and_then(Value::as_str);
     let mut events = Vec::new();
     for history in histories {
         let Some(author) = history.get("author") else { continue; };
@@ -184,6 +201,7 @@ fn parse_events(key: &str, summary: &str, issue: &Value, histories: &[Value], co
         let author_name = author.get("displayName").and_then(Value::as_str).unwrap_or("Someone");
         let id = history.get("id").and_then(Value::as_str).unwrap_or_default();
         let created = history.get("created").and_then(Value::as_str).unwrap_or_default();
+        if created_at_unix(created).is_some_and(|time| time < oldest) { continue; }
         for (index, item) in history.get("items").and_then(Value::as_array).into_iter().flatten().enumerate() {
             let field = item.get("field").and_then(Value::as_str).unwrap_or_default();
             let (action, priority) = match field.to_ascii_lowercase().as_str() {
@@ -191,7 +209,8 @@ fn parse_events(key: &str, summary: &str, issue: &Value, histories: &[Value], co
                     let from = item.get("fromString").and_then(Value::as_str).unwrap_or("?");
                     let to = item.get("toString").and_then(Value::as_str).unwrap_or("?");
                     if from == to { continue; }
-                    let returned = is_bug && current_todo && assignee_is_me;
+                    let returned = is_bug && current_todo && assignee_is_me
+                        && item.get("to").and_then(Value::as_str) == current_status;
                     (format!("{}: {from} → {to}", if returned { "Bug returned" } else { "Status changed" }), returned)
                 }
                 "assignee" if assigned_to_me(item, me) => ("Assigned to you".to_string(), true),
@@ -208,6 +227,11 @@ fn parse_events(key: &str, summary: &str, issue: &Value, histories: &[Value], co
         let Some(author) = comment.get("author") else { continue; };
         if same_user(author, me) { continue; }
         let Some(id) = comment.get("id").and_then(Value::as_str) else { continue; };
+        if comment.get("created").and_then(Value::as_str)
+            .and_then(created_at_unix).is_some_and(|time| time < oldest)
+        {
+            continue;
+        }
         events.push(Entry {
             id: format!("comment:{key}:{id}"), key: key.into(), summary: summary.into(),
             action: "New comment".into(),
@@ -231,15 +255,26 @@ pub fn fetch(account: Credentials, minutes: u32, watched: &[String]) -> Result<V
         bail!("Jira did not return a user identity");
     }
     let issues = search_issues(&client, &account, minutes, watched)?;
+    let oldest = now() - i64::from(minutes) * 60 - 120;
     let mut events = Vec::new();
+    let mut failed = 0usize;
+    let issue_count = issues.len();
     for issue in issues {
         let Some(key) = issue.get("key").and_then(Value::as_str).filter(|key| valid_key(key)) else { continue; };
         let summary = issue.pointer("/fields/summary").and_then(Value::as_str).unwrap_or("");
         // Failures on an individual issue should not hide all other activity.
-        let histories = changelogs(&client, &account, key).unwrap_or_default();
+        let histories = changelogs(&client, &account, key);
         let comments = last_page(&client, &account,
-            &format!("/rest/api/{version}/issue/{key}/comment"), "comments").unwrap_or_default();
-        events.extend(parse_events(key, summary, &issue, &histories, &comments, &me));
+            &format!("/rest/api/{version}/issue/{key}/comment"), "comments");
+        if histories.is_err() && comments.is_err() {
+            failed += 1;
+            continue;
+        }
+        events.extend(parse_events(key, summary, &issue,
+            &histories.unwrap_or_default(), &comments.unwrap_or_default(), &me, oldest));
+    }
+    if issue_count > 0 && failed == issue_count {
+        bail!("Could not fetch Jira activity details for any of the updated issues");
     }
     Ok(events)
 }
@@ -277,14 +312,14 @@ mod tests {
         let me = json!({"accountId": "me"});
         let issue = json!({"fields": {
             "issuetype": {"name": "Bug"},
-            "status": {"statusCategory": {"key": "new"}},
+            "status": {"id":"3","statusCategory": {"key": "new"}},
             "assignee": {"accountId": "me"}
         }});
         let history = json!([
             {"id":"10","author":{"accountId":"me"},"items":[{"field":"status","fromString":"Testing","toString":"Ready to dev"}]},
-            {"id":"11","author":{"accountId":"tester","displayName":"Tester"},"items":[{"field":"status","fromString":"Testing","toString":"Ready to dev"}]}
+            {"id":"11","author":{"accountId":"tester","displayName":"Tester"},"items":[{"field":"status","fromString":"Testing","toString":"Ready to dev","to":"3"}]}
         ]);
-        let entries = parse_events("ART-12", "Bug", &issue, history.as_array().unwrap(), &[], &me);
+        let entries = parse_events("ART-12", "Bug", &issue, history.as_array().unwrap(), &[], &me, 0);
         assert_eq!(entries.len(), 1);
         assert!(entries[0].priority);
         assert!(entries[0].action.starts_with("Bug returned"));
