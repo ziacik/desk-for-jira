@@ -357,6 +357,7 @@ pub fn open_transition_form(
         .default_height(if transition.fields.len() >= 4 { 720 } else { 560 })
         .resizable(true)
         .build();
+    crate::dialog::close_on_escape(&dialog);
     let root = gtk::Box::new(gtk::Orientation::Vertical, 14);
     root.set_margin_top(20);
     root.set_margin_bottom(20);

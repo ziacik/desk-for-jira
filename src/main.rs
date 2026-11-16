@@ -1,5 +1,6 @@
 mod codex;
 mod command_palette;
+mod dialog;
 mod issue_detail;
 mod issue_links;
 mod jira;

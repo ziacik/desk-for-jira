@@ -284,6 +284,7 @@ pub(crate) fn open(
         .default_width(610)
         .default_height(500)
         .build();
+    crate::dialog::close_on_escape(&window);
     window.add_css_class("command-palette");
 
     let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
@@ -397,14 +398,7 @@ pub(crate) fn open(
     keys.set_propagation_phase(gtk::PropagationPhase::Capture);
     keys.connect_key_pressed({
         let list = list.clone();
-        let window = window.downgrade();
         move |_, key, _, _| match key {
-            gtk::gdk::Key::Escape => {
-                if let Some(window) = window.upgrade() {
-                    window.close();
-                }
-                glib::Propagation::Stop
-            }
             gtk::gdk::Key::Down | gtk::gdk::Key::Up => {
                 let current = list.selected_row().map(|row| row.index()).unwrap_or(0);
                 let next = if key == gtk::gdk::Key::Down { current + 1 } else { (current - 1).max(0) };

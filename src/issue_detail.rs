@@ -531,6 +531,7 @@ fn show_full_size_image(button: &gtk::Button, texture: &gtk::gdk::Texture, filen
         .default_width(960)
         .default_height(700)
         .build();
+    crate::dialog::close_on_escape(&viewer);
 
     let header = gtk::HeaderBar::new();
     header.set_show_title_buttons(true);
@@ -553,19 +554,6 @@ fn show_full_size_image(button: &gtk::Button, texture: &gtk::gdk::Texture, filen
     scroller.set_child(Some(&picture));
     viewer.set_child(Some(&scroller));
 
-    let escape = gtk::EventControllerKey::new();
-    let viewer_weak = viewer.downgrade();
-    escape.connect_key_pressed(move |_, key, _, _| {
-        if key == gtk::gdk::Key::Escape {
-            if let Some(viewer) = viewer_weak.upgrade() {
-                viewer.close();
-            }
-            glib::Propagation::Stop
-        } else {
-            glib::Propagation::Proceed
-        }
-    });
-    viewer.add_controller(escape);
     viewer.present();
 }
 
