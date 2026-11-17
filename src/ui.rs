@@ -4215,6 +4215,38 @@ fn populate_local_label_chips(flow: &gtk::FlowBox, labels: &[String]) {
     }
 }
 
+fn populate_editable_local_label_chips(
+    flow: &gtk::FlowBox, labels: &[String], ui: &Ui, key: &str,
+) {
+    // Board chips are read-only. The detail chips expose removal immediately,
+    // without hiding it inside the Add popover.
+    populate_local_label_chips(flow, &[]);
+    for text in labels {
+        let pill = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+        pill.add_css_class("local-label-pill");
+        pill.add_css_class("local-label-editable");
+
+        let name = gtk::Label::new(Some(text));
+        name.set_max_width_chars(25);
+        name.set_ellipsize(gtk::pango::EllipsizeMode::End);
+        name.set_tooltip_text(Some(text));
+        pill.append(&name);
+
+        let remove = gtk::Button::from_icon_name("window-close-symbolic");
+        remove.add_css_class("flat");
+        remove.add_css_class("local-label-remove");
+        remove.set_tooltip_text(Some(&format!("Remove local label: {text}")));
+        let ui = ui.clone();
+        let key = key.to_owned();
+        let text = text.clone();
+        remove.connect_clicked(move |_| {
+            change_local_label(&ui, &key, &text, false);
+        });
+        pill.append(&remove);
+        flow.insert(&pill, -1);
+    }
+}
+
 fn change_local_label(ui: &Ui, key: &str, label: &str, add: bool) -> bool {
     let (site, mut settings) = {
         let state = ui.state.borrow();
@@ -4236,7 +4268,7 @@ fn change_local_label(ui: &Ui, key: &str, label: &str, add: bool) -> bool {
     let labels = settings.local_labels.get(key).cloned().unwrap_or_default();
     ui.state.borrow_mut().settings = settings;
     if ui.selected_issue.borrow().as_deref() == Some(key) {
-        populate_local_label_chips(&ui.local_label_chips.borrow(), &labels);
+        populate_editable_local_label_chips(&ui.local_label_chips.borrow(), &labels, ui, key);
     }
     let action = if add {
         format!("Added local label: {}", label.trim())
@@ -4250,44 +4282,11 @@ fn change_local_label(ui: &Ui, key: &str, label: &str, add: bool) -> bool {
     true
 }
 
-fn populate_local_label_editor(ui: &Ui, key: &str, rows: &gtk::Box) {
-    clear_box(rows);
-    let labels = ui.state.borrow().settings.local_labels.get(key)
-        .cloned().unwrap_or_default();
-    if labels.is_empty() {
-        let empty = gtk::Label::new(Some("No local labels yet"));
-        empty.add_css_class("dim-label");
-        empty.set_xalign(0.0);
-        rows.append(&empty);
-    }
-    for text in labels {
-        let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-        let name = gtk::Label::new(Some(&text));
-        name.set_xalign(0.0);
-        name.set_hexpand(true);
-        name.set_wrap(true);
-        row.append(&name);
-        let remove = gtk::Button::from_icon_name("list-remove-symbolic");
-        remove.add_css_class("flat");
-        remove.set_tooltip_text(Some(&format!("Remove {text}")));
-        let ui = ui.clone();
-        let key = key.to_owned();
-        let refresh_rows = rows.clone();
-        remove.connect_clicked(move |_| {
-            if change_local_label(&ui, &key, &text, false) {
-                populate_local_label_editor(&ui, &key, &refresh_rows);
-            }
-        });
-        row.append(&remove);
-        rows.append(&row);
-    }
-}
-
 fn local_label_menu(ui: &Ui, key: &str) -> gtk::MenuButton {
     let menu = gtk::MenuButton::new();
     menu.set_icon_name("list-add-symbolic");
     menu.add_css_class("flat");
-    menu.set_tooltip_text(Some("Add or remove local labels"));
+    menu.set_tooltip_text(Some("Add a local label"));
 
     let popover = gtk::Popover::new();
     let content = gtk::Box::new(gtk::Orientation::Vertical, 10);
@@ -4296,14 +4295,10 @@ fn local_label_menu(ui: &Ui, key: &str) -> gtk::MenuButton {
     content.set_margin_start(12);
     content.set_margin_end(12);
     content.set_size_request(230, -1);
-    let title = gtk::Label::new(Some("Local labels"));
+    let title = gtk::Label::new(Some("Add local label"));
     title.set_xalign(0.0);
     title.add_css_class("heading");
     content.append(&title);
-
-    let rows = gtk::Box::new(gtk::Orientation::Vertical, 5);
-    populate_local_label_editor(ui, key, &rows);
-    content.append(&rows);
 
     let input_row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
     let entry = gtk::Entry::new();
@@ -4323,7 +4318,6 @@ fn local_label_menu(ui: &Ui, key: &str) -> gtk::MenuButton {
         let label = entry_for_click.text().to_string();
         if change_local_label(&ui, &key, &label, true) {
             entry_for_click.set_text("");
-            populate_local_label_editor(&ui, &key, &rows);
         }
     });
     entry.connect_activate(move |_| add.emit_clicked());
@@ -4341,10 +4335,9 @@ fn render_issue_detail(ui: &Ui, issue: &Issue, base_url: &str) {
     local_title.add_css_class("detail-field-label");
     detail.local_labels.append(&local_title);
     let chips = gtk::FlowBox::new();
-    chips.set_hexpand(true);
     let labels = ui.state.borrow().settings.local_labels.get(&issue.key)
         .cloned().unwrap_or_default();
-    populate_local_label_chips(&chips, &labels);
+    populate_editable_local_label_chips(&chips, &labels, ui, &issue.key);
     detail.local_labels.append(&chips);
     detail.local_labels.append(&local_label_menu(ui, &issue.key));
     *ui.local_label_chips.borrow_mut() = chips;
