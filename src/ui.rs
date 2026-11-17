@@ -11,6 +11,7 @@ use adw::prelude::*;
 use gtk::glib;
 
 use crate::{
+    chip_wrap,
     development,
     pull_requests,
     issue_detail,
@@ -63,7 +64,7 @@ struct Ui {
     pinned_scroll: gtk::ScrolledWindow,
     pinned_count: gtk::Label,
     detail_box: gtk::Box,
-    local_label_chips: Rc<RefCell<gtk::FlowBox>>,
+    local_label_chips: Rc<RefCell<chip_wrap::ChipWrap>>,
     development: development::DevelopmentPanel,
     pull_requests: pull_requests::PullRequestsPanel,
     comments_box: Rc<RefCell<gtk::Box>>,
@@ -791,7 +792,7 @@ fn build_ui(app: &adw::Application) {
         search, center_title,
         board_box, pinned_section, pinned_box, pinned_scroll, pinned_count,
         detail_box,
-        local_label_chips: Rc::new(RefCell::new(gtk::FlowBox::new())),
+        local_label_chips: Rc::new(RefCell::new(chip_wrap::ChipWrap::default())),
         development, pull_requests, comments_box: Rc::new(RefCell::new(gtk::Box::new(gtk::Orientation::Vertical, 10))),
         comments_request: Rc::new(Cell::new(0)),
         children_box: Rc::new(RefCell::new(gtk::Box::new(gtk::Orientation::Vertical, 9))),
@@ -3715,8 +3716,9 @@ fn issue_button(
     if let Some(labels) = ui.state.borrow().settings.local_labels.get(&issue.key)
         && !labels.is_empty()
     {
-        let chips = gtk::FlowBox::new();
+        let chips = chip_wrap::ChipWrap::default();
         chips.add_css_class("ticket-local-labels");
+        chips.set_hexpand(true);
         populate_local_label_chips(&chips, labels);
         content.append(&chips);
     }
@@ -4195,32 +4197,24 @@ fn open_issue(ui: &Ui, issue: &Issue, source_button: Option<&gtk::Button>) {
 }
 
 
-fn populate_local_label_chips(flow: &gtk::FlowBox, labels: &[String]) {
-    while let Some(child) = flow.first_child() {
-        flow.remove(&child);
-    }
-    flow.set_selection_mode(gtk::SelectionMode::None);
-    flow.set_halign(gtk::Align::Start);
-    flow.set_row_spacing(5);
-    flow.set_column_spacing(5);
-    flow.set_min_children_per_line(1);
-    flow.set_max_children_per_line(8);
+fn populate_local_label_chips(flow: &chip_wrap::ChipWrap, labels: &[String]) {
+    flow.clear();
     for text in labels {
         let pill = gtk::Label::new(Some(text));
         pill.add_css_class("local-label-pill");
         pill.set_max_width_chars(25);
         pill.set_ellipsize(gtk::pango::EllipsizeMode::End);
         pill.set_tooltip_text(Some(text));
-        flow.insert(&pill, -1);
+        flow.append(&pill);
     }
 }
 
 fn populate_editable_local_label_chips(
-    flow: &gtk::FlowBox, labels: &[String], ui: &Ui, key: &str,
+    flow: &chip_wrap::ChipWrap, labels: &[String], ui: &Ui, key: &str,
 ) {
-    // Board chips are read-only. The detail chips expose removal immediately,
-    // without hiding it inside the Add popover.
-    populate_local_label_chips(flow, &[]);
+    // The details and the board share the same content-sized wrapping layout,
+    // but only detail chips expose a direct remove action.
+    flow.clear();
     for text in labels {
         let pill = gtk::Box::new(gtk::Orientation::Horizontal, 4);
         pill.add_css_class("local-label-pill");
@@ -4243,8 +4237,11 @@ fn populate_editable_local_label_chips(
             change_local_label(&ui, &key, &text, false);
         });
         pill.append(&remove);
-        flow.insert(&pill, -1);
+        flow.append(&pill);
     }
+    // Adding is part of the same wrapping row: '+' follows the last chip,
+    // not the right edge of the inspector.
+    flow.append(&local_label_menu(ui, key));
 }
 
 fn change_local_label(ui: &Ui, key: &str, label: &str, add: bool) -> bool {
@@ -4331,14 +4328,12 @@ fn render_issue_detail(ui: &Ui, issue: &Issue, base_url: &str) {
     let detail = issue_detail::render(
         &ui.detail_box, issue, base_url, &ui.detail_actions, &on_issue_link,
     );
-    let chips = gtk::FlowBox::new();
+    let chips = chip_wrap::ChipWrap::default();
+    chips.set_hexpand(true);
     let labels = ui.state.borrow().settings.local_labels.get(&issue.key)
         .cloned().unwrap_or_default();
     populate_editable_local_label_chips(&chips, &labels, ui, &issue.key);
-    // Natural width keeps the '+' immediately after the labels. Expanding this
-    // FlowBox stretched a single label across the remaining inspector width.
     detail.local_labels.append(&chips);
-    detail.local_labels.append(&local_label_menu(ui, &issue.key));
     *ui.local_label_chips.borrow_mut() = chips;
 
     // Development and linked PRs stay above the ticket properties.
