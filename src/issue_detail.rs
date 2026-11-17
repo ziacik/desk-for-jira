@@ -13,6 +13,7 @@ pub struct DetailRender {
     pub images: ImageSlots,
     pub comments: gtk::Box,
     pub children: gtk::Box,
+    pub local_labels: gtk::Box,
 }
 
 fn section_heading(title: &str, icon: &str, count: Option<usize>) -> gtk::Box {
@@ -194,6 +195,11 @@ pub fn render(
     badges.append(&priority);
     header.append(&badges);
 
+    // User-defined labels live only in the local app configuration, not Jira.
+    let local_labels = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    local_labels.add_css_class("detail-local-labels");
+    header.append(&local_labels);
+
     if let Some(parent) = &issue.parent {
         let epic = issue.epic.as_ref().filter(|epic| epic.key == parent.key);
         let summary = if parent.summary.is_empty() {
@@ -327,7 +333,7 @@ pub fn render(
     comments_section.append(&comments);
     content.append(&comments_section);
 
-    DetailRender { images: slots, comments, children }
+    DetailRender { images: slots, comments, children, local_labels }
 }
 
 pub fn show_comments_loading(container: &gtk::Box) {

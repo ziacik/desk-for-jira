@@ -608,6 +608,18 @@ button.issue-card label.ticket-kind {
   padding: 3px 7px;
   font-size: 0.77em;
 }
+.local-label-pill {
+  color: @window_fg_color;
+  background-color: alpha(@accent_color, 0.13);
+  border: 1px solid alpha(@accent_color, 0.2);
+  border-radius: 999px;
+  padding: 2px 8px;
+  font-size: 0.78em;
+  font-weight: 650;
+}
+.detail-local-labels {
+  padding-top: 2px;
+}
 button.issue-card label.ticket-summary {
   font-weight: 720;
   font-size: 1.02em;
