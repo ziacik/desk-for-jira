@@ -175,6 +175,14 @@ pub fn render(
     let kind_badge = gtk::Label::new(Some(kind_label));
     kind_badge.add_css_class("detail-kind");
     eyebrow.append(&kind_badge);
+
+    // Keep locally assigned labels next to the Jira issue type, using the
+    // otherwise unused space in the top row instead of a separate row.
+    let local_labels = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    local_labels.add_css_class("detail-local-labels");
+    local_labels.set_hexpand(true);
+    local_labels.set_valign(gtk::Align::Center);
+    eyebrow.append(&local_labels);
     header.append(&eyebrow);
 
     let summary = gtk::Label::new(Some(&issue.summary));
@@ -194,11 +202,6 @@ pub fn render(
     priority.add_css_class("detail-priority-pill");
     badges.append(&priority);
     header.append(&badges);
-
-    // User-defined labels live only in the local app configuration, not Jira.
-    let local_labels = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-    local_labels.add_css_class("detail-local-labels");
-    header.append(&local_labels);
 
     if let Some(parent) = &issue.parent {
         let epic = issue.epic.as_ref().filter(|epic| epic.key == parent.key);
