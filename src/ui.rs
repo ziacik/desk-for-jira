@@ -4272,10 +4272,10 @@ fn populate_local_label_editor(ui: &Ui, key: &str, rows: &gtk::Box) {
         remove.set_tooltip_text(Some(&format!("Remove {text}")));
         let ui = ui.clone();
         let key = key.to_owned();
-        let rows = rows.clone();
+        let refresh_rows = rows.clone();
         remove.connect_clicked(move |_| {
             if change_local_label(&ui, &key, &text, false) {
-                populate_local_label_editor(&ui, &key, &rows);
+                populate_local_label_editor(&ui, &key, &refresh_rows);
             }
         });
         row.append(&remove);
