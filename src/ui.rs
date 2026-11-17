@@ -4332,12 +4332,11 @@ fn render_issue_detail(ui: &Ui, issue: &Issue, base_url: &str) {
         &ui.detail_box, issue, base_url, &ui.detail_actions, &on_issue_link,
     );
     let chips = gtk::FlowBox::new();
-    chips.set_hexpand(true);
     let labels = ui.state.borrow().settings.local_labels.get(&issue.key)
         .cloned().unwrap_or_default();
     populate_editable_local_label_chips(&chips, &labels, ui, &issue.key);
-    // Use the available width after Task/Bug/Story; wrap chips if needed.
-    chips.set_halign(gtk::Align::Fill);
+    // Natural width keeps the '+' immediately after the labels. Expanding this
+    // FlowBox stretched a single label across the remaining inspector width.
     detail.local_labels.append(&chips);
     detail.local_labels.append(&local_label_menu(ui, &issue.key));
     *ui.local_label_chips.borrow_mut() = chips;
