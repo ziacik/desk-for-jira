@@ -4331,13 +4331,13 @@ fn render_issue_detail(ui: &Ui, issue: &Issue, base_url: &str) {
     let detail = issue_detail::render(
         &ui.detail_box, issue, base_url, &ui.detail_actions, &on_issue_link,
     );
-    let local_title = gtk::Label::new(Some("Local labels"));
-    local_title.add_css_class("detail-field-label");
-    detail.local_labels.append(&local_title);
     let chips = gtk::FlowBox::new();
+    chips.set_hexpand(true);
     let labels = ui.state.borrow().settings.local_labels.get(&issue.key)
         .cloned().unwrap_or_default();
     populate_editable_local_label_chips(&chips, &labels, ui, &issue.key);
+    // Use the available width after Task/Bug/Story; wrap chips if needed.
+    chips.set_halign(gtk::Align::Fill);
     detail.local_labels.append(&chips);
     detail.local_labels.append(&local_label_menu(ui, &issue.key));
     *ui.local_label_chips.borrow_mut() = chips;
