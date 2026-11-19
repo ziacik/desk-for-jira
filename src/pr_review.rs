@@ -885,6 +885,32 @@ mod tests {
     }
 
     #[test]
+    fn parses_live_codex_jsonl_events() {
+        let started = serde_json::json!({"type":"turn.started"});
+        assert_eq!(codex_message(&started),
+            Some(CodexMessage::Activity("Waiting for model response…".into())));
+        let command = serde_json::json!({
+            "type":"item.started",
+            "item":{"type":"command_execution","command":"rg dirtyComparers"}
+        });
+        assert_eq!(codex_message(&command),
+            Some(CodexMessage::Activity("Running command: rg dirtyComparers".into())));
+        let answer = serde_json::json!({
+            "type":"item.completed",
+            "item":{"type":"agent_message","text":"TRIAGE: REVIEW\nNeeds inspection"}
+        });
+        assert_eq!(codex_message(&answer),
+            Some(CodexMessage::Answer("TRIAGE: REVIEW\nNeeds inspection".into())));
+        let finished = serde_json::json!({"type":"turn.completed"});
+        assert_eq!(codex_message(&finished), Some(CodexMessage::Completed));
+        let error = serde_json::json!({
+            "type":"turn.failed", "error":{"message":"Authorization failed"}
+        });
+        assert_eq!(codex_message(&error),
+            Some(CodexMessage::Failed("Authorization failed".into())));
+    }
+
+    #[test]
     fn ambiguous_codex_output_requires_human_review() {
         assert_eq!(summary("Everything seems fine").0, "Unclassified · human review required");
         assert_eq!(summary("TRIAGE: ROUTINE\nAll fields matched").0,
