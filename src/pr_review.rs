@@ -340,9 +340,12 @@ implementation requirements. Clarification from the human reviewer takes precede
 over ambiguous task wording. Ask a specific question when intent is truly unknown. \
 Do not inflate the review with generic hypotheticals, unrelated legacy bugs, \
 or merely possible scenarios unsupported by the changed code. \
-Only classify RISK when a concrete change-caused defect is evidenced; otherwise \
-describe a meaningful uncertainty as REVIEW. ROUTINE requires genuinely mechanical changes. \
-If there are no substantiated findings, say that briefly, without inventing caveats. \
+Only classify RISK when a concrete change-caused defect is evidenced. \
+For a substantive but apparently correct behavior change, choose REVIEW and explain \
+what changed and what deserves the human reviewer's attention, without inventing a bug. \
+For genuine uncertainty choose REVIEW with a specific question. \
+ROUTINE requires genuinely mechanical changes. \
+If there are no substantiated defects, state that briefly without inventing caveats. \
 ";
 
 fn review_context(loaded: &Loaded, reviewer_notes: &str) -> String {
@@ -423,7 +426,7 @@ fn fast_prompt(
          First-pass review, NOT a deep code review. \
          {policy} \
          For EACH group ID return: ROUTINE (convincingly mechanical), \
-         REVIEW (specific change-related risk requiring context), or \
+         REVIEW (a substantive behavior change or a specific question to check), or \
          RISK (concrete change-caused defect visible in the diff). \
          Do not report pre-existing behavior unrelated to modified lines, \
          and do not complain that a unit test doesn't run a real integration. \
