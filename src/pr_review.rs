@@ -96,6 +96,15 @@ struct ReviewWorktree {
 }
 
 #[derive(Clone)]
+struct PrRepositorySelection {
+    repository: PathBuf,
+    name: String,
+    root: PathBuf,
+    setup: String,
+    run_setup: bool,
+}
+
+#[derive(Clone)]
 struct Loaded {
     title: String,
     description: String,
@@ -278,8 +287,7 @@ fn pat_source(entered: &str, environment: &str, saved: &str) -> (String, &'stati
 }
 
 fn load_pr_with_credentials(
-    url: &str, entered_pat: &str, remember: bool, repository: PathBuf,
-    repo_name: &str, root: &Path, setup: &str, run_setup: bool,
+    url: &str, entered_pat: &str, remember: bool, selected: PrRepositorySelection,
 ) -> Result<(Loaded, String)> {
     let location = PrLocation::parse(url)?;
     // Do not unlock or query the keyring when a more explicit credential was supplied.
@@ -292,9 +300,9 @@ fn load_pr_with_credentials(
         String::new()
     };
     let (pat, source) = pat_source(entered_pat, &env_pat, &saved_pat);
-    let mut loaded = load_pr(url, &pat, repository)?;
+    let mut loaded = load_pr(url, &pat, selected.repository)?;
     if loaded.git_error.is_none() {
-        match review_worktree(&loaded, repo_name, root, setup, run_setup) {
+        match review_worktree(&loaded, &selected.name, &selected.root, &selected.setup, selected.run_setup) {
             Ok(spec) => loaded.worktree = Some(spec),
             Err(error) => loaded.git_error = Some(format!("PR worktree unavailable: {error}")),
         }
@@ -1507,12 +1515,14 @@ pub fn show(parent: &impl IsA<gtk::Window>, initial_url: Option<&str>) {
                 git_ui::suggested_setup(&path).to_owned()
             };
             let root = worktree_root.clone();
+            let selected = PrRepositorySelection {
+                repository: path, name: repo_name, root, setup,
+                run_setup: setup_configured,
+            };
             let (sender, receiver) = mpsc::channel();
             thread::spawn(move || {
-                let result = load_pr_with_credentials(
-                    &address, &entered_pat, remember, path,
-                    &repo_name, &root, &setup, setup_configured,
-                ).map_err(|error| error.to_string());
+                let result = load_pr_with_credentials(&address, &entered_pat, remember, selected)
+                    .map_err(|error| error.to_string());
                 let _ = sender.send(result);
             });
             let screen = screen.clone();
