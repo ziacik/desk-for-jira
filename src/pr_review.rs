@@ -1244,8 +1244,13 @@ pub fn show(parent: &impl IsA<gtk::Window>, initial_url: Option<&str>) {
     root.append(&worktree_controls);
     let worktree_log_label = label("");
     worktree_log_label.set_selectable(true);
+    let worktree_log_scroll = gtk::ScrolledWindow::new();
+    worktree_log_scroll.set_min_content_height(80);
+    worktree_log_scroll.set_max_content_height(160);
+    worktree_log_scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
+    worktree_log_scroll.set_child(Some(&worktree_log_label));
     let worktree_log = gtk::Expander::new(Some("Worktree setup output"));
-    worktree_log.set_child(Some(&worktree_log_label));
+    worktree_log.set_child(Some(&worktree_log_scroll));
     worktree_log.set_visible(false);
     root.append(&worktree_log);
     let controls = gtk::Box::new(gtk::Orientation::Horizontal, 8);
