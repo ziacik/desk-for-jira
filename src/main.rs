@@ -1,4 +1,3 @@
-mod chip_wrap;
 mod codex;
 mod codex_session;
 mod codex_ui;
@@ -14,6 +13,7 @@ mod git_ui;
 mod all_worktrees;
 mod development;
 mod pull_requests;
+mod pr_review;
 mod preferences;
 mod secrets;
 mod transition_ui;
