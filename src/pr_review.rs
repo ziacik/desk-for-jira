@@ -1738,9 +1738,12 @@ mod tests {
             assert!(prompt.contains("author"));
             assert!(prompt.contains("BASE"), "Must check changes against base");
             assert!(prompt.contains("libs/workflow/relationshipVariable.ts"));
-            assert!(prompt.contains("TRIAGE"));
         }
+        // Quick triage returns JSON; Deep review uses a TRIAGE header.
+        let fast = fast_prompt(&loaded, &[0], "Slovak", "");
+        assert!(fast.contains("triage"));
         let deep = deep_prompt(&loaded, 0, "Slovak", "");
+        assert!(deep.contains("TRIAGE: RISK"));
         assert!(deep.contains("Purpose and background"));
         assert!(deep.contains("How it works"));
         assert!(deep.contains("Design assessment"));
