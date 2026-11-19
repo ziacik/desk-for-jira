@@ -25,8 +25,6 @@ pub struct BoardSettings {
     pub grouping_version: u8,
     #[serde(default)]
     pub pinned_issues: Vec<String>,
-    #[serde(default)]
-    pub local_labels: HashMap<String, Vec<String>>,
 }
 /// Visibility of the Git worktree panel for a Jira project and workflow status ID.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -88,32 +86,6 @@ fn category_position(category: StatusCategory) -> u8 {
 }
 
 impl BoardSettings {
-    /// Locally assigned labels never modify the issue in Jira.
-    pub fn add_local_label(&mut self, key: &str, text: &str) -> bool {
-        let text = text.trim();
-        if key.is_empty() || text.is_empty() {
-            return false;
-        }
-        let labels = self.local_labels.entry(key.to_owned()).or_default();
-        if labels.iter().any(|label| label.eq_ignore_ascii_case(text)) {
-            return false;
-        }
-        labels.push(text.to_owned());
-        labels.sort_by_key(|label| label.to_lowercase());
-        true
-    }
-
-    pub fn remove_local_label(&mut self, key: &str, text: &str) -> bool {
-        let Some(labels) = self.local_labels.get_mut(key) else { return false };
-        let previous = labels.len();
-        labels.retain(|label| label != text);
-        let changed = labels.len() != previous;
-        if labels.is_empty() {
-            self.local_labels.remove(key);
-        }
-        changed
-    }
-
     /// Toggle the pinned state of one Jira issue, preserving pin order.
     pub fn toggle_pinned(&mut self, key: &str) -> bool {
         if let Some(index) = self.pinned_issues.iter().position(|pinned| pinned == key) {
@@ -376,6 +348,9 @@ pub struct GitSettings {
     pub editor: String,
     /// Optional multi-line instructions included in every Codex run.
     pub codex_instructions: String,
+    /// Default language for AI-assisted pull request review explanations.
+    /// Applies to all PRs, but not interactive ticket Codex conversations.
+    pub pr_review_language: String,
     /// Disable Codex approvals and sandbox for launches from Desk for Jira.
     pub codex_yolo: bool,
     /// Persisted app-server conversation per Jira site, ticket and worktree.
@@ -396,6 +371,7 @@ impl Default for GitSettings {
             worktree_root: "~/Worktrees".to_owned(),
             editor: "code".to_owned(),
             codex_instructions: String::new(),
+            pr_review_language: "English".to_owned(),
             codex_yolo: false,
             codex_threads: HashMap::new(),
             fetch_before_create: true,
@@ -623,6 +599,15 @@ pub fn load_git() -> Result<GitSettings> {
     Ok(read_preferences(&preferences_path()?)?.git)
 }
 
+/// Update only the PR review language so other Git preferences and Codex threads
+/// saved by another window are not overwritten by a stale settings snapshot.
+pub fn save_pr_review_language(language: &str) -> Result<()> {
+    let path = preferences_path()?;
+    let mut prefs = read_preferences(&path)?;
+    prefs.git.pr_review_language = language.to_owned();
+    write_preferences(&path, &prefs)
+}
+
 pub fn save_git(settings: &GitSettings) -> Result<()> {
     let path = preferences_path()?;
     let mut prefs = read_preferences(&path)?;
@@ -633,26 +618,6 @@ pub fn save_git(settings: &GitSettings) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn local_labels_are_per_ticket_and_round_trip_with_legacy_settings() {
-        let mut board = BoardSettings::default();
-        assert!(board.add_local_label("ART-1", "requested more info"));
-        assert!(board.add_local_label("ART-2", "review later"));
-        assert!(!board.add_local_label("ART-1", "  REQUESTED MORE INFO  "));
-        assert_eq!(board.local_labels["ART-1"], ["requested more info"]);
-        assert!(board.remove_local_label("ART-1", "requested more info"));
-        assert!(!board.local_labels.contains_key("ART-1"));
-        assert!(board.local_labels.contains_key("ART-2"));
-
-        let restored: BoardSettings = serde_json::from_str(
-            &serde_json::to_string(&board).unwrap(),
-        ).unwrap();
-        assert_eq!(restored.local_labels, board.local_labels);
-
-        let old: BoardSettings = serde_json::from_str(r#"{"pinned_issues":["ART-3"]}"#).unwrap();
-        assert!(old.local_labels.is_empty());
-    }
 
     #[test]
     fn activity_is_scoped_to_site_and_bounded() {
@@ -1093,6 +1058,23 @@ mod tests {
             serde_json::json!({"editor":"code"}),
         ).unwrap();
         assert!(old.codex_threads.is_empty());
+    }
+
+    #[test]
+    fn pr_review_language_defaults_to_english_and_is_persistent() {
+        let legacy: GitSettings = serde_json::from_value(serde_json::json!({
+            "editor": "code"
+        })).unwrap();
+        assert_eq!(legacy.pr_review_language, "English");
+
+        let settings = GitSettings {
+            pr_review_language: "Slovak".to_owned(),
+            ..GitSettings::default()
+        };
+        let roundtrip: GitSettings = serde_json::from_value(
+            serde_json::to_value(&settings).unwrap(),
+        ).unwrap();
+        assert_eq!(roundtrip.pr_review_language, "Slovak");
     }
 
     #[test]
