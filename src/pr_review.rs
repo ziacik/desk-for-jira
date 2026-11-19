@@ -188,7 +188,7 @@ fn groups_for_paths(paths: Vec<String>) -> Vec<ChangeGroup> {
     groups
 }
 
-fn review_worktree(loaded: &Loaded, repo_name: &str, root: &Path, setup: &str) -> Result<ReviewWorktree> {
+fn review_worktree(loaded: &Loaded, repo_name: &str, root: &Path, setup: &str, run_setup: bool) -> Result<ReviewWorktree> {
     if loaded.git_error.is_some() { bail!("PR Git revisions are unavailable"); }
     let oid = git_output(&loaded.repository, &["rev-parse", "--verify", &loaded.head_ref])?;
     // Git returns a hexadecimal object ID (SHA-1 or SHA-256).
@@ -216,9 +216,8 @@ fn review_worktree(loaded: &Loaded, repo_name: &str, root: &Path, setup: &str) -
     Ok(ReviewWorktree {
         branch, path,
         setup: setup.to_owned(),
-        // Match the existing ticket Worktree dialog: configured scripts are
-        // enabled; auto-suggested setup is opt-in.
-        run_setup: !setup.trim().is_empty(),
+        // Follow the checkbox semantics of the existing ticket Worktree dialog.
+        run_setup,
         ready,
     })
 }
@@ -273,6 +272,7 @@ fn pat_source(entered: &str, environment: &str, saved: &str) -> (String, &'stati
 
 fn load_pr_with_credentials(
     url: &str, entered_pat: &str, remember: bool, repository: PathBuf,
+    repo_name: &str, root: &Path, setup: &str, run_setup: bool,
 ) -> Result<(Loaded, String)> {
     let location = PrLocation::parse(url)?;
     // Do not unlock or query the keyring when a more explicit credential was supplied.
@@ -285,7 +285,13 @@ fn load_pr_with_credentials(
         String::new()
     };
     let (pat, source) = pat_source(entered_pat, &env_pat, &saved_pat);
-    let loaded = load_pr(url, &pat, repository)?;
+    let mut loaded = load_pr(url, &pat, repository)?;
+    if loaded.git_error.is_none() {
+        match review_worktree(&loaded, repo_name, root, setup, run_setup) {
+            Ok(spec) => loaded.worktree = Some(spec),
+            Err(error) => loaded.git_error = Some(format!("PR worktree unavailable: {error}")),
+        }
+    }
     let detail = if remember {
         if pat.is_empty() {
             format!("{source}; no PAT was available to save")
