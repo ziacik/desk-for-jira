@@ -1258,7 +1258,7 @@ fn is_command_palette_shortcut(key: gtk::gdk::Key, modifiers: gtk::gdk::Modifier
 fn wire_actions(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>) {
     {
         let ui = ui.clone();
-        ui.pr_review_button.clone().connect_clicked(move |_| pr_review::show(&ui.window));
+        ui.pr_review_button.clone().connect_clicked(move |_| pr_review::show(&ui.window, None));
     }
     {
         let ui = ui.clone();
