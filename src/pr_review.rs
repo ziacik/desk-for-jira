@@ -253,6 +253,11 @@ fn create_pr_worktree(loaded: &Loaded, spec: &ReviewWorktree) -> Result<(String,
         base: &loaded.head_ref,
         fetch: false, // The PR refs were already fetched by load_pr().
     })?;
+    let current = git_output(&spec.path, &["rev-parse", "HEAD"])?;
+    let expected = git_output(&loaded.repository, &["rev-parse", &loaded.head_ref])?;
+    if current != expected {
+        bail!("PR worktree is not at the expected commit; setup was not run");
+    }
     let log = if spec.run_setup { git::run_setup(&spec.path, &spec.setup)? }
         else { String::new() };
     Ok((log, true))
@@ -1331,6 +1336,10 @@ pub fn show(parent: &impl IsA<gtk::Window>, initial_url: Option<&str>) {
             };
             spec.setup = screen.worktree_setup.text().to_string();
             spec.run_setup = screen.worktree_run_setup.is_active();
+            if spec.ready && (!spec.run_setup || spec.setup.trim().is_empty()) {
+                screen.status.set_text("Enable a setup command before running setup again.");
+                return;
+            }
             screen.worktree_create.set_sensitive(false);
             load.set_sensitive(false);
             screen.status.set_text("Creating PR worktree and running selected repository setup…");
@@ -1395,7 +1404,14 @@ pub fn show(parent: &impl IsA<gtk::Window>, initial_url: Option<&str>) {
                         screen.worktree_create.set_label(if spec.path.exists() {
                             "Retry setup"
                         } else { "Create worktree" });
-                        screen.status.set_text(&format!("PR worktree setup failed: {error}"));
+                        screen.worktree_log_label.set_text(&error);
+                        screen.worktree_log.set_visible(true);
+                        screen.worktree_log.set_expanded(true);
+                        screen.status.set_text(if spec.path.exists() {
+                            "Worktree exists, but setup failed. Check output and retry setup."
+                        } else {
+                            "Cannot create PR worktree. Check the error details."
+                        });
                         glib::ControlFlow::Break
                     }
                     Err(TryRecvError::Disconnected) => {
