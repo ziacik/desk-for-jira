@@ -1571,49 +1571,76 @@ mod tests {
     }
 
     #[test]
-    fn review_prompts_include_pr_intent_and_reviewer_clarification() {
+    fn review_prompts_delegate_diff_to_codex_and_include_review_intent() {
         let loaded = Loaded {
             title: "ART-123: Handle empty aggregate inputs".into(),
             description: "Support aggregate query of empty input.".into(),
+            pr_number: 123,
             groups: vec![ChangeGroup {
                 directory: "src/dataprovider".into(),
                 files: vec!["src/dataprovider/query.ts".into()],
             }],
             repository: PathBuf::from("/tmp/dummy"),
-            base_ref: "refs/desk-for-jira/pr-1/base".into(),
-            head_ref: "refs/desk-for-jira/pr-1/head".into(),
+            base_ref: "refs/desk-for-jira/pr-123/base".into(),
+            head_ref: "refs/desk-for-jira/pr-123/head".into(),
+            worktree: None,
             git_error: None,
         };
         let note = "The aggregate produces an output row even when source rows are absent.";
-        let fast = fast_prompt(&loaded, &[(0, "diff --git a/x b/x".into())], "Slovak", note);
-        let deep = deep_prompt(&loaded, &loaded.groups[0], "diff --git a/x b/x", "Slovak", note);
-        for prompt in [fast, deep] {
+        for prompt in [
+            fast_prompt(&loaded, &[0], "Slovak", note),
+            deep_prompt(&loaded, 0, "Slovak", note),
+        ] {
             assert!(prompt.contains("ART-123"));
             assert!(prompt.contains("Support aggregate query of empty input"));
             assert!(prompt.contains(note));
             assert!(prompt.contains("unit tests"));
             assert!(prompt.contains("pre-existing"));
-            assert!(prompt.contains("base"));
+            assert!(prompt.contains("refs/desk-for-jira/pr-123/base"));
+            assert!(prompt.contains("refs/desk-for-jira/pr-123/head"));
+            assert!(prompt.contains("src/dataprovider/query.ts"));
+            assert!(prompt.contains("git diff --no-ext-diff"));
         }
     }
 
     #[test]
-    fn fast_batches_limit_count_and_bytes_without_truncating_diffs() {
-        let input: Vec<(usize, String)> = (0..20)
-            .map(|index| (index, "a".repeat(2_000))).collect();
-        let batches = fast_batches(input);
+    fn fast_batches_limit_count_and_changed_file_scope() {
+        let groups: Vec<_> = (0..20).map(|index| ChangeGroup {
+            directory: format!("directory-{index}"),
+            files: vec![format!("src/test{index}.ts")],
+        }).collect();
+        let selected: Vec<_> = (0..20).collect();
+        let batches = fast_batches(&groups, &selected);
         assert_eq!(batches.len(), 3);
         assert_eq!(batches.iter().map(Vec::len).collect::<Vec<_>>(), vec![8, 8, 4]);
-        assert_eq!(batches.iter().flat_map(|batch| batch.iter().map(|(index, _)| *index))
-            .collect::<Vec<_>>(), (0..20).collect::<Vec<_>>());
+        assert_eq!(batches.concat(), selected);
+        let large = vec![
+            ChangeGroup { directory: "a".into(), files: vec!["a".into(); 35] },
+            ChangeGroup { directory: "b".into(), files: vec!["b".into(); 6] },
+            ChangeGroup { directory: "c".into(), files: vec!["c".into(); 45] },
+        ];
+        assert_eq!(fast_batches(&large, &[0, 1, 2]), vec![vec![0], vec![1], vec![2]]);
+        assert!(fast_batches(&large, &[]).is_empty());
+    }
 
-        let large = fast_batches(vec![
-            (0, "x".repeat(120_000)),
-            (1, "y".repeat(30_000)),
-            (2, "z".repeat(126_000)),
-        ]);
-        assert_eq!(large.len(), 3);
-        assert_eq!(large[2][0].1.len(), 126_000);
+    #[test]
+    fn pr_review_worktree_is_pinned_to_exact_head_revision() {
+        // Branch and destination are tied to the PR commit, not a mutable
+        // remote branch; use Git-backed tests for the actual creation backend.
+        let group = ChangeGroup { directory: "src".into(), files: vec!["src/a.rs".into()] };
+        let loaded = Loaded {
+            title: "Test PR".into(),
+            description: String::new(),
+            pr_number: 230,
+            groups: vec![group],
+            repository: PathBuf::from("/tmp/nonexistent"),
+            base_ref: String::new(),
+            head_ref: String::new(),
+            worktree: None,
+            git_error: Some("Git not loaded".into()),
+        };
+        assert!(review_worktree(&loaded, "repo", Path::new("/tmp"), "", false).is_err());
+        assert_eq!(group_scope(&loaded, 0).contains("src/a.rs"), true);
     }
 
     #[test]
