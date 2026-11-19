@@ -1671,6 +1671,59 @@ mod tests {
     }
 
     #[test]
+    fn review_worktree_reuses_existing_creation_and_runs_configured_setup() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let unique = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "desk-for-jira-pr-review-{}-{unique}", std::process::id(),
+        ));
+        let worktrees = root.join("worktrees");
+        let repo = root.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let init = Command::new("git").args(["init", "-b", "master"])
+            .current_dir(&repo).output().unwrap();
+        assert!(init.status.success(), "{:?}", init.stderr);
+        std::fs::write(repo.join("source.txt"), "initial").unwrap();
+        git_output(&repo, &["add", "source.txt"]).unwrap();
+        git_output(&repo, &[
+            "-c", "user.name=Test", "-c", "user.email=test@example.org",
+            "commit", "-m", "initial",
+        ]).unwrap();
+
+        let loaded = Loaded {
+            title: "PR under test".into(),
+            description: String::new(),
+            pr_number: 42,
+            groups: vec![ChangeGroup {
+                directory: "(root)".into(),
+                files: vec!["source.txt".into()],
+            }],
+            repository: repo.clone(),
+            base_ref: "HEAD".into(),
+            head_ref: "HEAD".into(),
+            worktree: None,
+            git_error: None,
+        };
+        let setup = "printf setup-ran > .pr-setup-test";
+        let spec = review_worktree(&loaded, "repo", &worktrees, setup, true).unwrap();
+        assert!(!spec.ready);
+        assert!(!spec.path.exists());
+        let (_, created) = create_pr_worktree(&loaded, &spec).unwrap();
+        assert!(created);
+        assert_eq!(std::fs::read_to_string(spec.path.join(".pr-setup-test")).unwrap(), "setup-ran");
+        assert_eq!(git_output(&repo, &["rev-parse", "HEAD"]).unwrap(),
+            git_output(&spec.path, &["rev-parse", "HEAD"]).unwrap());
+
+        let reused = review_worktree(&loaded, "repo", &worktrees, setup, true).unwrap();
+        assert!(reused.ready);
+        assert_eq!(reused.path, spec.path);
+        git_output(&repo, &[
+            "worktree", "remove", "--force", spec.path.to_str().unwrap(),
+        ]).unwrap();
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
     fn fast_triage_results_are_matched_by_id_not_order() {
         let result = parse_fast_result(
             r#"{"results":[
