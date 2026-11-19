@@ -430,7 +430,7 @@ fn show_groups(list: &gtk::Box, screen: &ReviewScreen, loaded: Loaded) {
     }
 }
 
-pub fn show(parent: &gtk::Window, initial_url: Option<&str>) {
+pub fn show(parent: &impl IsA<gtk::Window>, initial_url: Option<&str>) {
     let settings = match preferences::load_git() {
         Ok(settings) => settings,
         Err(error) => {
