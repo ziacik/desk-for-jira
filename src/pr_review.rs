@@ -1104,6 +1104,56 @@ mod tests {
     }
 
     #[test]
+    fn fast_batches_limit_count_and_bytes_without_truncating_diffs() {
+        let input: Vec<(usize, String)> = (0..20)
+            .map(|index| (index, "a".repeat(2_000))).collect();
+        let batches = fast_batches(input);
+        assert_eq!(batches.len(), 3);
+        assert_eq!(batches.iter().map(Vec::len).collect::<Vec<_>>(), vec![8, 8, 4]);
+        assert_eq!(batches.iter().flat_map(|batch| batch.iter().map(|(index, _)| *index))
+            .collect::<Vec<_>>(), (0..20).collect::<Vec<_>>());
+
+        let large = fast_batches(vec![
+            (0, "x".repeat(120_000)),
+            (1, "y".repeat(30_000)),
+            (2, "z".repeat(126_000)),
+        ]);
+        assert_eq!(large.len(), 3);
+        assert_eq!(large[2][0].1.len(), 126_000);
+    }
+
+    #[test]
+    fn fast_triage_results_are_matched_by_id_not_order() {
+        let result = parse_fast_result(
+            r#"{"results":[
+                {"id":4,"triage":"RISK","explanation":"Potential **regression**"},
+                {"id":2,"triage":"REVIEW","explanation":"Needs context"}]}"#,
+            &[2, 4],
+        ).unwrap();
+        assert_eq!(result[0].0, 2);
+        assert_eq!(result[0].1.as_ref().unwrap(), "TRIAGE: REVIEW\nNeeds context");
+        assert_eq!(result[1].1.as_ref().unwrap(),
+            "TRIAGE: RISK\nPotential **regression**");
+    }
+
+    #[test]
+    fn malformed_or_missing_batch_result_is_never_routine() {
+        let invalid = parse_fast_result("not JSON", &[1]);
+        assert!(invalid.is_err());
+        let missing = parse_fast_result(
+            r#"{"results":[{"id":2,"triage":"ROUTINE","explanation":"Fine"}]}"#,
+            &[1, 2],
+        ).unwrap();
+        assert!(missing[0].1.is_err());
+        assert_eq!(missing[1].1.as_ref().unwrap(), "TRIAGE: ROUTINE\nFine");
+        let dubious = parse_fast_result(
+            r#"{"results":[{"id":1,"triage":"SAFE","explanation":"Fine"}]}"#,
+            &[1],
+        ).unwrap();
+        assert!(dubious[0].1.is_err());
+    }
+
+    #[test]
     fn parses_live_codex_jsonl_events() {
         let started = serde_json::json!({"type":"turn.started"});
         assert_eq!(codex_message(&started),
