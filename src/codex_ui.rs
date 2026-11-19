@@ -26,7 +26,7 @@ fn readable_label(text: &str, class: &str) -> gtk::Label {
     label
 }
 
-fn show_markdown(container: &gtk::Box, source: &str) {
+pub(crate) fn show_markdown(container: &gtk::Box, source: &str) {
     clear(container);
     for block in codex_markdown::blocks(source) {
         let kind = match &block {
