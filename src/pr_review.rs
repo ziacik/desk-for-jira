@@ -22,7 +22,7 @@ use gtk::glib;
 use reqwest::blocking::{Client, RequestBuilder};
 use serde_json::Value;
 
-use crate::{codex_ui, dialog, preferences};
+use crate::{codex_ui, dialog, preferences, secrets};
 
 /// Labels shown in the UI and language names used in the Codex prompt.
 const RESPONSE_LANGUAGES: [(&str, &str); 9] = [
@@ -175,6 +175,50 @@ fn groups_for_paths(paths: Vec<String>) -> Vec<ChangeGroup> {
     groups.sort_by(|a, b| b.files.len().cmp(&a.files.len())
         .then_with(|| a.directory.cmp(&b.directory)));
     groups
+}
+
+/// Credential sources are ordered deliberately: an explicit PAT overrides the app
+/// process environment; saved secrets cover GUI launches without shell variables.
+fn pat_source(entered: &str, environment: &str, saved: &str) -> (String, &'static str) {
+    if !entered.is_empty() {
+        (entered.to_owned(), "Entered PAT")
+    } else if !environment.is_empty() {
+        (environment.to_owned(), "AZURE_DEVOPS_PAT from the app environment")
+    } else if !saved.is_empty() {
+        (saved.to_owned(), "Saved PAT from the system keyring")
+    } else {
+        (String::new(), "No PAT available")
+    }
+}
+
+fn load_pr_with_credentials(
+    url: &str, entered_pat: &str, remember: bool, repository: PathBuf,
+) -> Result<(Loaded, String)> {
+    let location = PrLocation::parse(url)?;
+    // Do not unlock or query the keyring when a more explicit credential was supplied.
+    let env_pat = std::env::var("AZURE_DEVOPS_PAT").unwrap_or_default();
+    let saved_pat = if entered_pat.is_empty() && env_pat.is_empty() {
+        secrets::load_azure_pat(&location.org).context(
+            "Cannot read system keyring; enter PAT manually or configure the keyring",
+        )?.unwrap_or_default()
+    } else {
+        String::new()
+    };
+    let (pat, source) = pat_source(entered_pat, &env_pat, &saved_pat);
+    let loaded = load_pr(url, &pat, repository)?;
+    let detail = if remember {
+        if pat.is_empty() {
+            format!("{source}; no PAT was available to save")
+        } else {
+            match secrets::save_azure_pat(&location.org, &pat) {
+                Ok(()) => format!("{source}; saved for organization {} in system keyring", location.org),
+                Err(error) => format!("{source}; PR loaded but PAT could not be saved: {error}"),
+            }
+        }
+    } else {
+        source.to_owned()
+    };
+    Ok((loaded, detail))
 }
 
 fn load_pr(url: &str, token: &str, repository: PathBuf) -> Result<Loaded> {
@@ -1043,8 +1087,25 @@ pub fn show(parent: &impl IsA<gtk::Window>, initial_url: Option<&str>) {
     root.append(&note_expander);
     let token = gtk::PasswordEntry::new();
     token.set_show_peek_icon(true);
-    token.set_placeholder_text(Some("Azure DevOps Code (Read) PAT (or AZURE_DEVOPS_PAT environment variable)"));
+    token.set_placeholder_text(Some("Azure DevOps Code (Read) PAT (optional if saved or available in app environment)"));
     root.append(&token);
+    let credentials = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+    let remember_pat = gtk::CheckButton::with_label("Remember PAT in system keyring");
+    remember_pat.set_tooltip_text(Some(
+        "Save the PAT for this Azure DevOps organization after a successful Load PR",
+    ));
+    credentials.append(&remember_pat);
+    let forget_pat = gtk::Button::with_label("Forget saved PAT");
+    forget_pat.add_css_class("flat");
+    credentials.append(&forget_pat);
+    root.append(&credentials);
+    let hint = label(
+        "AZURE_DEVOPS_PAT works only if it is present in this app's environment. \
+         Variables set only in .zshrc/.bashrc are not available when launching from the GNOME icon. \
+         Save a PAT in the keyring to use it for future GUI launches.",
+    );
+    hint.add_css_class("dim-label");
+    root.append(&hint);
     let controls = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     let load = gtk::Button::with_label("Load PR");
     load.add_css_class("suggested-action");
@@ -1123,6 +1184,51 @@ pub fn show(parent: &impl IsA<gtk::Window>, initial_url: Option<&str>) {
         });
     }
     {
+        let status = screen.status.clone();
+        let url = url.clone();
+        let token = token.clone();
+        forget_pat.connect_clicked(move |button| {
+            let organization = match PrLocation::parse(url.text().as_str()) {
+                Ok(location) => location.org,
+                Err(error) => {
+                    status.set_text(&format!("Enter an Azure DevOps PR URL first: {error}"));
+                    return;
+                }
+            };
+            button.set_sensitive(false);
+            let (sender, receiver) = mpsc::channel();
+            thread::spawn(move || {
+                let result = secrets::delete_azure_pat(&organization)
+                    .map_err(|error| error.to_string());
+                let _ = sender.send(result);
+            });
+            let button = button.clone();
+            let status = status.clone();
+            let token = token.clone();
+            glib::timeout_add_local(Duration::from_millis(100), move || {
+                match receiver.try_recv() {
+                    Ok(Ok(())) => {
+                        button.set_sensitive(true);
+                        token.set_text("");
+                        status.set_text("Saved Azure DevOps PAT forgotten for this organization.");
+                        glib::ControlFlow::Break
+                    }
+                    Ok(Err(error)) => {
+                        button.set_sensitive(true);
+                        status.set_text(&format!("Cannot forget saved PAT: {error}"));
+                        glib::ControlFlow::Break
+                    }
+                    Err(TryRecvError::Disconnected) => {
+                        button.set_sensitive(true);
+                        status.set_text("Could not complete keyring operation.");
+                        glib::ControlFlow::Break
+                    }
+                    Err(TryRecvError::Empty) => glib::ControlFlow::Continue,
+                }
+            });
+        });
+    }
+    {
         let screen = screen.clone();
         let repo_settings = settings.repositories;
         let list = list.clone();
@@ -1138,12 +1244,9 @@ pub fn show(parent: &impl IsA<gtk::Window>, initial_url: Option<&str>) {
             let address_for_ui = address.clone();
             let last_loaded_url = last_loaded_url.clone();
             let note_input = note_input.clone();
-            let pat = if token.text().is_empty() {
-                std::env::var("AZURE_DEVOPS_PAT").unwrap_or_default()
-            } else {
-                token.text().to_string()
-            };
-            screen.status.set_text("Loading PR and fetching Git revisions…");
+            let entered_pat = token.text().to_string();
+            let remember = remember_pat.is_active();
+            screen.status.set_text("Loading PR and resolving Azure DevOps credentials…");
             screen.analyze_all.set_sensitive(false);
             clear(&list);
             screen.rows.borrow_mut().clear();
@@ -1152,7 +1255,8 @@ pub fn show(parent: &impl IsA<gtk::Window>, initial_url: Option<&str>) {
             let path = PathBuf::from(&repository.path);
             let (sender, receiver) = mpsc::channel();
             thread::spawn(move || {
-                let result = load_pr(&address, &pat, path).map_err(|error| error.to_string());
+                let result = load_pr_with_credentials(&address, &entered_pat, remember, path)
+                    .map_err(|error| error.to_string());
                 let _ = sender.send(result);
             });
             let screen = screen.clone();
@@ -1160,7 +1264,7 @@ pub fn show(parent: &impl IsA<gtk::Window>, initial_url: Option<&str>) {
             let load_button = load_button.clone();
             glib::timeout_add_local(Duration::from_millis(100), move || {
                 match receiver.try_recv() {
-                    Ok(Ok(loaded)) => {
+                    Ok(Ok((loaded, credentials_used))) => {
                         load_button.set_sensitive(true);
                         if last_loaded_url.borrow().as_deref() != Some(&address_for_ui) {
                             // Never leak reviewer assumptions into a different PR.
@@ -1168,6 +1272,10 @@ pub fn show(parent: &impl IsA<gtk::Window>, initial_url: Option<&str>) {
                         }
                         *last_loaded_url.borrow_mut() = Some(address_for_ui.clone());
                         show_groups(&list, &screen, loaded);
+                        screen.status.set_text(&format!(
+                            "{} · Authentication: {credentials_used}",
+                            screen.status.text(),
+                        ));
                         glib::ControlFlow::Break
                     }
                     Ok(Err(error)) => {
@@ -1191,6 +1299,16 @@ pub fn show(parent: &impl IsA<gtk::Window>, initial_url: Option<&str>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pat_source_prefers_explicit_pat_then_process_environment_then_keyring() {
+        assert_eq!(pat_source("entered", "env", "saved"), ("entered".to_owned(), "Entered PAT"));
+        assert_eq!(pat_source("", "env", "saved"),
+            ("env".to_owned(), "AZURE_DEVOPS_PAT from the app environment"));
+        assert_eq!(pat_source("", "", "saved"),
+            ("saved".to_owned(), "Saved PAT from the system keyring"));
+        assert_eq!(pat_source("", "", ""), ("".to_owned(), "No PAT available"));
+    }
 
     #[test]
     fn azure_pr_url_parsing_is_strict() {
