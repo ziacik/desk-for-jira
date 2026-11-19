@@ -1318,6 +1318,97 @@ pub fn show(parent: &impl IsA<gtk::Window>, initial_url: Option<&str>) {
         });
     }
     {
+        let screen = screen.clone();
+        let load = load.clone();
+        worktree_create.connect_clicked(move |_| {
+            if screen.analyzing.get() { return; }
+            let Some(loaded) = screen.loaded.borrow().clone() else { return };
+            let Some(mut spec) = loaded.worktree.clone() else {
+                screen.status.set_text("Load a PR and its Git revisions first.");
+                return;
+            };
+            if spec.ready { return; }
+            spec.setup = screen.worktree_setup.text().to_string();
+            spec.run_setup = screen.worktree_run_setup.is_active();
+            screen.worktree_create.set_sensitive(false);
+            load.set_sensitive(false);
+            screen.status.set_text("Creating PR worktree and running selected repository setup…");
+            let (sender, receiver) = mpsc::channel();
+            let repo_path = loaded.repository.clone();
+            let setup_command = if spec.run_setup { Some(spec.setup.clone()) } else { None };
+            let worker_spec = spec.clone();
+            thread::spawn(move || {
+                let result = create_pr_worktree(&loaded, &worker_spec)
+                    .map_err(|error| error.to_string());
+                let _ = sender.send(result);
+            });
+            let screen = screen.clone();
+            let load = load.clone();
+            glib::timeout_add_local(Duration::from_millis(100), move || {
+                match receiver.try_recv() {
+                    Ok(Ok((log, _created_branch))) => {
+                        load.set_sensitive(true);
+                        screen.worktree_create.set_sensitive(false);
+                        screen.worktree_controls.set_visible(false);
+                        screen.worktree_info.set_text(&format!(
+                            "PR worktree ready · {}", spec.path.display(),
+                        ));
+                        if !log.is_empty() {
+                            screen.worktree_log_label.set_text(&log);
+                            screen.worktree_log.set_visible(true);
+                        }
+                        if let Some(loaded) = screen.loaded.borrow_mut().as_mut()
+                            && let Some(worktree) = loaded.worktree.as_mut()
+                        {
+                            *worktree = ReviewWorktree { ready: true, ..spec.clone() };
+                        }
+                        screen.analyze_all.set_sensitive(true);
+                        for row in screen.rows.borrow().iter() { row.set_sensitive(true); }
+                        screen.status.set_text("PR worktree ready. Codex can inspect and test this revision.");
+                        if let Some(script) = setup_command.as_ref() {
+                            // Same persistence semantics as the existing Worktree dialog:
+                            // only an explicitly enabled setup is saved for the repo.
+                            match preferences::load_git() {
+                                Ok(mut settings) => {
+                                    if let Some(repo) = settings.repositories.iter_mut()
+                                        .find(|repo| repo.path == repo_path.to_string_lossy())
+                                    {
+                                        repo.setup = script.clone();
+                                        if let Err(error) = preferences::save_git(&settings) {
+                                            screen.status.set_text(&format!(
+                                                "Worktree ready, but setup preference could not be saved: {error}",
+                                            ));
+                                        }
+                                    }
+                                }
+                                Err(error) => screen.status.set_text(&format!(
+                                    "Worktree ready, but preferences could not be loaded: {error}",
+                                )),
+                            }
+                        }
+                        glib::ControlFlow::Break
+                    }
+                    Ok(Err(error)) => {
+                        load.set_sensitive(true);
+                        screen.worktree_create.set_sensitive(true);
+                        screen.worktree_create.set_label(if spec.path.exists() {
+                            "Retry setup"
+                        } else { "Create worktree" });
+                        screen.status.set_text(&format!("PR worktree setup failed: {error}"));
+                        glib::ControlFlow::Break
+                    }
+                    Err(TryRecvError::Disconnected) => {
+                        load.set_sensitive(true);
+                        screen.worktree_create.set_sensitive(true);
+                        screen.status.set_text("PR worktree creation stopped unexpectedly.");
+                        glib::ControlFlow::Break
+                    }
+                    Err(TryRecvError::Empty) => glib::ControlFlow::Continue,
+                }
+            });
+        });
+    }
+    {
         let status = screen.status.clone();
         let url = url.clone();
         let token = token.clone();
@@ -1364,6 +1455,7 @@ pub fn show(parent: &impl IsA<gtk::Window>, initial_url: Option<&str>) {
     }
     {
         let screen = screen.clone();
+        let worktree_root = git_ui::expand_home(&settings.worktree_root);
         let repo_settings = settings.repositories;
         let list = list.clone();
         let load_button = load.clone();
@@ -1382,15 +1474,28 @@ pub fn show(parent: &impl IsA<gtk::Window>, initial_url: Option<&str>) {
             let remember = remember_pat.is_active();
             screen.status.set_text("Loading PR and resolving Azure DevOps credentials…");
             screen.analyze_all.set_sensitive(false);
+            screen.worktree_controls.set_visible(false);
+            screen.worktree_info.set_visible(false);
+            screen.worktree_log.set_visible(false);
             clear(&list);
             screen.rows.borrow_mut().clear();
             *screen.loaded.borrow_mut() = None;
             load_button.set_sensitive(false);
             let path = PathBuf::from(&repository.path);
+            let repo_name = repository.name.clone();
+            let setup_configured = !repository.setup.trim().is_empty();
+            let setup = if setup_configured {
+                repository.setup.clone()
+            } else {
+                git_ui::suggested_setup(&path).to_owned()
+            };
+            let root = worktree_root.clone();
             let (sender, receiver) = mpsc::channel();
             thread::spawn(move || {
-                let result = load_pr_with_credentials(&address, &entered_pat, remember, path)
-                    .map_err(|error| error.to_string());
+                let result = load_pr_with_credentials(
+                    &address, &entered_pat, remember, path,
+                    &repo_name, &root, &setup, setup_configured,
+                ).map_err(|error| error.to_string());
                 let _ = sender.send(result);
             });
             let screen = screen.clone();
