@@ -595,14 +595,15 @@ struct GroupRow {
     activity_details: gtk::Expander,
     activity_lines: Rc<RefCell<Vec<String>>>,
     analyze: gtk::Button,
+    deep_review: gtk::Button,
 }
 
 impl GroupRow {
-    fn reset_activity(&self) {
+    fn reset_activity(&self, expand: bool) {
         self.activity_lines.borrow_mut().clear();
         self.activity.set_text("");
         self.activity_details.set_visible(true);
-        self.activity_details.set_expanded(true);
+        self.activity_details.set_expanded(expand);
     }
 
     fn append_activity(&self, text: &str) {
@@ -610,6 +611,11 @@ impl GroupRow {
         lines.push(text.to_owned());
         if lines.len() > 20 { lines.remove(0); }
         self.activity.set_text(&lines.join("\n"));
+    }
+
+    fn set_sensitive(&self, active: bool) {
+        self.analyze.set_sensitive(active);
+        self.deep_review.set_sensitive(active);
     }
 }
 
@@ -626,13 +632,13 @@ struct ReviewScreen {
 }
 
 enum AnalysisEvent {
-    Started(usize),
-    Progress(usize, String),
+    Started(Vec<usize>),
+    Progress(Vec<usize>, String),
     Finished(usize, Result<String, String>),
 }
 
 impl ReviewScreen {
-    fn analyze_groups(&self, selected: Vec<usize>) {
+    fn analyze_groups(&self, selected: Vec<usize>, deep: bool) {
         if self.analyzing.get() || selected.is_empty() { return; }
         let Some(loaded) = self.loaded.borrow().clone() else { return };
         if loaded.git_error.is_some() { return; }
@@ -640,57 +646,112 @@ impl ReviewScreen {
         self.analyzing.set(true);
         self.analyze_all.set_sensitive(false);
         self.stop.set_sensitive(true);
+        let total = selected.len();
         for (index, row) in self.rows.borrow().iter().enumerate() {
-            row.analyze.set_sensitive(false);
+            row.set_sensitive(false);
             if selected.contains(&index) {
-                row.status.set_text("Queued for Codex analysis…");
+                row.status.set_text(if deep { "Queued for deep review…" } else { "Queued for quick triage…" });
                 clear(&row.explanation);
-                row.reset_activity();
+                row.reset_activity(total == 1);
             }
         }
-        let total = selected.len();
-        // One language for the full batch; a changed preference applies to the next run.
+
         let language = self.language.borrow().clone();
         let queued = selected.clone();
         let (sender, receiver) = mpsc::channel();
         let cancelled = self.cancelled.clone();
         thread::spawn(move || {
-            for index in selected {
-                if cancelled.load(Ordering::Relaxed) { break; }
-                if sender.send(AnalysisEvent::Started(index)).is_err() { break; }
-                let result = analyze(&loaded, &loaded.groups[index], &language, &cancelled, |message| {
-                    let _ = sender.send(AnalysisEvent::Progress(index, message));
-                }).map_err(|error| error.to_string());
-                if sender.send(AnalysisEvent::Finished(index, result)).is_err() { break; }
+            if deep {
+                for index in selected {
+                    if cancelled.load(Ordering::Relaxed) { break; }
+                    if sender.send(AnalysisEvent::Started(vec![index])).is_err() { break; }
+                    let result = analyze_deep(&loaded, &loaded.groups[index], &language, &cancelled, |message| {
+                        let _ = sender.send(AnalysisEvent::Progress(vec![index], message));
+                    }).map_err(|error| error.to_string());
+                    if sender.send(AnalysisEvent::Finished(index, result)).is_err() { break; }
+                }
+            } else {
+                // Build complete, independent diffs first. Never truncate an individual group.
+                let mut prepared = Vec::new();
+                for index in selected {
+                    if cancelled.load(Ordering::Relaxed) { break; }
+                    let _ = sender.send(AnalysisEvent::Progress(
+                        vec![index], "Preparing Git diff…".into(),
+                    ));
+                    match prepare_diff(&loaded, &loaded.groups[index]) {
+                        Ok(diff) => prepared.push((index, diff)),
+                        Err(error) => {
+                            let _ = sender.send(AnalysisEvent::Finished(index, Err(error.to_string())));
+                        }
+                    }
+                }
+                let batches = fast_batches(prepared);
+                let total_batches = batches.len();
+                for (number, batch) in batches.iter().enumerate() {
+                    if cancelled.load(Ordering::Relaxed) { break; }
+                    let indices: Vec<usize> = batch.iter().map(|(index, _)| *index).collect();
+                    if sender.send(AnalysisEvent::Started(indices.clone())).is_err() { break; }
+                    let _ = sender.send(AnalysisEvent::Progress(
+                        indices.clone(),
+                        format!("Quick triage batch {}/{} · {} groups, {} KiB",
+                            number + 1, total_batches, indices.len(),
+                            batch.iter().map(|(_, diff)| diff.len()).sum::<usize>() / 1024),
+                    ));
+                    let prompt = fast_prompt(&loaded, batch, &language);
+                    let output = run_codex(&loaded, &prompt, true, &cancelled, |message| {
+                        let _ = sender.send(AnalysisEvent::Progress(indices.clone(), message));
+                    });
+                    let results = match output {
+                        Ok(response) => parse_fast_result(&response, &indices)
+                            .unwrap_or_else(|error| indices.iter()
+                                .map(|index| (*index, Err(format!(
+                                    "Could not interpret batch response: {error}. Manual review required."
+                                )))).collect()),
+                        Err(error) => indices.iter()
+                            .map(|index| (*index, Err(error.to_string()))).collect(),
+                    };
+                    for (index, result) in results {
+                        if sender.send(AnalysisEvent::Finished(index, result)).is_err() { return; }
+                    }
+                }
             }
         });
+
         let screen = self.clone();
         let mut done = 0_usize;
         let mut completed = std::collections::HashSet::new();
-        let mut active: Option<(usize, Instant, String)> = None;
+        let mut active: Option<(Vec<usize>, Instant, String)> = None;
         glib::timeout_add_local(Duration::from_millis(160), move || {
             loop {
                 match receiver.try_recv() {
-                    Ok(AnalysisEvent::Started(index)) => {
-                        active = Some((index, Instant::now(), "Starting Codex…".into()));
-                        if let Some(row) = screen.rows.borrow().get(index) {
-                            row.append_activity("Starting Codex…");
+                    Ok(AnalysisEvent::Started(indices)) => {
+                        for index in &indices {
+                            if let Some(row) = screen.rows.borrow().get(*index) {
+                                row.append_activity("Codex batch started…");
+                            }
                         }
+                        active = Some((indices, Instant::now(), "Starting Codex…".into()));
                     }
-                    Ok(AnalysisEvent::Progress(index, text)) => {
-                        if let Some((active_index, _, detail)) = active.as_mut()
-                            && *active_index == index
+                    Ok(AnalysisEvent::Progress(indices, text)) => {
+                        if let Some((current, _, detail)) = active.as_mut()
+                            && indices.iter().any(|index| current.contains(index))
                         {
                             *detail = text.clone();
                         }
-                        if let Some(row) = screen.rows.borrow().get(index) {
-                            row.append_activity(&text);
+                        for index in indices {
+                            if let Some(row) = screen.rows.borrow().get(index) {
+                                row.append_activity(&text);
+                            }
                         }
                     }
                     Ok(AnalysisEvent::Finished(index, result)) => {
                         completed.insert(index);
                         done += 1;
-                        active = None;
+                        let done_batch = if let Some((indices, _, _)) = active.as_mut() {
+                            indices.retain(|current| *current != index);
+                            indices.is_empty()
+                        } else { false };
+                        if done_batch { active = None; }
                         if let Some(row) = screen.rows.borrow().get(index) {
                             match result {
                                 Ok(text) => {
@@ -727,23 +788,25 @@ impl ReviewScreen {
                             .is_some_and(|loaded| loaded.git_error.is_none());
                         screen.analyze_all.set_sensitive(can_analyze);
                         for row in screen.rows.borrow().iter() {
-                            row.analyze.set_sensitive(can_analyze);
+                            row.set_sensitive(can_analyze);
                         }
                         if stopped { screen.status.set_text("AI triage stopped"); }
                         return glib::ControlFlow::Break;
                     }
                 }
             }
-            if let Some((index, started, detail)) = &active {
+            if let Some((indices, started, detail)) = &active {
                 let secs = started.elapsed().as_secs();
-                if let Some(row) = screen.rows.borrow().get(*index) {
-                    row.status.set_text(&format!(
-                        "Analyzing · {}:{:02} · {detail}", secs / 60, secs % 60,
-                    ));
+                for index in indices {
+                    if let Some(row) = screen.rows.borrow().get(*index) {
+                        row.status.set_text(&format!(
+                            "Analyzing · {}:{:02} · {detail}", secs / 60, secs % 60,
+                        ));
+                    }
                 }
                 screen.status.set_text(&format!(
-                    "AI triage: {done}/{total} groups · current group running for {}:{:02}",
-                    secs / 60, secs % 60,
+                    "AI triage: {done}/{total} groups · {} active · {}:{:02} elapsed",
+                    indices.len(), secs / 60, secs % 60,
                 ));
             }
             glib::ControlFlow::Continue
@@ -782,10 +845,15 @@ fn show_groups(list: &gtk::Box, screen: &ReviewScreen, loaded: Loaded) {
         name.set_hexpand(true);
         name.add_css_class("heading");
         heading.append(&name);
-        let analyze = gtk::Button::with_label("Analyze");
+        let analyze = gtk::Button::with_label("Quick triage");
         analyze.add_css_class("flat");
         analyze.set_sensitive(can_analyze);
         heading.append(&analyze);
+        let deep_review = gtk::Button::with_label("Deep review");
+        deep_review.add_css_class("flat");
+        deep_review.set_tooltip_text(Some("Thorough Codex review of this directory (slower)"));
+        deep_review.set_sensitive(can_analyze);
+        heading.append(&deep_review);
         row.append(&heading);
 
         let status = label("Not analyzed · manual review required");
@@ -813,10 +881,13 @@ fn show_groups(list: &gtk::Box, screen: &ReviewScreen, loaded: Loaded) {
         list.append(&frame);
 
         let review = screen.clone();
-        analyze.connect_clicked(move |_| review.analyze_groups(vec![index]));
+        analyze.connect_clicked(move |_| review.analyze_groups(vec![index], false));
+        let review = screen.clone();
+        deep_review.connect_clicked(move |_| review.analyze_groups(vec![index], true));
         screen.rows.borrow_mut().push(GroupRow {
             status, explanation, activity, activity_details,
-            activity_lines: Rc::new(RefCell::new(Vec::new())), analyze,
+            activity_lines: Rc::new(RefCell::new(Vec::new())),
+            analyze, deep_review,
         });
     }
 }
@@ -885,7 +956,7 @@ pub fn show(parent: &impl IsA<gtk::Window>, initial_url: Option<&str>) {
     let controls = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     let load = gtk::Button::with_label("Load PR");
     load.add_css_class("suggested-action");
-    let analyze_all = gtk::Button::with_label("Analyze all groups");
+    let analyze_all = gtk::Button::with_label("Quick triage all");
     analyze_all.set_sensitive(false);
     let stop = gtk::Button::with_label("Stop analysis");
     stop.add_css_class("flat");
@@ -947,7 +1018,7 @@ pub fn show(parent: &impl IsA<gtk::Window>, initial_url: Option<&str>) {
         let screen = screen.clone();
         analyze_all.connect_clicked(move |_| {
             let count = screen.rows.borrow().len();
-            screen.analyze_groups((0..count).collect());
+            screen.analyze_groups((0..count).collect(), false);
         });
     }
     {
