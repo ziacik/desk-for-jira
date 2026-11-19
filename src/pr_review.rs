@@ -1,5 +1,5 @@
-//! Read-only Azure Repos PR explorer with explicit, human-controlled AI triage.
-//! Uses the configured local Git repository; never checks out or edits PR code.
+//! Azure Repos PR explorer with explicit, human-controlled AI review.
+//! The PR is checked out only in a dedicated worktree using existing Git helpers.
 use std::{
     cell::{Cell, RefCell},
     collections::BTreeMap,
@@ -22,7 +22,7 @@ use gtk::glib;
 use reqwest::blocking::{Client, RequestBuilder};
 use serde_json::Value;
 
-use crate::{codex_ui, dialog, preferences, secrets};
+use crate::{codex_ui, dialog, git, git_ui, preferences, secrets};
 
 /// Labels shown in the UI and language names used in the Codex prompt.
 const RESPONSE_LANGUAGES: [(&str, &str); 9] = [
@@ -87,13 +87,24 @@ struct ChangeGroup {
 }
 
 #[derive(Clone)]
+struct ReviewWorktree {
+    branch: String,
+    path: PathBuf,
+    setup: String,
+    run_setup: bool,
+    ready: bool,
+}
+
+#[derive(Clone)]
 struct Loaded {
     title: String,
     description: String,
+    pr_number: u32,
     groups: Vec<ChangeGroup>,
     repository: PathBuf,
     base_ref: String,
     head_ref: String,
+    worktree: Option<ReviewWorktree>,
     git_error: Option<String>,
 }
 
@@ -175,6 +186,75 @@ fn groups_for_paths(paths: Vec<String>) -> Vec<ChangeGroup> {
     groups.sort_by(|a, b| b.files.len().cmp(&a.files.len())
         .then_with(|| a.directory.cmp(&b.directory)));
     groups
+}
+
+fn review_worktree(loaded: &Loaded, repo_name: &str, root: &Path, setup: &str) -> Result<ReviewWorktree> {
+    if loaded.git_error.is_some() { bail!("PR Git revisions are unavailable"); }
+    let oid = git_output(&loaded.repository, &["rev-parse", "--verify", &loaded.head_ref])?;
+    // Git returns a hexadecimal object ID (SHA-1 or SHA-256).
+    if oid.len() < 12 || !oid.chars().all(|ch| ch.is_ascii_hexdigit()) {
+        bail!("Invalid PR commit ID");
+    }
+    let short = &oid[..12];
+    let branch = format!("review/pr-{}-{short}", loaded.pr_number);
+    let path = root.join(repo_name).join(format!("PR-{}-{short}", loaded.pr_number));
+    let found = git::worktrees(&loaded.repository)?.into_iter()
+        .find(|tree| tree.path == path && tree.branch.as_deref() == Some(&branch));
+    let ready = if found.is_some() {
+        let actual = git_output(&loaded.repository,
+            &["-C", path.to_str().context("Worktree path is not UTF-8")?,
+                "rev-parse", "HEAD"])?;
+        if actual != oid { bail!("Existing PR worktree points at the wrong commit"); }
+        true
+    } else {
+        if path.exists() {
+            bail!("PR worktree destination exists but is not a registered Git worktree: {}",
+                path.display());
+        }
+        false
+    };
+    Ok(ReviewWorktree {
+        branch, path,
+        setup: setup.to_owned(),
+        // Match the existing ticket Worktree dialog: configured scripts are
+        // enabled; auto-suggested setup is opt-in.
+        run_setup: !setup.trim().is_empty(),
+        ready,
+    })
+}
+
+fn create_pr_worktree(loaded: &Loaded, spec: &ReviewWorktree) -> Result<(String, bool)> {
+    if spec.ready {
+        return Ok((String::new(), false));
+    }
+    if spec.path.exists() {
+        // If setup failed after Git succeeded, retry only the setup command;
+        // never attempt to recreate an already existing worktree.
+        let registered = git::worktrees(&loaded.repository)?.into_iter()
+            .any(|tree| tree.path == spec.path
+                && tree.branch.as_deref() == Some(spec.branch.as_str()));
+        if !registered {
+            bail!("Destination exists but is not a PR worktree: {}", spec.path.display());
+        }
+        let current = git_output(&spec.path, &["rev-parse", "HEAD"])?;
+        let wanted = git_output(&loaded.repository, &["rev-parse", &loaded.head_ref])?;
+        if current != wanted { bail!("PR worktree HEAD differs from this PR revision"); }
+        let log = if spec.run_setup { git::run_setup(&spec.path, &spec.setup)? }
+            else { String::new() };
+        return Ok((log, false));
+    }
+    // Same backend and setup handling as ordinary ticket worktrees. The
+    // source revision is pinned; nothing checks out in the original repository.
+    git::create(&git::CreateWorktree {
+        repository: &loaded.repository,
+        destination: &spec.path,
+        branch: &spec.branch,
+        base: &loaded.head_ref,
+        fetch: false, // The PR refs were already fetched by load_pr().
+    })?;
+    let log = if spec.run_setup { git::run_setup(&spec.path, &spec.setup)? }
+        else { String::new() };
+    Ok((log, true))
 }
 
 /// Credential sources are ordered deliberately: an explicit PAT overrides the app
@@ -267,10 +347,12 @@ fn load_pr(url: &str, token: &str, repository: PathBuf) -> Result<Loaded> {
     Ok(Loaded {
         title,
         description,
+        pr_number: location.number,
         groups: groups_for_paths(paths),
         repository,
         base_ref,
         head_ref,
+        worktree: None,
         git_error,
     })
 }
