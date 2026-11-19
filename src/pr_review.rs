@@ -884,6 +884,13 @@ fn show_groups(list: &gtk::Box, screen: &ReviewScreen, loaded: Loaded) {
         loaded.title, files, loaded.groups.len(),
     ));
     let can_analyze = loaded.git_error.is_none();
+    if !loaded.description.trim().is_empty() {
+        let description = label(&loaded.description);
+        description.set_selectable(true);
+        let details = gtk::Expander::new(Some("PR description (context for AI)"));
+        details.set_child(Some(&description));
+        list.append(&details);
+    }
     if let Some(error) = &loaded.git_error {
         let warning = label(&format!(
             "File list loaded, but local Git revisions are unavailable: {error}. \
@@ -1011,6 +1018,26 @@ pub fn show(parent: &impl IsA<gtk::Window>, initial_url: Option<&str>) {
     language_row.append(&label("AI response language"));
     language_row.append(&language_dropdown);
     root.append(&language_row);
+
+    // Per-PR reviewer clarification is optional. It is NOT the same as a ticket description:
+    // the reviewer can correct ambiguous wording or specify intentional behavior.
+    let note_input = gtk::TextView::new();
+    note_input.set_wrap_mode(gtk::WrapMode::WordChar);
+    let note_scroller = gtk::ScrolledWindow::new();
+    note_scroller.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
+    note_scroller.set_min_content_height(80);
+    note_scroller.set_max_content_height(140);
+    note_scroller.add_css_class("frame");
+    note_scroller.set_child(Some(&note_input));
+    let note_box = gtk::Box::new(gtk::Orientation::Vertical, 6);
+    note_box.append(&label(
+        "Clarify expected behavior or scope (e.g. intentional edge cases, test level). \
+         Applies to both Quick triage and Deep review.",
+    ));
+    note_box.append(&note_scroller);
+    let note_expander = gtk::Expander::new(Some("Review context (optional)"));
+    note_expander.set_child(Some(&note_box));
+    root.append(&note_expander);
     let token = gtk::PasswordEntry::new();
     token.set_show_peek_icon(true);
     token.set_placeholder_text(Some("Azure DevOps Code (Read) PAT (or AZURE_DEVOPS_PAT environment variable)"));
@@ -1053,7 +1080,16 @@ pub fn show(parent: &impl IsA<gtk::Window>, initial_url: Option<&str>) {
         language: Rc::new(RefCell::new(
             RESPONSE_LANGUAGES[selected_language].1.to_owned(),
         )),
+        reviewer_notes: Rc::new(RefCell::new(String::new())),
     };
+    {
+        let notes = screen.reviewer_notes.clone();
+        note_input.buffer().connect_changed(move |buffer| {
+            *notes.borrow_mut() = buffer.text(
+                &buffer.start_iter(), &buffer.end_iter(), false,
+            ).to_string();
+        });
+    }
     {
         let language = screen.language.clone();
         let status = screen.status.clone();
@@ -1088,6 +1124,7 @@ pub fn show(parent: &impl IsA<gtk::Window>, initial_url: Option<&str>) {
         let repo_settings = settings.repositories;
         let list = list.clone();
         let load_button = load.clone();
+        let last_loaded_url = Rc::new(RefCell::new(None::<String>));
         load.connect_clicked(move |_| {
             if screen.analyzing.get() { return; }
             let Some(repository) = repo_settings.get(repos.selected() as usize) else {
@@ -1095,6 +1132,9 @@ pub fn show(parent: &impl IsA<gtk::Window>, initial_url: Option<&str>) {
                 return;
             };
             let address = url.text().to_string();
+            let address_for_ui = address.clone();
+            let last_loaded_url = last_loaded_url.clone();
+            let note_input = note_input.clone();
             let pat = if token.text().is_empty() {
                 std::env::var("AZURE_DEVOPS_PAT").unwrap_or_default()
             } else {
@@ -1119,6 +1159,11 @@ pub fn show(parent: &impl IsA<gtk::Window>, initial_url: Option<&str>) {
                 match receiver.try_recv() {
                     Ok(Ok(loaded)) => {
                         load_button.set_sensitive(true);
+                        if last_loaded_url.borrow().as_deref() != Some(&address_for_ui) {
+                            // Never leak reviewer assumptions into a different PR.
+                            note_input.buffer().set_text("");
+                        }
+                        *last_loaded_url.borrow_mut() = Some(address_for_ui.clone());
                         show_groups(&list, &screen, loaded);
                         glib::ControlFlow::Break
                     }
