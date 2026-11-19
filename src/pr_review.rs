@@ -117,11 +117,13 @@ fn find_remote(repo: &Path, location: &PrLocation) -> Result<String> {
     let project = location.project.to_ascii_lowercase();
     let name = location.repository.to_ascii_lowercase();
     let https = format!("/{org}/{project}/_git/{name}");
-    let ssh = format!("/v3/{org}/{project}/{name}");
+    let ssh = format!("v3/{org}/{project}/{name}");
     for remote in names.lines() {
         let url = git_output(repo, &["remote", "get-url", remote])?
             .trim_end_matches(".git").to_ascii_lowercase();
-        if url.ends_with(&https) || url.ends_with(&ssh) {
+        if url.ends_with(&https) || url.ends_with(&format!(":{ssh}"))
+            || url.ends_with(&format!("/{ssh}"))
+        {
             return Ok(remote.to_owned());
         }
     }
