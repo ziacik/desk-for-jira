@@ -177,7 +177,11 @@ fn fetch_refs(repo: &Path, location: &PrLocation, source: &str, target: &str) ->
         "fetch", "--no-tags", &remote,
         &format!("+{target}:{base}"), &format!("+{source}:{head}"),
     ])?;
-    Ok((base, head))
+    // Pin the precise commits as immutable IDs. The shared PR refs can change
+    // on a later fetch, including while an older review window remains open.
+    let base_oid = git_output(repo, &["rev-parse", "--verify", &base])?;
+    let head_oid = git_output(repo, &["rev-parse", "--verify", &head])?;
+    Ok((base_oid, head_oid))
 }
 
 fn groups_for_paths(paths: Vec<String>) -> Vec<ChangeGroup> {
