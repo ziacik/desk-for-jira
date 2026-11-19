@@ -431,6 +431,7 @@ fn show_groups(list: &gtk::Box, screen: &ReviewScreen, loaded: Loaded) {
 }
 
 pub fn show(parent: &impl IsA<gtk::Window>, initial_url: Option<&str>) {
+    let parent_window: &gtk::Window = parent.as_ref();
     let settings = match preferences::load_git() {
         Ok(settings) => settings,
         Err(error) => {
@@ -440,10 +441,10 @@ pub fn show(parent: &impl IsA<gtk::Window>, initial_url: Option<&str>) {
     };
     let dialog = gtk::Window::builder()
         .title("PR Review")
-        .transient_for(parent)
+        .transient_for(parent_window)
         .modal(true)
-        .default_width((parent.width() * 85 / 100).max(820))
-        .default_height((parent.height() * 85 / 100).max(600))
+        .default_width((parent_window.width() * 85 / 100).max(820))
+        .default_height((parent_window.height() * 85 / 100).max(600))
         .build();
     dialog::close_on_escape(&dialog);
     let cancelled = Arc::new(AtomicBool::new(false));
