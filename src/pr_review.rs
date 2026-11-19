@@ -22,7 +22,7 @@ use gtk::glib;
 use reqwest::blocking::{Client, RequestBuilder};
 use serde_json::Value;
 
-use crate::{dialog, preferences};
+use crate::{codex_ui, dialog, preferences};
 
 /// Labels shown in the UI and language names used in the Codex prompt.
 const RESPONSE_LANGUAGES: [(&str, &str); 9] = [
@@ -491,7 +491,7 @@ fn clear(box_: &gtk::Box) {
 #[derive(Clone)]
 struct GroupRow {
     status: gtk::Label,
-    explanation: gtk::Label,
+    explanation: gtk::Box,
     activity: gtk::Label,
     activity_details: gtk::Expander,
     activity_lines: Rc<RefCell<Vec<String>>>,
@@ -545,7 +545,7 @@ impl ReviewScreen {
             row.analyze.set_sensitive(false);
             if selected.contains(&index) {
                 row.status.set_text("Queued for Codex analysis…");
-                row.explanation.set_text("");
+                clear(&row.explanation);
                 row.reset_activity();
             }
         }
@@ -597,11 +597,12 @@ impl ReviewScreen {
                                 Ok(text) => {
                                     let (status, _) = summary(&text);
                                     row.status.set_text(status);
-                                    row.explanation.set_text(&text);
+                                    codex_ui::show_markdown(&row.explanation, &text);
                                 }
                                 Err(error) => {
                                     row.status.set_text("Not verified · manual review");
-                                    row.explanation.set_text(&error);
+                                    clear(&row.explanation);
+                                    row.explanation.append(&label(&error));
                                     row.append_activity(&format!("Stopped: {error}"));
                                 }
                             }
@@ -616,7 +617,8 @@ impl ReviewScreen {
                                 && let Some(row) = screen.rows.borrow().get(*index)
                             {
                                 row.status.set_text("Not verified · manual review");
-                                row.explanation.set_text("Analysis stopped before this group was reviewed.");
+                                clear(&row.explanation);
+                                row.explanation.append(&label("Analysis stopped before this group was reviewed."));
                             }
                         }
                         screen.analyzing.set(false);
@@ -690,8 +692,8 @@ fn show_groups(list: &gtk::Box, screen: &ReviewScreen, loaded: Loaded) {
         let status = label("Not analyzed · manual review required");
         status.add_css_class("dim-label");
         row.append(&status);
-        let explanation = label("");
-        explanation.set_selectable(true);
+        let explanation = gtk::Box::new(gtk::Orientation::Vertical, 7);
+        explanation.add_css_class("codex-chat-body");
         row.append(&explanation);
         let activity = label("");
         activity.set_selectable(true);
