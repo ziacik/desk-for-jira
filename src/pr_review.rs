@@ -224,7 +224,9 @@ fn review_worktree(loaded: &Loaded, repo_name: &str, root: &Path, setup: &str, r
 
 fn create_pr_worktree(loaded: &Loaded, spec: &ReviewWorktree) -> Result<(String, bool)> {
     if spec.ready {
-        return Ok((String::new(), false));
+        let log = if spec.run_setup { git::run_setup(&spec.path, &spec.setup)? }
+            else { String::new() };
+        return Ok((log, false));
     }
     if spec.path.exists() {
         // If setup failed after Git succeeded, retry only the setup command;
@@ -1027,9 +1029,9 @@ fn show_groups(list: &gtk::Box, screen: &ReviewScreen, loaded: Loaded) {
             spec.path.display(),
         ));
         screen.worktree_info.set_visible(true);
-        screen.worktree_controls.set_visible(!spec.ready);
-        screen.worktree_create.set_label("Create worktree");
-        screen.worktree_create.set_sensitive(!spec.ready);
+        screen.worktree_controls.set_visible(true);
+        screen.worktree_create.set_label(if spec.ready { "Run setup again" } else { "Create worktree" });
+        screen.worktree_create.set_sensitive(true);
         screen.worktree_setup.set_text(&spec.setup);
         screen.worktree_run_setup.set_active(spec.run_setup);
     } else {
@@ -1327,7 +1329,6 @@ pub fn show(parent: &impl IsA<gtk::Window>, initial_url: Option<&str>) {
                 screen.status.set_text("Load a PR and its Git revisions first.");
                 return;
             };
-            if spec.ready { return; }
             spec.setup = screen.worktree_setup.text().to_string();
             spec.run_setup = screen.worktree_run_setup.is_active();
             screen.worktree_create.set_sensitive(false);
@@ -1348,8 +1349,8 @@ pub fn show(parent: &impl IsA<gtk::Window>, initial_url: Option<&str>) {
                 match receiver.try_recv() {
                     Ok(Ok((log, _created_branch))) => {
                         load.set_sensitive(true);
-                        screen.worktree_create.set_sensitive(false);
-                        screen.worktree_controls.set_visible(false);
+                        screen.worktree_create.set_sensitive(true);
+                        screen.worktree_create.set_label("Run setup again");
                         screen.worktree_info.set_text(&format!(
                             "PR worktree ready · {}", spec.path.display(),
                         ));
@@ -1371,7 +1372,7 @@ pub fn show(parent: &impl IsA<gtk::Window>, initial_url: Option<&str>) {
                             match preferences::load_git() {
                                 Ok(mut settings) => {
                                     if let Some(repo) = settings.repositories.iter_mut()
-                                        .find(|repo| repo.path == repo_path.to_string_lossy())
+                                        .find(|repo| repo.path == repo_path.to_string_lossy().as_ref())
                                     {
                                         repo.setup = script.clone();
                                         if let Err(error) = preferences::save_git(&settings) {
@@ -1640,7 +1641,7 @@ mod tests {
             git_error: Some("Git not loaded".into()),
         };
         assert!(review_worktree(&loaded, "repo", Path::new("/tmp"), "", false).is_err());
-        assert_eq!(group_scope(&loaded, 0).contains("src/a.rs"), true);
+        assert!(group_scope(&loaded, 0).contains("src/a.rs"));
     }
 
     #[test]
