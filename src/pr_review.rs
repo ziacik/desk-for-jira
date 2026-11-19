@@ -24,6 +24,19 @@ use serde_json::Value;
 
 use crate::{dialog, preferences};
 
+/// Labels shown in the UI and language names used in the Codex prompt.
+const RESPONSE_LANGUAGES: [(&str, &str); 9] = [
+    ("English", "English"),
+    ("Slovenčina", "Slovak"),
+    ("Čeština", "Czech"),
+    ("Deutsch", "German"),
+    ("Français", "French"),
+    ("Español", "Spanish"),
+    ("Polski", "Polish"),
+    ("Українська", "Ukrainian"),
+    ("Italiano", "Italian"),
+];
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct PrLocation {
     org: String,
@@ -277,7 +290,7 @@ enum PipeMessage {
 }
 
 fn analyze(
-    loaded: &Loaded, group: &ChangeGroup, cancelled: &AtomicBool,
+    loaded: &Loaded, group: &ChangeGroup, language: &str, cancelled: &AtomicBool,
     progress: impl Fn(String),
 ) -> Result<String> {
     if loaded.git_error.is_some() { bail!("PR revisions have not been fetched"); }
@@ -309,14 +322,17 @@ fn analyze(
          TRIAGE: ROUTINE, TRIAGE: REVIEW, TRIAGE: RISK. \
          Use ROUTINE ONLY when every change in this group is convincingly mechanical \
          and consistent, with no unresolved doubt. If evidence is incomplete choose REVIEW. \
-         Then give a concise explanation in plain English, identifying specific files and \
-         why this classification is justified. Flag risks precisely; never claim to have \
+         Keep that first classification line in English exactly as specified. \
+         Write the explanation, findings and recommendations in {language}, identifying specific files and \
+         why this classification is justified. Keep identifiers and paths unchanged. \
+         Flag risks precisely; never claim to have \
          executed tests unless you have. Do not approve the PR or publish comments.\n\
          Directory: {directory}\nChanged files: {count}\n\nDIFF:\n{diff}",
         head = loaded.head_ref,
         base = loaded.base_ref,
         directory = group.directory,
         count = group.files.len(),
+        language = language,
     );
     if cancelled.load(Ordering::Relaxed) { bail!("Analysis stopped"); }
     progress(format!("Diff ready ({} KiB). Starting Codex…", output.stdout.len() / 1024));
@@ -507,6 +523,7 @@ struct ReviewScreen {
     status: gtk::Label,
     analyze_all: gtk::Button,
     stop: gtk::Button,
+    language: Rc<RefCell<String>>,
 }
 
 enum AnalysisEvent {
@@ -533,6 +550,8 @@ impl ReviewScreen {
             }
         }
         let total = selected.len();
+        // One language for the full batch; a changed preference applies to the next run.
+        let language = self.language.borrow().clone();
         let queued = selected.clone();
         let (sender, receiver) = mpsc::channel();
         let cancelled = self.cancelled.clone();
@@ -540,7 +559,7 @@ impl ReviewScreen {
             for index in selected {
                 if cancelled.load(Ordering::Relaxed) { break; }
                 if sender.send(AnalysisEvent::Started(index)).is_err() { break; }
-                let result = analyze(&loaded, &loaded.groups[index], &cancelled, |message| {
+                let result = analyze(&loaded, &loaded.groups[index], &language, &cancelled, |message| {
                     let _ = sender.send(AnalysisEvent::Progress(index, message));
                 }).map_err(|error| error.to_string());
                 if sender.send(AnalysisEvent::Finished(index, result)).is_err() { break; }
@@ -747,6 +766,17 @@ pub fn show(parent: &impl IsA<gtk::Window>, initial_url: Option<&str>) {
     options.append(&label("Local repository"));
     options.append(&repos);
     root.append(&options);
+    let language_labels: Vec<&str> = RESPONSE_LANGUAGES.iter()
+        .map(|(label, _)| *label).collect();
+    let language_dropdown = gtk::DropDown::from_strings(&language_labels);
+    let selected_language = RESPONSE_LANGUAGES.iter()
+        .position(|(_, code)| *code == settings.pr_review_language)
+        .unwrap_or(0);
+    language_dropdown.set_selected(selected_language as u32);
+    let language_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    language_row.append(&label("AI response language"));
+    language_row.append(&language_dropdown);
+    root.append(&language_row);
     let token = gtk::PasswordEntry::new();
     token.set_show_peek_icon(true);
     token.set_placeholder_text(Some("Azure DevOps Code (Read) PAT (or AZURE_DEVOPS_PAT environment variable)"));
@@ -786,7 +816,24 @@ pub fn show(parent: &impl IsA<gtk::Window>, initial_url: Option<&str>) {
         status: status.clone(),
         analyze_all: analyze_all.clone(),
         stop: stop.clone(),
+        language: Rc::new(RefCell::new(
+            RESPONSE_LANGUAGES[selected_language].1.to_owned(),
+        )),
     };
+    {
+        let language = screen.language.clone();
+        let status = screen.status.clone();
+        language_dropdown.connect_selected_notify(move |dropdown| {
+            let Some((_, code)) = RESPONSE_LANGUAGES.get(dropdown.selected() as usize) else {
+                return;
+            };
+            if language.borrow().as_str() == *code { return; }
+            *language.borrow_mut() = (*code).to_owned();
+            if let Err(error) = preferences::save_pr_review_language(code) {
+                status.set_text(&format!("Cannot save PR review language: {error}"));
+            }
+        });
+    }
     {
         let screen = screen.clone();
         stop.connect_clicked(move |_| {
