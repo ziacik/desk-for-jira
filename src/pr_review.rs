@@ -1211,6 +1211,33 @@ mod tests {
     }
 
     #[test]
+    fn review_prompts_include_pr_intent_and_reviewer_clarification() {
+        let loaded = Loaded {
+            title: "ART-123: Handle empty aggregate inputs".into(),
+            description: "Support aggregate query of empty input.".into(),
+            groups: vec![ChangeGroup {
+                directory: "src/dataprovider".into(),
+                files: vec!["src/dataprovider/query.ts".into()],
+            }],
+            repository: PathBuf::from("/tmp/dummy"),
+            base_ref: "refs/desk-for-jira/pr-1/base".into(),
+            head_ref: "refs/desk-for-jira/pr-1/head".into(),
+            git_error: None,
+        };
+        let note = "The aggregate produces an output row even when source rows are absent.";
+        let fast = fast_prompt(&loaded, &[(0, "diff --git a/x b/x".into())], "Slovak", note);
+        let deep = deep_prompt(&loaded, &loaded.groups[0], "diff --git a/x b/x", "Slovak", note);
+        for prompt in [fast, deep] {
+            assert!(prompt.contains("ART-123"));
+            assert!(prompt.contains("Support aggregate query of empty input"));
+            assert!(prompt.contains(note));
+            assert!(prompt.contains("unit tests"));
+            assert!(prompt.contains("pre-existing"));
+            assert!(prompt.contains("base"));
+        }
+    }
+
+    #[test]
     fn fast_batches_limit_count_and_bytes_without_truncating_diffs() {
         let input: Vec<(usize, String)> = (0..20)
             .map(|index| (index, "a".repeat(2_000))).collect();
