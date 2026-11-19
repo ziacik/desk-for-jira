@@ -13,6 +13,7 @@ pub struct DetailRender {
     pub images: ImageSlots,
     pub comments: gtk::Box,
     pub children: gtk::Box,
+    pub local_labels: gtk::Box,
 }
 
 fn section_heading(title: &str, icon: &str, count: Option<usize>) -> gtk::Box {
@@ -174,6 +175,14 @@ pub fn render(
     let kind_badge = gtk::Label::new(Some(kind_label));
     kind_badge.add_css_class("detail-kind");
     eyebrow.append(&kind_badge);
+
+    // Keep locally assigned labels next to the Jira issue type, using the
+    // otherwise unused space in the top row instead of a separate row.
+    let local_labels = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    local_labels.add_css_class("detail-local-labels");
+    local_labels.set_hexpand(true);
+    local_labels.set_valign(gtk::Align::Center);
+    eyebrow.append(&local_labels);
     header.append(&eyebrow);
 
     let summary = gtk::Label::new(Some(&issue.summary));
@@ -327,7 +336,7 @@ pub fn render(
     comments_section.append(&comments);
     content.append(&comments_section);
 
-    DetailRender { images: slots, comments, children }
+    DetailRender { images: slots, comments, children, local_labels }
 }
 
 pub fn show_comments_loading(container: &gtk::Box) {

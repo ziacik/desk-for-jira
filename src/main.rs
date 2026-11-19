@@ -1,3 +1,4 @@
+mod chip_wrap;
 mod codex;
 mod codex_session;
 mod codex_ui;

@@ -25,6 +25,8 @@ pub struct BoardSettings {
     pub grouping_version: u8,
     #[serde(default)]
     pub pinned_issues: Vec<String>,
+    #[serde(default)]
+    pub local_labels: HashMap<String, Vec<String>>,
 }
 /// Visibility of the Git worktree panel for a Jira project and workflow status ID.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -86,6 +88,32 @@ fn category_position(category: StatusCategory) -> u8 {
 }
 
 impl BoardSettings {
+    /// Locally assigned labels never modify the issue in Jira.
+    pub fn add_local_label(&mut self, key: &str, text: &str) -> bool {
+        let text = text.trim();
+        if key.is_empty() || text.is_empty() {
+            return false;
+        }
+        let labels = self.local_labels.entry(key.to_owned()).or_default();
+        if labels.iter().any(|label| label.eq_ignore_ascii_case(text)) {
+            return false;
+        }
+        labels.push(text.to_owned());
+        labels.sort_by_key(|label| label.to_lowercase());
+        true
+    }
+
+    pub fn remove_local_label(&mut self, key: &str, text: &str) -> bool {
+        let Some(labels) = self.local_labels.get_mut(key) else { return false };
+        let previous = labels.len();
+        labels.retain(|label| label != text);
+        let changed = labels.len() != previous;
+        if labels.is_empty() {
+            self.local_labels.remove(key);
+        }
+        changed
+    }
+
     /// Toggle the pinned state of one Jira issue, preserving pin order.
     pub fn toggle_pinned(&mut self, key: &str) -> bool {
         if let Some(index) = self.pinned_issues.iter().position(|pinned| pinned == key) {
@@ -605,6 +633,26 @@ pub fn save_git(settings: &GitSettings) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn local_labels_are_per_ticket_and_round_trip_with_legacy_settings() {
+        let mut board = BoardSettings::default();
+        assert!(board.add_local_label("ART-1", "requested more info"));
+        assert!(board.add_local_label("ART-2", "review later"));
+        assert!(!board.add_local_label("ART-1", "  REQUESTED MORE INFO  "));
+        assert_eq!(board.local_labels["ART-1"], ["requested more info"]);
+        assert!(board.remove_local_label("ART-1", "requested more info"));
+        assert!(!board.local_labels.contains_key("ART-1"));
+        assert!(board.local_labels.contains_key("ART-2"));
+
+        let restored: BoardSettings = serde_json::from_str(
+            &serde_json::to_string(&board).unwrap(),
+        ).unwrap();
+        assert_eq!(restored.local_labels, board.local_labels);
+
+        let old: BoardSettings = serde_json::from_str(r#"{"pinned_issues":["ART-3"]}"#).unwrap();
+        assert!(old.local_labels.is_empty());
+    }
 
     #[test]
     fn activity_is_scoped_to_site_and_bounded() {

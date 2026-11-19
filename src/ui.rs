@@ -11,6 +11,7 @@ use adw::prelude::*;
 use gtk::glib;
 
 use crate::{
+    chip_wrap,
     development,
     pull_requests,
     issue_detail,
@@ -63,6 +64,7 @@ struct Ui {
     pinned_scroll: gtk::ScrolledWindow,
     pinned_count: gtk::Label,
     detail_box: gtk::Box,
+    local_label_chips: Rc<RefCell<chip_wrap::ChipWrap>>,
     development: development::DevelopmentPanel,
     pull_requests: pull_requests::PullRequestsPanel,
     comments_box: Rc<RefCell<gtk::Box>>,
@@ -789,7 +791,9 @@ fn build_ui(app: &adw::Application) {
         pending_direct_issue: Rc::new(RefCell::new(None)),
         search, center_title,
         board_box, pinned_section, pinned_box, pinned_scroll, pinned_count,
-        detail_box, development, pull_requests, comments_box: Rc::new(RefCell::new(gtk::Box::new(gtk::Orientation::Vertical, 10))),
+        detail_box,
+        local_label_chips: Rc::new(RefCell::new(chip_wrap::ChipWrap::default())),
+        development, pull_requests, comments_box: Rc::new(RefCell::new(gtk::Box::new(gtk::Orientation::Vertical, 10))),
         comments_request: Rc::new(Cell::new(0)),
         children_box: Rc::new(RefCell::new(gtk::Box::new(gtk::Orientation::Vertical, 9))),
         children_request: Rc::new(Cell::new(0)),
@@ -3212,6 +3216,9 @@ fn visible_board_groups<'a>(
             && !issue.key.to_lowercase().contains(&text)
             && !issue.summary.to_lowercase().contains(&text)
             && !issue.status.to_lowercase().contains(&text)
+            && !settings.local_labels.get(&issue.key).is_some_and(|labels| {
+                labels.iter().any(|label| label.to_lowercase().contains(&text))
+            })
             && !issue.epic.as_ref().is_some_and(|epic| {
                 epic.key.to_lowercase().contains(&text)
                     || epic.summary.to_lowercase().contains(&text)
@@ -3706,6 +3713,16 @@ fn issue_button(
     summary.add_css_class("ticket-summary");
     content.append(&summary);
 
+    if let Some(labels) = ui.state.borrow().settings.local_labels.get(&issue.key)
+        && !labels.is_empty()
+    {
+        let chips = chip_wrap::ChipWrap::default();
+        chips.add_css_class("ticket-local-labels");
+        chips.set_hexpand(true);
+        populate_local_label_chips(&chips, labels);
+        content.append(&chips);
+    }
+
     if let Some(epic) = &issue.epic {
         let epic_row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
         epic_row.add_css_class("ticket-epic");
@@ -4179,11 +4196,146 @@ fn open_issue(ui: &Ui, issue: &Issue, source_button: Option<&gtk::Button>) {
     }
 }
 
+
+fn populate_local_label_chips(flow: &chip_wrap::ChipWrap, labels: &[String]) {
+    flow.clear();
+    for text in labels {
+        let pill = gtk::Label::new(Some(text));
+        pill.add_css_class("local-label-pill");
+        pill.set_max_width_chars(25);
+        pill.set_ellipsize(gtk::pango::EllipsizeMode::End);
+        pill.set_tooltip_text(Some(text));
+        flow.append(&pill);
+    }
+}
+
+fn populate_editable_local_label_chips(
+    flow: &chip_wrap::ChipWrap, labels: &[String], ui: &Ui, key: &str,
+) {
+    // The details and the board share the same content-sized wrapping layout,
+    // but only detail chips expose a direct remove action.
+    flow.clear();
+    for text in labels {
+        let pill = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+        pill.add_css_class("local-label-pill");
+        pill.add_css_class("local-label-editable");
+
+        let name = gtk::Label::new(Some(text));
+        name.set_max_width_chars(25);
+        name.set_ellipsize(gtk::pango::EllipsizeMode::End);
+        name.set_tooltip_text(Some(text));
+        pill.append(&name);
+
+        let remove = gtk::Button::from_icon_name("window-close-symbolic");
+        remove.add_css_class("flat");
+        remove.add_css_class("local-label-remove");
+        remove.set_tooltip_text(Some(&format!("Remove local label: {text}")));
+        let ui = ui.clone();
+        let key = key.to_owned();
+        let text = text.clone();
+        remove.connect_clicked(move |_| {
+            change_local_label(&ui, &key, &text, false);
+        });
+        pill.append(&remove);
+        flow.append(&pill);
+    }
+    // Adding is part of the same wrapping row: '+' follows the last chip,
+    // not the right edge of the inspector.
+    flow.append(&local_label_menu(ui, key));
+}
+
+fn change_local_label(ui: &Ui, key: &str, label: &str, add: bool) -> bool {
+    let (site, mut settings) = {
+        let state = ui.state.borrow();
+        let Some(account) = &state.account else { return false };
+        (account.base_url.clone(), state.settings.clone())
+    };
+    let changed = if add {
+        settings.add_local_label(key, label)
+    } else {
+        settings.remove_local_label(key, label)
+    };
+    if !changed {
+        return false;
+    }
+    if let Err(error) = preferences::save(&site, &settings) {
+        show_error(ui, &format!("Could not save local labels: {error}"));
+        return false;
+    }
+    let labels = settings.local_labels.get(key).cloned().unwrap_or_default();
+    ui.state.borrow_mut().settings = settings;
+    if ui.selected_issue.borrow().as_deref() == Some(key) {
+        populate_editable_local_label_chips(&ui.local_label_chips.borrow(), &labels, ui, key);
+    }
+    let action = if add {
+        format!("Added local label: {}", label.trim())
+    } else {
+        format!("Removed local label: {label}")
+    };
+    if let Err(error) = preferences::record_activity(&site, key, &action) {
+        show_error(ui, &format!("Could not save activity history: {error}"));
+    }
+    render_board(ui, &ui.state.borrow());
+    true
+}
+
+fn local_label_menu(ui: &Ui, key: &str) -> gtk::MenuButton {
+    let menu = gtk::MenuButton::new();
+    menu.set_icon_name("list-add-symbolic");
+    menu.add_css_class("flat");
+    menu.set_tooltip_text(Some("Add a local label"));
+
+    let popover = gtk::Popover::new();
+    let content = gtk::Box::new(gtk::Orientation::Vertical, 10);
+    content.set_margin_top(12);
+    content.set_margin_bottom(12);
+    content.set_margin_start(12);
+    content.set_margin_end(12);
+    content.set_size_request(230, -1);
+    let title = gtk::Label::new(Some("Add local label"));
+    title.set_xalign(0.0);
+    title.add_css_class("heading");
+    content.append(&title);
+
+    let input_row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    let entry = gtk::Entry::new();
+    entry.set_placeholder_text(Some("New label"));
+    entry.set_hexpand(true);
+    entry.set_max_length(60);
+    input_row.append(&entry);
+    let add = gtk::Button::with_label("Add");
+    add.add_css_class("suggested-action");
+    input_row.append(&add);
+    content.append(&input_row);
+
+    let ui = ui.clone();
+    let key = key.to_owned();
+    let entry_for_click = entry.clone();
+    add.connect_clicked(move |_| {
+        let label = entry_for_click.text().to_string();
+        if change_local_label(&ui, &key, &label, true) {
+            entry_for_click.set_text("");
+        }
+    });
+    entry.connect_activate(move |_| add.emit_clicked());
+    popover.set_child(Some(&content));
+    menu.set_popover(Some(&popover));
+    menu
+}
+
 fn render_issue_detail(ui: &Ui, issue: &Issue, base_url: &str) {
     let on_issue_link = issue_link_handler(ui);
     let detail = issue_detail::render(
         &ui.detail_box, issue, base_url, &ui.detail_actions, &on_issue_link,
     );
+    let chips = chip_wrap::ChipWrap::default();
+    chips.set_hexpand(true);
+    let labels = ui.state.borrow().settings.local_labels.get(&issue.key)
+        .cloned().unwrap_or_default();
+    populate_editable_local_label_chips(&chips, &labels, ui, &issue.key);
+    detail.local_labels.append(&chips);
+    *ui.local_label_chips.borrow_mut() = chips;
+
     // Development and linked PRs stay above the ticket properties.
     // issue_detail::render clears old children, so reinsert the persistent panel.
     if let Some(hero) = ui.detail_box.first_child() {
@@ -4685,6 +4837,17 @@ mod scope_tests {
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].1.len(), 1);
         assert_eq!(groups[0].1[0].key, "ART-2");
+    }
+
+    #[test]
+    fn searches_issues_by_local_label() {
+        let mut settings = board_settings();
+        settings.add_local_label("ART-2", "requested more info");
+        let issues = [issue("ART-1", "1", "First issue"), issue("ART-2", "1", "Second issue")];
+        let matches = visible_board_groups(&settings, &issues, "MORE INFO");
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].1.len(), 1);
+        assert_eq!(matches[0].1[0].key, "ART-2");
     }
 
     #[test]
