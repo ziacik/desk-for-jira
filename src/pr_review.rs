@@ -427,7 +427,7 @@ fn show_groups(list: &gtk::Box, screen: &ReviewScreen, loaded: Loaded) {
     }
 }
 
-pub fn show(parent: &adw::ApplicationWindow) {
+pub fn show(parent: &gtk::Window, initial_url: Option<&str>) {
     let settings = match preferences::load_git() {
         Ok(settings) => settings,
         Err(error) => {
@@ -460,6 +460,7 @@ pub fn show(parent: &adw::ApplicationWindow) {
     root.append(&title);
     let url = gtk::Entry::new();
     url.set_placeholder_text(Some("https://dev.azure.com/org/project/_git/repo/pullrequest/123"));
+    if let Some(initial_url) = initial_url { url.set_text(initial_url); }
     root.append(&url);
 
     let repo_names: Vec<String> = settings.repositories.iter()
