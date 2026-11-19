@@ -824,6 +824,13 @@ struct ReviewScreen {
     stop: gtk::Button,
     language: Rc<RefCell<String>>,
     reviewer_notes: Rc<RefCell<String>>,
+    worktree_create: gtk::Button,
+    worktree_info: gtk::Label,
+    worktree_setup: gtk::Entry,
+    worktree_run_setup: gtk::CheckButton,
+    worktree_controls: gtk::Box,
+    worktree_log: gtk::Expander,
+    worktree_log_label: gtk::Label,
 }
 
 enum AnalysisEvent {
@@ -836,7 +843,12 @@ impl ReviewScreen {
     fn analyze_groups(&self, selected: Vec<usize>, deep: bool) {
         if self.analyzing.get() || selected.is_empty() { return; }
         let Some(loaded) = self.loaded.borrow().clone() else { return };
-        if loaded.git_error.is_some() { return; }
+        if loaded.git_error.is_some()
+            || !loaded.worktree.as_ref().is_some_and(|tree| tree.ready && tree.path.is_dir())
+        {
+            self.status.set_text("Create the PR worktree before analyzing.");
+            return;
+        }
         self.cancelled.store(false, Ordering::Relaxed);
         self.analyzing.set(true);
         self.analyze_all.set_sensitive(false);
@@ -968,7 +980,8 @@ impl ReviewScreen {
                         screen.stop.set_sensitive(false);
                         screen.cancelled.store(false, Ordering::Relaxed);
                         let can_analyze = screen.loaded.borrow().as_ref()
-                            .is_some_and(|loaded| loaded.git_error.is_none());
+                            .is_some_and(|loaded| loaded.git_error.is_none()
+                                && loaded.worktree.as_ref().is_some_and(|tree| tree.ready && tree.path.is_dir()));
                         screen.analyze_all.set_sensitive(can_analyze);
                         for row in screen.rows.borrow().iter() {
                             row.set_sensitive(can_analyze);
@@ -1004,7 +1017,25 @@ fn show_groups(list: &gtk::Box, screen: &ReviewScreen, loaded: Loaded) {
         "{} · {} changed files in {} directory groups",
         loaded.title, files, loaded.groups.len(),
     ));
-    let can_analyze = loaded.git_error.is_none();
+    let can_analyze = loaded.git_error.is_none()
+        && loaded.worktree.as_ref().is_some_and(|tree| tree.ready && tree.path.is_dir());
+    screen.worktree_log.set_visible(false);
+    if let Some(spec) = loaded.worktree.as_ref() {
+        screen.worktree_info.set_text(&format!(
+            "{} · {}",
+            if spec.ready { "PR worktree ready" } else { "PR worktree required before review" },
+            spec.path.display(),
+        ));
+        screen.worktree_info.set_visible(true);
+        screen.worktree_controls.set_visible(!spec.ready);
+        screen.worktree_create.set_label("Create worktree");
+        screen.worktree_create.set_sensitive(!spec.ready);
+        screen.worktree_setup.set_text(&spec.setup);
+        screen.worktree_run_setup.set_active(spec.run_setup);
+    } else {
+        screen.worktree_info.set_visible(false);
+        screen.worktree_controls.set_visible(false);
+    }
     if !loaded.description.trim().is_empty() {
         let description = label(&loaded.description);
         description.set_selectable(true);
@@ -1180,6 +1211,28 @@ pub fn show(parent: &impl IsA<gtk::Window>, initial_url: Option<&str>) {
     );
     hint.add_css_class("dim-label");
     root.append(&hint);
+    let worktree_info = label("");
+    worktree_info.set_selectable(true);
+    worktree_info.set_visible(false);
+    root.append(&worktree_info);
+    let worktree_controls = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    worktree_controls.set_visible(false);
+    let worktree_run_setup = gtk::CheckButton::with_label("Run repository setup once after creating");
+    worktree_controls.append(&worktree_run_setup);
+    let worktree_setup = gtk::Entry::new();
+    worktree_setup.set_hexpand(true);
+    worktree_setup.set_placeholder_text(Some("Setup command (e.g. npm install)"));
+    worktree_controls.append(&worktree_setup);
+    let worktree_create = gtk::Button::with_label("Create worktree");
+    worktree_create.add_css_class("suggested-action");
+    worktree_controls.append(&worktree_create);
+    root.append(&worktree_controls);
+    let worktree_log_label = label("");
+    worktree_log_label.set_selectable(true);
+    let worktree_log = gtk::Expander::new(Some("Worktree setup output"));
+    worktree_log.set_child(Some(&worktree_log_label));
+    worktree_log.set_visible(false);
+    root.append(&worktree_log);
     let controls = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     let load = gtk::Button::with_label("Load PR");
     load.add_css_class("suggested-action");
@@ -1219,6 +1272,13 @@ pub fn show(parent: &impl IsA<gtk::Window>, initial_url: Option<&str>) {
             RESPONSE_LANGUAGES[selected_language].1.to_owned(),
         )),
         reviewer_notes: Rc::new(RefCell::new(String::new())),
+        worktree_create: worktree_create.clone(),
+        worktree_info: worktree_info.clone(),
+        worktree_setup: worktree_setup.clone(),
+        worktree_run_setup: worktree_run_setup.clone(),
+        worktree_controls: worktree_controls.clone(),
+        worktree_log: worktree_log.clone(),
+        worktree_log_label: worktree_log_label.clone(),
     };
     {
         let notes = screen.reviewer_notes.clone();
