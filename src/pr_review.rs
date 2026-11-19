@@ -3,7 +3,7 @@
 use std::{
     cell::{Cell, RefCell},
     collections::BTreeMap,
-    io::Write,
+    io::{BufRead, BufReader, Write},
     path::{Path, PathBuf},
     process::{Command, Stdio},
     rc::Rc,
@@ -13,7 +13,7 @@ use std::{
         Arc,
     },
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use adw::prelude::*;
@@ -213,8 +213,75 @@ fn load_pr(url: &str, token: &str, repository: PathBuf) -> Result<Loaded> {
     })
 }
 
-fn analyze(loaded: &Loaded, group: &ChangeGroup) -> Result<String> {
+#[derive(Debug, PartialEq, Eq)]
+enum CodexMessage {
+    Activity(String),
+    Answer(String),
+    Completed,
+    Failed(String),
+}
+
+fn short(value: &str, max: usize) -> String {
+    let mut chars = value.chars();
+    let summary: String = chars.by_ref().take(max).collect();
+    if chars.next().is_some() { format!("{summary}…") } else { summary }
+}
+
+/// Codex exec --json emits JSON Lines on stdout while the turn is running.
+/// Only the final agent message is used as the actual triage result.
+fn codex_message(event: &Value) -> Option<CodexMessage> {
+    match event["type"].as_str()? {
+        "thread.started" => Some(CodexMessage::Activity("Codex session started".into())),
+        "turn.started" => Some(CodexMessage::Activity("Waiting for model response…".into())),
+        "turn.completed" => Some(CodexMessage::Completed),
+        "turn.failed" => Some(CodexMessage::Failed(
+            event["error"]["message"].as_str().unwrap_or("Codex turn failed").to_owned(),
+        )),
+        "error" => Some(CodexMessage::Activity(format!(
+            "Codex notice: {}",
+            short(event["message"].as_str().unwrap_or("Unknown issue"), 180),
+        ))),
+        "item.started" | "item.updated" | "item.completed" => {
+            let item = &event["item"];
+            let finished = event["type"] == "item.completed";
+            match item["type"].as_str()? {
+                "agent_message" if finished => item["text"].as_str()
+                    .map(|text| CodexMessage::Answer(text.to_owned())),
+                "command_execution" => {
+                    let command = short(item["command"].as_str().unwrap_or("command"), 160);
+                    Some(CodexMessage::Activity(if finished {
+                        format!("Finished command: {command}")
+                    } else {
+                        format!("Running command: {command}")
+                    }))
+                }
+                "mcp_tool_call" => Some(CodexMessage::Activity(format!(
+                    "{} tool: {}",
+                    if finished { "Finished" } else { "Calling" },
+                    short(item["tool"].as_str().unwrap_or("unknown"), 100),
+                ))),
+                "web_search" => Some(CodexMessage::Activity("Looking up related context…".into())),
+                "reasoning" => Some(CodexMessage::Activity("Inspecting code and reasoning about changes…".into())),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+enum PipeMessage {
+    Stdout(String),
+    Stderr(String),
+    StdoutDone,
+    StderrDone,
+}
+
+fn analyze(
+    loaded: &Loaded, group: &ChangeGroup, cancelled: &AtomicBool,
+    progress: impl Fn(String),
+) -> Result<String> {
     if loaded.git_error.is_some() { bail!("PR revisions have not been fetched"); }
+    progress("Preparing complete Git diff…".into());
     let mut command = Command::new("git");
     command.arg("-C").arg(&loaded.repository).args([
         "diff", "--no-ext-diff", "--no-color", "--unified=4",
@@ -251,25 +318,137 @@ fn analyze(loaded: &Loaded, group: &ChangeGroup) -> Result<String> {
         directory = group.directory,
         count = group.files.len(),
     );
+    if cancelled.load(Ordering::Relaxed) { bail!("Analysis stopped"); }
+    progress(format!("Diff ready ({} KiB). Starting Codex…", output.stdout.len() / 1024));
     let mut child = Command::new("codex")
-        .args(["exec", "--sandbox", "read-only", "-"])
+        .args(["exec", "--json", "--sandbox", "read-only", "-"])
         .current_dir(&loaded.repository)
         .env_remove("AZURE_DEVOPS_PAT")
         .env_remove("AZURE_DEVOPS_EXT_PAT")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .spawn().context("Cannot launch Codex CLI")?;
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin.write_all(prompt.as_bytes()).context("Cannot send review context to Codex")?;
+        .spawn().context("Cannot launch Codex CLI (is codex in PATH?)")?;
+    let (sender, receiver) = mpsc::channel();
+    let stdout = child.stdout.take().context("Codex stdout unavailable")?;
+    let stderr = child.stderr.take().context("Codex stderr unavailable")?;
+    let stdout_sender = sender.clone();
+    thread::spawn(move || {
+        for line in BufReader::new(stdout).lines() {
+            match line {
+                Ok(line) => { if stdout_sender.send(PipeMessage::Stdout(line)).is_err() { break; } }
+                Err(error) => {
+                    let _ = stdout_sender.send(PipeMessage::Stderr(format!("Cannot read Codex output: {error}")));
+                    break;
+                }
+            }
+        }
+        let _ = stdout_sender.send(PipeMessage::StdoutDone);
+    });
+    let stderr_sender = sender.clone();
+    thread::spawn(move || {
+        for line in BufReader::new(stderr).lines() {
+            match line {
+                Ok(line) => { if stderr_sender.send(PipeMessage::Stderr(line)).is_err() { break; } }
+                Err(error) => {
+                    let _ = stderr_sender.send(PipeMessage::Stderr(format!("Cannot read Codex diagnostics: {error}")));
+                    break;
+                }
+            }
+        }
+        let _ = stderr_sender.send(PipeMessage::StderrDone);
+    });
+    drop(sender);
+    let Some(mut stdin) = child.stdin.take() else {
+        let _ = child.kill();
+        let _ = child.wait();
+        bail!("Codex stdin unavailable");
+    };
+    if let Err(error) = stdin.write_all(prompt.as_bytes()) {
+        let _ = child.kill();
+        let _ = child.wait();
+        bail!("Cannot send review context to Codex: {error}");
     }
-    let output = child.wait_with_output().context("Codex exited unexpectedly")?;
-    if !output.status.success() {
-        bail!("Codex: {}", String::from_utf8_lossy(&output.stderr).trim());
+    drop(stdin);
+
+    let mut answer = None;
+    let mut failure = None;
+    let mut turn_finished = false;
+    let mut stdout_done = false;
+    let mut stderr_done = false;
+    let mut diagnostics = Vec::new();
+    let started = Instant::now();
+    let mut last_event = Instant::now();
+    let mut last_notice = Instant::now();
+    loop {
+        if cancelled.load(Ordering::Relaxed) {
+            let _ = child.kill();
+            let _ = child.wait();
+            bail!("Analysis stopped by user");
+        }
+        if started.elapsed() > Duration::from_secs(600) {
+            let _ = child.kill();
+            let _ = child.wait();
+            bail!("Codex analysis timed out after 10 minutes; review this group manually");
+        }
+        match receiver.recv_timeout(Duration::from_millis(250)) {
+            Ok(PipeMessage::Stdout(line)) => {
+                last_event = Instant::now();
+                if let Ok(value) = serde_json::from_str::<Value>(&line)
+                    && let Some(message) = codex_message(&value)
+                {
+                    match message {
+                        CodexMessage::Activity(info) => progress(info),
+                        CodexMessage::Answer(text) => {
+                            progress("Codex has produced a review; finishing…".into());
+                            answer = Some(text);
+                        }
+                        CodexMessage::Completed => {
+                            turn_finished = true;
+                            progress("Codex turn completed".into());
+                        }
+                        CodexMessage::Failed(error) => failure = Some(error),
+                    }
+                }
+            }
+            Ok(PipeMessage::Stderr(line)) => {
+                if !line.trim().is_empty() {
+                    let text = short(line.trim(), 200);
+                    diagnostics.push(text.clone());
+                    if diagnostics.len() > 8 { diagnostics.remove(0); }
+                    progress(format!("Codex CLI: {text}"));
+                    last_event = Instant::now();
+                }
+            }
+            Ok(PipeMessage::StdoutDone) => stdout_done = true,
+            Ok(PipeMessage::StderrDone) => stderr_done = true,
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                stdout_done = true;
+                stderr_done = true;
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+        }
+        if last_event.elapsed() > Duration::from_secs(25)
+            && last_notice.elapsed() > Duration::from_secs(25)
+        {
+            progress("No new Codex events. Waiting for the model or CLI authentication…".into());
+            last_notice = Instant::now();
+        }
+        if let Some(status) = child.try_wait().context("Cannot check Codex process")?
+            && stdout_done && stderr_done
+        {
+            if let Some(error) = failure { bail!("Codex: {error}"); }
+            if !status.success() {
+                bail!("Codex failed (exit status: {status}). {}",
+                    diagnostics.join("\n"));
+            }
+            if !turn_finished {
+                bail!("Codex exited without a completed review turn");
+            }
+            let answer = answer.context("Codex completed without a review response")?;
+            return Ok(answer);
+        }
     }
-    let text = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-    if text.is_empty() { bail!("Codex returned an empty review"); }
-    Ok(text)
 }
 
 fn summary(text: &str) -> (&'static str, &'static str) {
