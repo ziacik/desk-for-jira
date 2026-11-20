@@ -1671,6 +1671,7 @@ pub fn show(parent: &impl IsA<gtk::Window>, initial_url: Option<&str>) {
             });
             let screen = screen.clone();
             let load = load.clone();
+            let list = list.clone();
             glib::timeout_add_local(Duration::from_millis(100), move || {
                 match receiver.try_recv() {
                     Ok(Ok((log, _created_branch))) => {
