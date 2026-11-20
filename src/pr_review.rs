@@ -1029,6 +1029,20 @@ enum GroupingEvent {
 }
 
 impl ReviewScreen {
+    fn restore_after_grouping_error(&self) {
+        let (can_organize, can_review) = self.loaded.borrow().as_ref().map_or(
+            (false, false),
+            |loaded| {
+                let ready = loaded.git_error.is_none()
+                    && loaded.worktree.as_ref().is_some_and(|tree| tree.ready && tree.path.is_dir());
+                (ready, ready && !loaded.groups.is_empty())
+            },
+        );
+        self.organize.set_sensitive(can_organize);
+        self.analyze_all.set_sensitive(can_review);
+        for row in self.rows.borrow().iter() { row.set_sensitive(can_review); }
+    }
+
     fn organize_groups(&self, list: &gtk::Box) {
         if self.analyzing.get() { return; }
         let Some(loaded) = self.loaded.borrow().clone() else { return };
@@ -1085,17 +1099,13 @@ impl ReviewScreen {
                             }
                             Ok(_) => {
                                 screen.status.set_text("PR grouping stopped.");
-                                screen.organize.set_sensitive(true);
+                                screen.restore_after_grouping_error();
                             }
                             Err(error) => {
                                 screen.status.set_text(&format!(
                                     "Could not organize PR changes: {error}. Retry grouping."
                                 ));
-                                screen.organize.set_sensitive(true);
-                                let can_review = screen.loaded.borrow().as_ref()
-                                    .is_some_and(|current| !current.groups.is_empty());
-                                screen.analyze_all.set_sensitive(can_review);
-                                for row in screen.rows.borrow().iter() { row.set_sensitive(can_review); }
+                                screen.restore_after_grouping_error();
                             }
                         }
                         return glib::ControlFlow::Break;
@@ -1105,7 +1115,7 @@ impl ReviewScreen {
                         screen.analyzing.set(false);
                         screen.cancelled.store(false, Ordering::Relaxed);
                         screen.stop.set_sensitive(false);
-                        screen.organize.set_sensitive(true);
+                        screen.restore_after_grouping_error();
                         screen.status.set_text("Codex grouping ended unexpectedly. Retry grouping.");
                         return glib::ControlFlow::Break;
                     }
@@ -1544,7 +1554,7 @@ pub fn show(parent: &impl IsA<gtk::Window>, initial_url: Option<&str>) {
     organize.set_sensitive(false);
     let analyze_all = gtk::Button::with_label("Quick triage all");
     analyze_all.set_sensitive(false);
-    let stop = gtk::Button::with_label("Stop analysis");
+    let stop = gtk::Button::with_label("Stop Codex");
     stop.add_css_class("flat");
     stop.set_sensitive(false);
     controls.append(&load);
