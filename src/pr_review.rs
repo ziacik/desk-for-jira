@@ -776,20 +776,33 @@ fn parse_fast_result(answer: &str, requested: &[usize]) -> Result<Vec<(usize, Re
     }).collect())
 }
 
-/// Existing CLI subprocess and JSONL progress mechanism shared by quick and deep review.
+#[derive(Clone, Copy)]
+enum CodexTask {
+    Organize,
+    Quick,
+    Deep,
+}
+
+/// Existing CLI subprocess and JSONL progress mechanism for grouping and review.
 fn run_codex(
-    loaded: &Loaded, prompt: &str, fast: bool, cancelled: &AtomicBool,
+    loaded: &Loaded, prompt: &str, task: CodexTask, cancelled: &AtomicBool,
     progress: impl Fn(String),
 ) -> Result<String> {
     if cancelled.load(Ordering::Relaxed) { bail!("Analysis stopped"); }
-    progress(if fast { "Starting fast Codex triage…" } else { "Starting deep Codex review…" }.into());
+    progress(match task {
+        CodexTask::Organize => "Codex is identifying logical change groups…",
+        CodexTask::Quick => "Starting fast Codex triage…",
+        CodexTask::Deep => "Starting deep Codex review…",
+    }.into());
     let worktree = loaded.worktree.as_ref()
         .filter(|tree| tree.ready && tree.path.is_dir())
         .context("Create the PR worktree before launching Codex")?;
     let mut command = Command::new("codex");
     // Tests may write caches and build outputs into the isolated review worktree.
     command.args(["exec", "--json", "--sandbox", "workspace-write"]);
-    if fast { command.args(["--config", "model_reasoning_effort=low"]); }
+    if matches!(task, CodexTask::Quick) {
+        command.args(["--config", "model_reasoning_effort=low"]);
+    }
     let mut child = command.arg("-")
         .current_dir(&worktree.path)
         .env_remove("AZURE_DEVOPS_PAT")
@@ -920,14 +933,14 @@ fn run_codex(
     }
 }
 
-/// Deep review is deliberately opt-in for one directory at a time.
+/// Deep review is deliberately opt-in for one logical change group at a time.
 fn analyze_deep(
     loaded: &Loaded, index: usize, language: &str,
     reviewer_notes: &str, cancelled: &AtomicBool, progress: impl Fn(String),
 ) -> Result<String> {
     progress("Codex is inspecting Git changes and related code…".into());
     let prompt = deep_prompt(loaded, index, language, reviewer_notes);
-    run_codex(loaded, &prompt, false, cancelled, progress)
+    run_codex(loaded, &prompt, CodexTask::Deep, cancelled, progress)
 }
 
 fn summary(text: &str) -> (&'static str, &'static str) {
@@ -1063,7 +1076,7 @@ impl ReviewScreen {
                             indices.iter().map(|&index| loaded.groups[index].files.len()).sum::<usize>()),
                     ));
                     let prompt = fast_prompt(&loaded, batch, &language, &reviewer_notes);
-                    let output = run_codex(&loaded, &prompt, true, &cancelled, |message| {
+                    let output = run_codex(&loaded, &prompt, CodexTask::Quick, &cancelled, |message| {
                         let _ = sender.send(AnalysisEvent::Progress(indices.clone(), message));
                     });
                     let results = match output {
@@ -1232,7 +1245,7 @@ fn show_groups(list: &gtk::Box, screen: &ReviewScreen, loaded: Loaded) {
         row.set_margin_end(10);
 
         let heading = gtk::Box::new(gtk::Orientation::Horizontal, 10);
-        let name = label(&format!("{} · {} files", group.directory, group.files.len()));
+        let name = label(&format!("{} · {} files", group.title, group.files.len()));
         name.set_hexpand(true);
         name.add_css_class("heading");
         heading.append(&name);
@@ -1242,10 +1255,13 @@ fn show_groups(list: &gtk::Box, screen: &ReviewScreen, loaded: Loaded) {
         heading.append(&analyze);
         let deep_review = gtk::Button::with_label("Deep review");
         deep_review.add_css_class("flat");
-        deep_review.set_tooltip_text(Some("Thorough Codex review of this directory (slower)"));
+        deep_review.set_tooltip_text(Some("Thorough Codex review of this logical change (slower)"));
         deep_review.set_sensitive(can_analyze);
         heading.append(&deep_review);
         row.append(&heading);
+        let purpose = label(&group.purpose);
+        purpose.add_css_class("dim-label");
+        row.append(&purpose);
 
         let status = label("Not analyzed · manual review required");
         status.add_css_class("dim-label");
