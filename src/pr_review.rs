@@ -1004,6 +1004,7 @@ struct ReviewScreen {
     cancelled: Arc<AtomicBool>,
     status: gtk::Label,
     analyze_all: gtk::Button,
+    organize: gtk::Button,
     stop: gtk::Button,
     language: Rc<RefCell<String>>,
     reviewer_notes: Rc<RefCell<String>>,
@@ -1022,7 +1023,98 @@ enum AnalysisEvent {
     Finished(usize, Result<String, String>),
 }
 
+enum GroupingEvent {
+    Progress(String),
+    Finished(Result<Vec<ChangeGroup>, String>),
+}
+
 impl ReviewScreen {
+    fn organize_groups(&self, list: &gtk::Box) {
+        if self.analyzing.get() { return; }
+        let Some(loaded) = self.loaded.borrow().clone() else { return };
+        if loaded.git_error.is_some()
+            || !loaded.worktree.as_ref().is_some_and(|tree| tree.ready && tree.path.is_dir())
+        {
+            self.status.set_text("Create the PR worktree before organizing changes.");
+            return;
+        }
+        self.cancelled.store(false, Ordering::Relaxed);
+        self.analyzing.set(true);
+        self.organize.set_sensitive(false);
+        self.analyze_all.set_sensitive(false);
+        for row in self.rows.borrow().iter() { row.set_sensitive(false); }
+        self.stop.set_sensitive(true);
+        self.status.set_text("Codex is organizing the whole PR into logical changes…");
+
+        let notes = self.reviewer_notes.borrow().clone();
+        let (sender, receiver) = mpsc::channel();
+        let cancelled = self.cancelled.clone();
+        thread::spawn(move || {
+            let prompt = grouping_prompt(&loaded, &notes);
+            let result = run_codex(&loaded, &prompt, CodexTask::Organize, &cancelled, |message| {
+                let _ = sender.send(GroupingEvent::Progress(message));
+            }).and_then(|answer| parse_change_groups(&answer, &loaded.changed_files))
+                .map_err(|error| error.to_string());
+            let _ = sender.send(GroupingEvent::Finished(result));
+        });
+
+        let screen = self.clone();
+        let list = list.clone();
+        let started = Instant::now();
+        glib::timeout_add_local(Duration::from_millis(160), move || {
+            loop {
+                match receiver.try_recv() {
+                    Ok(GroupingEvent::Progress(message)) => {
+                        screen.status.set_text(&format!(
+                            "Organizing PR · {}:{:02} · {}",
+                            started.elapsed().as_secs() / 60,
+                            started.elapsed().as_secs() % 60,
+                            short(&message, 180),
+                        ));
+                    }
+                    Ok(GroupingEvent::Finished(result)) => {
+                        screen.analyzing.set(false);
+                        screen.stop.set_sensitive(false);
+                        let stopped = screen.cancelled.swap(false, Ordering::Relaxed);
+                        match result {
+                            Ok(groups) if !stopped => {
+                                let mut current = screen.loaded.borrow().clone()
+                                    .expect("PR is loaded while grouping is active");
+                                current.groups = groups;
+                                show_groups(&list, &screen, current);
+                            }
+                            Ok(_) => {
+                                screen.status.set_text("PR grouping stopped.");
+                                screen.organize.set_sensitive(true);
+                            }
+                            Err(error) => {
+                                screen.status.set_text(&format!(
+                                    "Could not organize PR changes: {error}. Retry grouping."
+                                ));
+                                screen.organize.set_sensitive(true);
+                                let can_review = screen.loaded.borrow().as_ref()
+                                    .is_some_and(|current| !current.groups.is_empty());
+                                screen.analyze_all.set_sensitive(can_review);
+                                for row in screen.rows.borrow().iter() { row.set_sensitive(can_review); }
+                            }
+                        }
+                        return glib::ControlFlow::Break;
+                    }
+                    Err(TryRecvError::Empty) => break,
+                    Err(TryRecvError::Disconnected) => {
+                        screen.analyzing.set(false);
+                        screen.cancelled.store(false, Ordering::Relaxed);
+                        screen.stop.set_sensitive(false);
+                        screen.organize.set_sensitive(true);
+                        screen.status.set_text("Codex grouping ended unexpectedly. Retry grouping.");
+                        return glib::ControlFlow::Break;
+                    }
+                }
+            }
+            glib::ControlFlow::Continue
+        });
+    }
+
     fn analyze_groups(&self, selected: Vec<usize>, deep: bool) {
         if self.analyzing.get() || selected.is_empty() { return; }
         let Some(loaded) = self.loaded.borrow().clone() else { return };
@@ -1035,6 +1127,7 @@ impl ReviewScreen {
         self.cancelled.store(false, Ordering::Relaxed);
         self.analyzing.set(true);
         self.analyze_all.set_sensitive(false);
+        self.organize.set_sensitive(false);
         self.stop.set_sensitive(true);
         let total = selected.len();
         for (index, row) in self.rows.borrow().iter().enumerate() {
@@ -1166,6 +1259,7 @@ impl ReviewScreen {
                             .is_some_and(|loaded| loaded.git_error.is_none()
                                 && loaded.worktree.as_ref().is_some_and(|tree| tree.ready && tree.path.is_dir()));
                         screen.analyze_all.set_sensitive(can_analyze);
+                        screen.organize.set_sensitive(can_analyze);
                         for row in screen.rows.borrow().iter() {
                             row.set_sensitive(can_analyze);
                         }
