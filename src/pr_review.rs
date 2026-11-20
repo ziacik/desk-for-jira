@@ -1289,13 +1289,17 @@ impl ReviewScreen {
 
 fn show_groups(list: &gtk::Box, screen: &ReviewScreen, loaded: Loaded) {
     clear(list);
-    let files: usize = loaded.groups.iter().map(|group| group.files.len()).sum();
-    screen.status.set_text(&format!(
-        "{} · {} changed files in {} directory groups",
-        loaded.title, files, loaded.groups.len(),
-    ));
-    let can_analyze = loaded.git_error.is_none()
+    let files = loaded.changed_files.len();
+    screen.status.set_text(if loaded.groups.is_empty() {
+        format!("{} · {} changed files · Codex grouping required", loaded.title, files)
+    } else {
+        format!("{} · {} changed files in {} logical change groups",
+            loaded.title, files, loaded.groups.len())
+    }.as_str());
+    let can_organize = loaded.git_error.is_none()
         && loaded.worktree.as_ref().is_some_and(|tree| tree.ready && tree.path.is_dir());
+    let can_analyze = can_organize && !loaded.groups.is_empty();
+    screen.organize.set_sensitive(can_organize);
     screen.worktree_log.set_visible(false);
     if let Some(spec) = loaded.worktree.as_ref() {
         screen.worktree_info.set_text(&format!(
@@ -1331,6 +1335,21 @@ fn show_groups(list: &gtk::Box, screen: &ReviewScreen, loaded: Loaded) {
     *screen.loaded.borrow_mut() = Some(loaded.clone());
     screen.analyze_all.set_sensitive(can_analyze);
     screen.rows.borrow_mut().clear();
+    if loaded.groups.is_empty() && loaded.git_error.is_none() {
+        let note = label(if can_organize {
+            "Codex will inspect the complete PR and identify coherent changes across directories."
+        } else {
+            "Create the PR worktree before Codex can organize the changes."
+        });
+        note.add_css_class("dim-label");
+        list.append(&note);
+        let changed_files = label(&loaded.changed_files.join("\n"));
+        changed_files.set_selectable(true);
+        changed_files.add_css_class("dim-label");
+        let details = gtk::Expander::new(Some("All changed files"));
+        details.set_child(Some(&changed_files));
+        list.append(&details);
+    }
     for (index, group) in loaded.groups.iter().enumerate() {
         let row = gtk::Box::new(gtk::Orientation::Vertical, 7);
         row.set_margin_top(8);
@@ -1521,12 +1540,15 @@ pub fn show(parent: &impl IsA<gtk::Window>, initial_url: Option<&str>) {
     let controls = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     let load = gtk::Button::with_label("Load PR");
     load.add_css_class("suggested-action");
+    let organize = gtk::Button::with_label("Group with Codex");
+    organize.set_sensitive(false);
     let analyze_all = gtk::Button::with_label("Quick triage all");
     analyze_all.set_sensitive(false);
     let stop = gtk::Button::with_label("Stop analysis");
     stop.add_css_class("flat");
     stop.set_sensitive(false);
     controls.append(&load);
+    controls.append(&organize);
     controls.append(&analyze_all);
     controls.append(&stop);
     root.append(&controls);
@@ -1552,6 +1574,7 @@ pub fn show(parent: &impl IsA<gtk::Window>, initial_url: Option<&str>) {
         cancelled,
         status: status.clone(),
         analyze_all: analyze_all.clone(),
+        organize: organize.clone(),
         stop: stop.clone(),
         language: Rc::new(RefCell::new(
             RESPONSE_LANGUAGES[selected_language].1.to_owned(),
@@ -1597,6 +1620,11 @@ pub fn show(parent: &impl IsA<gtk::Window>, initial_url: Option<&str>) {
     }
     {
         let screen = screen.clone();
+        let list = list.clone();
+        organize.connect_clicked(move |_| screen.organize_groups(&list));
+    }
+    {
+        let screen = screen.clone();
         analyze_all.connect_clicked(move |_| {
             let count = screen.rows.borrow().len();
             screen.analyze_groups((0..count).collect(), false);
@@ -1604,6 +1632,7 @@ pub fn show(parent: &impl IsA<gtk::Window>, initial_url: Option<&str>) {
     }
     {
         let screen = screen.clone();
+        let list = list.clone();
         let load = load.clone();
         worktree_create.connect_clicked(move |_| {
             if screen.analyzing.get() { return; }
@@ -1650,9 +1679,8 @@ pub fn show(parent: &impl IsA<gtk::Window>, initial_url: Option<&str>) {
                         {
                             *worktree = ReviewWorktree { ready: true, ..spec.clone() };
                         }
-                        screen.analyze_all.set_sensitive(true);
-                        for row in screen.rows.borrow().iter() { row.set_sensitive(true); }
-                        screen.status.set_text("PR worktree ready. Codex can inspect and test this revision.");
+                        screen.status.set_text("PR worktree ready. Organizing changes with Codex…");
+                        screen.organize_groups(&list);
                         if let Some(script) = setup_command.as_ref() {
                             // Same persistence semantics as the existing Worktree dialog:
                             // only an explicitly enabled setup is saved for the repo.
@@ -1769,6 +1797,7 @@ pub fn show(parent: &impl IsA<gtk::Window>, initial_url: Option<&str>) {
             let remember = remember_pat.is_active();
             screen.status.set_text("Loading PR and resolving Azure DevOps credentials…");
             screen.analyze_all.set_sensitive(false);
+            screen.organize.set_sensitive(false);
             screen.worktree_controls.set_visible(false);
             screen.worktree_info.set_visible(false);
             screen.worktree_log.set_visible(false);
@@ -1808,10 +1837,15 @@ pub fn show(parent: &impl IsA<gtk::Window>, initial_url: Option<&str>) {
                         }
                         *last_loaded_url.borrow_mut() = Some(address_for_ui.clone());
                         show_groups(&list, &screen, loaded);
-                        screen.status.set_text(&format!(
-                            "{} · Authentication: {credentials_used}",
-                            screen.status.text(),
-                        ));
+                        let ready = screen.organize.is_sensitive();
+                        if ready {
+                            screen.organize_groups(&list);
+                        } else {
+                            screen.status.set_text(&format!(
+                                "{} · Authentication: {credentials_used}",
+                                screen.status.text(),
+                            ));
+                        }
                         glib::ControlFlow::Break
                     }
                     Ok(Err(error)) => {
