@@ -1892,13 +1892,83 @@ mod tests {
     }
 
     #[test]
-    fn grouping_preserves_all_files() {
-        let groups = groups_for_paths(vec![
-            "src/dirtyComparers/a.ts".into(), "src/dirtyComparers/b.ts".into(),
-            "src/model/domain.ts".into(),
-        ]);
+    fn codex_groups_related_changes_across_directories_and_splits_unrelated_neighbors() {
+        let paths = vec![
+            "src/feature/mapper.ts".to_owned(),
+            "tests/mapper.spec.ts".to_owned(),
+            "src/feature/unrelated.ts".to_owned(),
+        ];
+        let model_response = serde_json::json!({
+            "groups": [
+                {
+                    "title": "Correct mapping of aggregate values",
+                    "purpose": "Implementation and regression test for the same behavior",
+                    "files": ["src/feature/mapper.ts", "tests/mapper.spec.ts"]
+                },
+                {
+                    "title": "Remove old diagnostics",
+                    "purpose": "Separate maintenance-only cleanup",
+                    "files": ["src/feature/unrelated.ts"]
+                }
+            ]
+        });
+        let groups = parse_change_groups(&model_response.to_string(), &paths).unwrap();
         assert_eq!(groups.len(), 2);
-        assert_eq!(groups[0].files.len(), 2);
+        assert_eq!(groups[0].files, paths[..2]);
+        assert_eq!(groups[1].files, paths[2..]);
+        assert_eq!(groups[0].title, "Correct mapping of aggregate values");
+        assert_eq!(groups[1].purpose, "Separate maintenance-only cleanup");
+    }
+
+    #[test]
+    fn codex_grouping_rejects_missing_duplicate_and_invented_paths() {
+        let expected = vec!["a.ts".to_owned(), "b.ts".to_owned()];
+        let group = |files: Vec<&str>| serde_json::json!({
+            "title": "A change", "purpose": "One coherent purpose", "files": files
+        });
+        let missing = serde_json::json!({"groups": [group(vec!["a.ts"])]});
+        assert!(parse_change_groups(&missing.to_string(), &expected).is_err());
+        let duplicate = serde_json::json!({"groups": [
+            group(vec!["a.ts", "b.ts"]), group(vec!["b.ts"])
+        ]});
+        assert!(parse_change_groups(&duplicate.to_string(), &expected).is_err());
+        let invented = serde_json::json!({"groups": [group(vec!["a.ts", "b.ts", "c.ts"])]});
+        assert!(parse_change_groups(&invented.to_string(), &expected).is_err());
+        let empty = serde_json::json!({"groups": []});
+        assert!(parse_change_groups(&empty.to_string(), &expected).is_err());
+        assert!(parse_change_groups("invalid JSON", &expected).is_err());
+        let one_group = serde_json::json!({"groups": [group(vec!["a.ts", "b.ts"])]});
+        assert_eq!(parse_change_groups(&one_group.to_string(), &expected).unwrap().len(), 1);
+    }
+
+
+    #[test]
+    fn grouping_prompt_asks_codex_for_semantic_cross_folder_design() {
+        let loaded = Loaded {
+            title: "Fix query resolution".into(),
+            description: "Support aggregation".into(),
+            pr_number: 7,
+            changed_files: vec![
+                "libs/logic/engine.ts".into(),
+                "libs/ui/renderer.ts".into(),
+                "tests/engine.spec.ts".into(),
+            ],
+            groups: Vec::new(),
+            repository: PathBuf::from("/tmp/dummy"),
+            base_ref: "base-sha".into(),
+            head_ref: "head-sha".into(),
+            worktree: None,
+            git_error: None,
+        };
+        let prompt = grouping_prompt(&loaded, "Unit tests should mock fetch");
+        assert!(prompt.contains("DO NOT use directory structure"));
+        assert!(prompt.contains("SAME requirement"));
+        assert!(prompt.contains("exactly one group"));
+        assert!(prompt.contains("base-sha"));
+        assert!(prompt.contains("head-sha"));
+        assert!(prompt.contains("libs/ui/renderer.ts"));
+        assert!(prompt.contains("tests/engine.spec.ts"));
+        assert!(prompt.contains("Unit tests should mock fetch"));
     }
 
     #[test]
@@ -1907,8 +1977,10 @@ mod tests {
             title: "ART-123: Handle empty aggregate inputs".into(),
             description: "Support aggregate query of empty input.".into(),
             pr_number: 123,
+            changed_files: vec!["src/dataprovider/query.ts".into()],
             groups: vec![ChangeGroup {
-                directory: "src/dataprovider".into(),
+                title: "Handle aggregates".into(),
+                purpose: "Correct aggregate query output mapping".into(),
                 files: vec!["src/dataprovider/query.ts".into()],
             }],
             repository: PathBuf::from("/tmp/dummy"),
@@ -1940,8 +2012,10 @@ mod tests {
             title: "Change field resolution".into(),
             description: "Fix property resolution in workflows".into(),
             pr_number: 43,
+            changed_files: vec!["libs/workflow/relationshipVariable.ts".into()],
             groups: vec![ChangeGroup {
-                directory: "libs/workflow".into(),
+                title: "Resolve relationship variable source".into(),
+                purpose: "Fix property resolution in workflows".into(),
                 files: vec!["libs/workflow/relationshipVariable.ts".into()],
             }],
             repository: PathBuf::from("/tmp/dummy"),
@@ -1978,7 +2052,8 @@ mod tests {
     #[test]
     fn fast_batches_limit_count_and_changed_file_scope() {
         let groups: Vec<_> = (0..20).map(|index| ChangeGroup {
-            directory: format!("directory-{index}"),
+            title: format!("Change {index}"),
+            purpose: format!("Review of behavior {index}"),
             files: vec![format!("src/test{index}.ts")],
         }).collect();
         let selected: Vec<_> = (0..20).collect();
@@ -1987,9 +2062,9 @@ mod tests {
         assert_eq!(batches.iter().map(Vec::len).collect::<Vec<_>>(), vec![8, 8, 4]);
         assert_eq!(batches.concat(), selected);
         let large = vec![
-            ChangeGroup { directory: "a".into(), files: vec!["a".into(); 35] },
-            ChangeGroup { directory: "b".into(), files: vec!["b".into(); 6] },
-            ChangeGroup { directory: "c".into(), files: vec!["c".into(); 45] },
+            ChangeGroup { title: "a".into(), purpose: "first".into(), files: vec!["a".into(); 35] },
+            ChangeGroup { title: "b".into(), purpose: "second".into(), files: vec!["b".into(); 6] },
+            ChangeGroup { title: "c".into(), purpose: "third".into(), files: vec!["c".into(); 45] },
         ];
         assert_eq!(fast_batches(&large, &[0, 1, 2]), vec![vec![0], vec![1], vec![2]]);
         assert!(fast_batches(&large, &[]).is_empty());
@@ -1999,11 +2074,15 @@ mod tests {
     fn pr_review_worktree_is_pinned_to_exact_head_revision() {
         // Branch and destination are tied to the PR commit, not a mutable
         // remote branch; use Git-backed tests for the actual creation backend.
-        let group = ChangeGroup { directory: "src".into(), files: vec!["src/a.rs".into()] };
+        let group = ChangeGroup {
+            title: "One behavior".into(), purpose: "Implement behavior".into(),
+            files: vec!["src/a.rs".into()],
+        };
         let loaded = Loaded {
             title: "Test PR".into(),
             description: String::new(),
             pr_number: 230,
+            changed_files: vec!["src/a.rs".into()],
             groups: vec![group],
             repository: PathBuf::from("/tmp/nonexistent"),
             base_ref: String::new(),
@@ -2039,8 +2118,10 @@ mod tests {
             title: "PR under test".into(),
             description: String::new(),
             pr_number: 42,
+            changed_files: vec!["source.txt".into()],
             groups: vec![ChangeGroup {
-                directory: "(root)".into(),
+                title: "Initial behavior".into(),
+                purpose: "Worktree fixture".into(),
                 files: vec!["source.txt".into()],
             }],
             repository: repo.clone(),
