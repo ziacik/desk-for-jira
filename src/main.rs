@@ -14,6 +14,7 @@ mod git_ui;
 mod all_worktrees;
 mod development;
 mod pull_requests;
+mod pr_review;
 mod preferences;
 mod secrets;
 mod transition_ui;

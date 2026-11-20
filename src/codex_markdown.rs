@@ -167,6 +167,14 @@ mod tests {
     }
 
     #[test]
+    fn pr_review_numbered_findings_render_bold_instead_of_markdown_tokens() {
+        let blocks = blocks("2. **Neúspešná UI akcia zničí existujúce Redo.**");
+        assert_eq!(blocks, vec![
+            Block::Paragraph("2. <b>Neúspešná UI akcia zničí existujúce Redo.</b>".into()),
+        ]);
+    }
+
+    #[test]
     fn fences_and_headings_have_distinct_blocks() {
         let rendered = blocks("## Test\n\n```rust\nlet a = 1 < 2;\n```");
         assert_eq!(rendered[0], Block::Heading("Test".into()));

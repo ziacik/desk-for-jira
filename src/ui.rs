@@ -14,6 +14,7 @@ use crate::{
     chip_wrap,
     development,
     pull_requests,
+    pr_review,
     issue_detail,
     jira_inbox,
     command_palette::{self, PaletteCommand, PaletteItem},
@@ -51,6 +52,7 @@ struct Ui {
     palette_button: gtk::Button,
     worktrees_button: gtk::Button,
     activity_button: gtk::Button,
+    pr_review_button: gtk::Button,
     inbox_button: gtk::Button,
     inbox_count: gtk::Label,
     inbox_polling: Rc<Cell<bool>>,
@@ -395,6 +397,9 @@ fn build_ui(app: &adw::Application) {
     let activity_button = gtk::Button::from_icon_name("document-open-recent-symbolic");
     activity_button.add_css_class("flat");
     activity_button.set_tooltip_text(Some("Activity history — actions performed in Desk for Jira"));
+    let pr_review_button = gtk::Button::from_icon_name("document-edit-symbolic");
+    pr_review_button.add_css_class("flat");
+    pr_review_button.set_tooltip_text(Some("PR Review — explore and triage a colleague’s pull request"));
     let inbox_button = gtk::Button::new();
     inbox_button.add_css_class("flat");
     inbox_button.add_css_class("sidebar-action");
@@ -418,6 +423,7 @@ fn build_ui(app: &adw::Application) {
     header.pack_end(&palette_button);
     header.pack_end(&worktrees_button);
     header.pack_end(&activity_button);
+    header.pack_end(&pr_review_button);
     header.pack_end(&spinner);
 
 
@@ -785,7 +791,7 @@ fn build_ui(app: &adw::Application) {
         project_filter: Rc::new(RefCell::new(None)),
         connect_button, disconnect_button, refresh_button,
         manage_projects_button, manage_columns_button, manage_worktree_visibility_button,
-        palette_button, worktrees_button, activity_button,
+        palette_button, worktrees_button, activity_button, pr_review_button,
         inbox_button, inbox_count, inbox_polling: Rc::new(Cell::new(false)),
         palette_window: Rc::new(RefCell::new(None)),
         pending_direct_issue: Rc::new(RefCell::new(None)),
@@ -1254,6 +1260,10 @@ fn is_command_palette_shortcut(key: gtk::gdk::Key, modifiers: gtk::gdk::Modifier
 }
 
 fn wire_actions(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>) {
+    {
+        let ui = ui.clone();
+        ui.pr_review_button.clone().connect_clicked(move |_| pr_review::show(&ui.window, None));
+    }
     {
         let ui = ui.clone();
         ui.activity_button.clone().connect_clicked(move |_| show_activity_history(&ui, false));
