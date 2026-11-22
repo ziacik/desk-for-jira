@@ -306,7 +306,7 @@ impl Workspace {
                 .unwrap_or("No worktree available"));
             self.worktree_controls.set_visible(false);
         }
-        self.settings.set_expanded(false);
+        self.settings.set_expanded(!loaded.worktree.as_ref().is_some_and(|tree| tree.ready));
         self.refresh();
         self.set_busy(false);
         if let Some(row) = self.rows.borrow().first() {
@@ -813,6 +813,7 @@ pub fn show(parent: &impl IsA<gtk::Window>, initial_url: Option<&str>) {
             screen.set_busy(true);
             screen.status.set_text("Creating PR worktree and running configured setup…");
             let (sender, receiver) = mpsc::channel();
+            let repository_path = loaded.repository.clone();
             thread::spawn(move || {
                 let result = pr_review::create_pr_worktree(&loaded, &tree)
                     .map_err(|error| error.to_string());
@@ -827,6 +828,26 @@ pub fn show(parent: &impl IsA<gtk::Window>, initial_url: Option<&str>) {
                         }
                         screen.worktree_info.set_text(&format!("PR worktree ready · {}", tree.path.display()));
                         screen.worktree_button.set_label("Run setup again");
+                        screen.settings.set_expanded(false);
+                        if tree.run_setup && !tree.setup.trim().is_empty() {
+                            match preferences::load_git() {
+                                Ok(mut settings) => {
+                                    if let Some(repo) = settings.repositories.iter_mut()
+                                        .find(|repo| repo.path == repository_path.to_string_lossy().as_ref())
+                                    {
+                                        repo.setup = tree.setup.clone();
+                                        if let Err(error) = preferences::save_git(&settings) {
+                                            screen.status.set_text(&format!(
+                                                "Setup ran, but preference could not be saved: {error}"
+                                            ));
+                                        }
+                                    }
+                                }
+                                Err(error) => screen.status.set_text(&format!(
+                                    "Cannot read setup preferences: {error}"
+                                )),
+                            }
+                        }
                         if !output.is_empty() {
                             screen.setup_output_label.set_text(&output);
                             screen.setup_output.set_visible(true);
