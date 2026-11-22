@@ -96,6 +96,7 @@ struct Workspace {
     filter: gtk::DropDown,
     diff: gtk::TextView,
     filename: gtk::Label,
+    pr_title: gtk::Label,
     file_info: gtk::Box,
     status: gtk::Label,
     summary: gtk::Label,
@@ -274,6 +275,7 @@ impl Workspace {
 
     fn show_files(&self, loaded: Loaded) {
         *self.loaded.borrow_mut() = Some(loaded.clone());
+        self.pr_title.set_text(&format!("PR #{} · {}", loaded.pr_number, loaded.title));
         let key = pr_review_state::revision_key(
             &loaded.repository, loaded.pr_number, &loaded.head_ref,
         );
@@ -573,6 +575,10 @@ pub fn show(parent: &impl IsA<gtk::Window>, initial_url: Option<&str>) {
     form.append(&setup_output);
     settings_expander.set_child(Some(&form));
     root.append(&settings_expander);
+    let pr_title = label("No pull request loaded");
+    pr_title.add_css_class("heading");
+    pr_title.set_selectable(true);
+    root.append(&pr_title);
 
     let toolbar = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     let triage = gtk::Button::with_label("AI triage pending files");
@@ -664,7 +670,7 @@ pub fn show(parent: &impl IsA<gtk::Window>, initial_url: Option<&str>) {
         running: Rc::new(Cell::new(false)),
         cancelled: Arc::new(AtomicBool::new(false)),
         list: list.clone(), search: search.clone(), filter: filter.clone(),
-        diff, filename, file_info, status, summary, triage: triage.clone(),
+        diff, filename, pr_title, file_info, status, summary, triage: triage.clone(),
         analyze_file: analyze_file.clone(), deep: deep.clone(), stop: stop.clone(),
         load: load.clone(), worktree_button: worktree_button.clone(),
         worktree_info, worktree_controls, worktree_setup,
