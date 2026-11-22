@@ -239,6 +239,7 @@ impl Workspace {
         self.show_file_info(path);
         self.analyze_file.set_sensitive(self.ready() && !self.running.get());
         self.deep.set_sensitive(self.ready() && !self.running.get());
+        self.mark_next.set_sensitive(true);
         self.sequence.set(self.sequence.get().wrapping_add(1));
         let request_id = self.sequence.get();
         let current_id = self.sequence.clone();
@@ -666,6 +667,7 @@ pub fn show(parent: &impl IsA<gtk::Window>, initial_url: Option<&str>) {
     let detail_header = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     detail_header.append(&filename);
     let mark_next = gtk::Button::with_label("Reviewed + next");
+    mark_next.set_sensitive(false);
     mark_next.set_tooltip_text(Some("Mark this file as reviewed by you and select the next unchecked file"));
     detail_header.append(&mark_next);
     detail.append(&detail_header);
