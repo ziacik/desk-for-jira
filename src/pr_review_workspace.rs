@@ -66,7 +66,7 @@ fn render_diff(view: &gtk::TextView, source: &str) {
             Some("pr-hunk")
         } else { None };
         let begin = cursor;
-        let mut end = begin;
+        let mut end = begin.clone();
         end.forward_chars(line.chars().count() as i32);
         if let Some(name) = name { buffer.apply_tag_by_name(name, &begin, &end); }
         cursor = end;
