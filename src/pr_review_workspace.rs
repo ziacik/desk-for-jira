@@ -161,8 +161,7 @@ impl Workspace {
         }
         self.syncing.set(false);
         let total = self.rows.borrow().len();
-        let checked = self.rows.borrow().iter()
-            .filter(|row| state.entry(&row.path).checked()).count();
+        let checked = state.checked_count(self.rows.borrow().iter().map(|row| &row.path));
         let ai_cleared = self.rows.borrow().iter()
             .filter(|row| state.entry(&row.path).ai_cleared()).count();
         let pending_ai = self.rows.borrow().iter()
