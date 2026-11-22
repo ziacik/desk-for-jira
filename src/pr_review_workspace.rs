@@ -104,6 +104,8 @@ struct Workspace {
     analyze_file: gtk::Button,
     deep: gtk::Button,
     stop: gtk::Button,
+    next_unchecked: gtk::Button,
+    mark_next: gtk::Button,
     load: gtk::Button,
     worktree_button: gtk::Button,
     worktree_info: gtk::Label,
@@ -155,6 +157,8 @@ impl Workspace {
         self.analyze_file.set_sensitive(!active && self.ready() && has_selected);
         self.deep.set_sensitive(!active && self.ready() && has_selected);
         self.stop.set_sensitive(active);
+        self.next_unchecked.set_sensitive(!self.rows.borrow().is_empty());
+        self.mark_next.set_sensitive(has_selected);
         // The file list, the diff and manual checkboxes remain usable while AI works.
     }
 
@@ -460,6 +464,34 @@ impl Workspace {
         let selected = self.selected.borrow().clone();
         if let Some(path) = selected { self.analyze(vec![path], deep); }
     }
+
+    fn next_unchecked_file(&self) {
+        let rows = self.rows.borrow();
+        if rows.is_empty() { return; }
+        let current = self.selected.borrow().as_ref()
+            .and_then(|path| rows.iter().position(|row| &row.path == path))
+            .unwrap_or(rows.len().saturating_sub(1));
+        let state = self.state.borrow();
+        let target = (1..=rows.len()).map(|step| (current + step) % rows.len())
+            .find(|&index| {
+                rows[index].widget.is_visible()
+                    && !state.entry(&rows[index].path).checked()
+            });
+        if let Some(index) = target {
+            self.list.select_row(Some(&rows[index].widget));
+        } else {
+            self.status.set_text("There are no more visible unchecked files.");
+        }
+    }
+
+    fn mark_reviewed_and_next(&self) {
+        if let Some(path) = self.selected.borrow().clone() {
+            self.state.borrow_mut().set_human_checked(&path, true);
+            self.persist();
+            self.refresh();
+            self.next_unchecked_file();
+        }
+    }
 }
 
 pub fn show(parent: &impl IsA<gtk::Window>, initial_url: Option<&str>) {
@@ -594,6 +626,8 @@ pub fn show(parent: &impl IsA<gtk::Window>, initial_url: Option<&str>) {
     toolbar.append(&triage);
     toolbar.append(&analyze_file);
     toolbar.append(&deep);
+    let next_unchecked = gtk::Button::with_label("Next unchecked");
+    toolbar.append(&next_unchecked);
     toolbar.append(&stop);
     root.append(&toolbar);
 
@@ -626,9 +660,15 @@ pub fn show(parent: &impl IsA<gtk::Window>, initial_url: Option<&str>) {
     let detail = gtk::Box::new(gtk::Orientation::Vertical, 8);
     detail.set_hexpand(true);
     let filename = label("Select a changed file");
+    filename.set_hexpand(true);
     filename.add_css_class("heading");
     filename.set_selectable(true);
-    detail.append(&filename);
+    let detail_header = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    detail_header.append(&filename);
+    let mark_next = gtk::Button::with_label("Reviewed + next");
+    mark_next.set_tooltip_text(Some("Mark this file as reviewed by you and select the next unchecked file"));
+    detail_header.append(&mark_next);
+    detail.append(&detail_header);
     let info_scroller = gtk::ScrolledWindow::new();
     info_scroller.set_min_content_height(80);
     info_scroller.set_max_content_height(180);
@@ -672,6 +712,7 @@ pub fn show(parent: &impl IsA<gtk::Window>, initial_url: Option<&str>) {
         list: list.clone(), search: search.clone(), filter: filter.clone(),
         diff, filename, pr_title, file_info, status, summary, triage: triage.clone(),
         analyze_file: analyze_file.clone(), deep: deep.clone(), stop: stop.clone(),
+        next_unchecked: next_unchecked.clone(), mark_next: mark_next.clone(),
         load: load.clone(), worktree_button: worktree_button.clone(),
         worktree_info, worktree_controls, worktree_setup,
         worktree_run_setup, setup_output, setup_output_label,
@@ -709,6 +750,14 @@ pub fn show(parent: &impl IsA<gtk::Window>, initial_url: Option<&str>) {
     {
         let screen = screen.clone();
         deep.connect_clicked(move |_| screen.selected_analysis(true));
+    }
+    {
+        let screen = screen.clone();
+        next_unchecked.connect_clicked(move |_| screen.next_unchecked_file());
+    }
+    {
+        let screen = screen.clone();
+        mark_next.connect_clicked(move |_| screen.mark_reviewed_and_next());
     }
     {
         let screen = screen.clone();
