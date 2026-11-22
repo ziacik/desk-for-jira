@@ -39,6 +39,40 @@ fn clear(container: &gtk::Box) {
     while let Some(child) = container.first_child() { container.remove(&child); }
 }
 
+
+fn render_diff(view: &gtk::TextView, source: &str) {
+    let buffer = view.buffer();
+    let tags = buffer.tag_table();
+    if tags.lookup("pr-added").is_none() {
+        let dark = adw::StyleManager::default().is_dark();
+        for (name, rgba) in [
+            ("pr-added", if dark { (0.60, 0.92, 0.68) } else { (0.05, 0.48, 0.22) }),
+            ("pr-removed", if dark { (0.98, 0.60, 0.60) } else { (0.68, 0.15, 0.15) }),
+            ("pr-hunk", if dark { (0.65, 0.76, 1.00) } else { (0.15, 0.34, 0.72) }),
+        ] {
+            let tag = gtk::TextTag::new(Some(name));
+            tag.set_foreground_rgba(Some(&gtk::gdk::RGBA::new(rgba.0, rgba.1, rgba.2, 1.0)));
+            tags.add(&tag);
+        }
+    }
+    buffer.set_text(source);
+    let mut cursor = buffer.start_iter();
+    for line in source.split_inclusive('\n') {
+        let name = if line.starts_with('+') && !line.starts_with("+++") {
+            Some("pr-added")
+        } else if line.starts_with('-') && !line.starts_with("---") {
+            Some("pr-removed")
+        } else if line.starts_with("@@") {
+            Some("pr-hunk")
+        } else { None };
+        let begin = cursor;
+        let mut end = begin;
+        end.forward_chars(line.chars().count() as i32);
+        if let Some(name) = name { buffer.apply_tag_by_name(name, &begin, &end); }
+        cursor = end;
+    }
+}
+
 struct FileRow {
     path: String,
     widget: gtk::ListBoxRow,
@@ -220,7 +254,7 @@ impl Workspace {
             if current_id.get() != request_id { return glib::ControlFlow::Break; }
             match receiver.try_recv() {
                 Ok(Ok(diff)) => {
-                    view.buffer().set_text(if diff.trim().is_empty() {
+                    render_diff(&view, if diff.trim().is_empty() {
                         "No textual diff for this path (binary file or rename)."
                     } else { &diff });
                     glib::ControlFlow::Break
