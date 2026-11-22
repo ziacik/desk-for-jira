@@ -16,6 +16,7 @@ mod development;
 mod pull_requests;
 mod pr_review;
 mod pr_review_state;
+mod pr_review_workspace;
 mod preferences;
 mod secrets;
 mod transition_ui;
