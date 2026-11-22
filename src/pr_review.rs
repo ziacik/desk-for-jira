@@ -3,7 +3,7 @@ use std::{
     io::{BufRead, BufReader, Write},
     path::{Path, PathBuf},
     process::{Command, Stdio},
-    sync::{atomic::{AtomicBool, Ordering}, mpsc, Arc},
+    sync::{atomic::{AtomicBool, Ordering}, mpsc},
     thread,
     time::{Duration, Instant},
 };
