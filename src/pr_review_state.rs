@@ -145,6 +145,18 @@ mod tests {
     use super::*;
 
     #[test]
+    fn open_tab_metadata_is_backward_compatible() {
+        let legacy: Store = serde_json::from_str(r#"{"by_revision":{}}"#).unwrap();
+        assert!(legacy.open_review_urls.is_empty());
+
+        let restored: Store = serde_json::from_str(
+            r#"{"open_review_urls":["https://dev.azure.com/org/proj/_git/repo/pullrequest/42"]}"#,
+        ).unwrap();
+        assert_eq!(restored.open_review_urls.len(), 1);
+        assert!(restored.by_revision.is_empty());
+    }
+
+    #[test]
     fn ai_cleared_and_manual_review_are_separate() {
         let mut state = ReviewProgress::default();
         state.set_ai("model.ts", Assessment {
