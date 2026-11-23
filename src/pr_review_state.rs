@@ -71,6 +71,8 @@ impl ReviewProgress {
 struct Store {
     #[serde(default)]
     by_revision: HashMap<String, ReviewProgress>,
+    #[serde(default)]
+    open_review_urls: Vec<String>,
 }
 
 /// Scope by Git directory, PR number and immutable source commit. New revisions
@@ -116,6 +118,25 @@ pub fn save(key: &str, progress: &ReviewProgress) -> Result<()> {
     let path = storage_path()?;
     let mut store = read_store(&path)?;
     store.by_revision.insert(key.to_owned(), progress.clone());
+    write_store(&path, &store)
+}
+
+/// Previously open PR tabs. Review decisions themselves remain scoped to the
+/// exact commit and are restored separately after loading a PR.
+pub fn open_review_urls() -> Result<Vec<String>> {
+    Ok(read_store(&storage_path()?)?.open_review_urls)
+}
+
+pub fn save_open_review_urls(urls: &[String]) -> Result<()> {
+    let path = storage_path()?;
+    let mut store = read_store(&path)?;
+    store.open_review_urls.clear();
+    for url in urls {
+        let url = url.trim();
+        if !url.is_empty() && !store.open_review_urls.iter().any(|saved| saved == url) {
+            store.open_review_urls.push(url.to_owned());
+        }
+    }
     write_store(&path, &store)
 }
 
