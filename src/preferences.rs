@@ -376,6 +376,9 @@ pub struct GitSettings {
     pub editor: String,
     /// Optional multi-line instructions included in every Codex run.
     pub codex_instructions: String,
+    /// Default language for AI-assisted pull request review explanations.
+    /// Applies to all PRs, but not interactive ticket Codex conversations.
+    pub pr_review_language: String,
     /// Disable Codex approvals and sandbox for launches from Desk for Jira.
     pub codex_yolo: bool,
     /// Persisted app-server conversation per Jira site, ticket and worktree.
@@ -396,6 +399,7 @@ impl Default for GitSettings {
             worktree_root: "~/Worktrees".to_owned(),
             editor: "code".to_owned(),
             codex_instructions: String::new(),
+            pr_review_language: "English".to_owned(),
             codex_yolo: false,
             codex_threads: HashMap::new(),
             fetch_before_create: true,
@@ -621,6 +625,15 @@ pub fn remember_codex_thread(
 
 pub fn load_git() -> Result<GitSettings> {
     Ok(read_preferences(&preferences_path()?)?.git)
+}
+
+/// Update only the PR review language so other Git preferences and Codex threads
+/// saved by another window are not overwritten by a stale settings snapshot.
+pub fn save_pr_review_language(language: &str) -> Result<()> {
+    let path = preferences_path()?;
+    let mut prefs = read_preferences(&path)?;
+    prefs.git.pr_review_language = language.to_owned();
+    write_preferences(&path, &prefs)
 }
 
 pub fn save_git(settings: &GitSettings) -> Result<()> {
@@ -1093,6 +1106,23 @@ mod tests {
             serde_json::json!({"editor":"code"}),
         ).unwrap();
         assert!(old.codex_threads.is_empty());
+    }
+
+    #[test]
+    fn pr_review_language_defaults_to_english_and_is_persistent() {
+        let legacy: GitSettings = serde_json::from_value(serde_json::json!({
+            "editor": "code"
+        })).unwrap();
+        assert_eq!(legacy.pr_review_language, "English");
+
+        let settings = GitSettings {
+            pr_review_language: "Slovak".to_owned(),
+            ..GitSettings::default()
+        };
+        let roundtrip: GitSettings = serde_json::from_value(
+            serde_json::to_value(&settings).unwrap(),
+        ).unwrap();
+        assert_eq!(roundtrip.pr_review_language, "Slovak");
     }
 
     #[test]

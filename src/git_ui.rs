@@ -72,7 +72,7 @@ fn poll<T: 'static>(receiver: Receiver<T>, done: impl Fn(T) + 'static) {
     });
 }
 
-fn expand_home(path: &str) -> PathBuf {
+pub(crate) fn expand_home(path: &str) -> PathBuf {
     if path == "~" {
         return std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
     }
@@ -84,7 +84,7 @@ fn expand_home(path: &str) -> PathBuf {
     PathBuf::from(path)
 }
 
-fn suggested_setup(path: &Path) -> &'static str {
+pub(crate) fn suggested_setup(path: &Path) -> &'static str {
     if path.join("pnpm-lock.yaml").exists() { "pnpm install" }
     else if path.join("yarn.lock").exists() { "yarn install" }
     else if path.join("bun.lock").exists() || path.join("bun.lockb").exists() { "bun install" }

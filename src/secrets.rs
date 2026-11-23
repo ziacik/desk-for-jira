@@ -49,6 +49,56 @@ pub fn delete() -> Result<()> {
     })
 }
 
+
+/// Store Azure DevOps PATs separately from Jira credentials, scoped per organization.
+/// The PAT is never serialized into the app preferences file.
+fn azure_pat_attributes(organization: &str) -> [(&str, &str); 3] {
+    [
+        ("application", "com.github.ziacik.DeskForJira"),
+        ("type", "azure-devops-pat"),
+        ("organization", organization),
+    ]
+}
+
+pub fn load_azure_pat(organization: &str) -> Result<Option<String>> {
+    future::block_on(async {
+        let keyring = open_keyring().await?;
+        let attributes = azure_pat_attributes(organization);
+        let items = keyring.search_items(&attributes).await
+            .context("Could not search for saved Azure DevOps PAT")?;
+        let Some(item) = items.first() else { return Ok(None); };
+        let secret = item.secret().await
+            .context("Could not read saved Azure DevOps PAT")?;
+        let pat = String::from_utf8(secret.as_bytes().to_vec())
+            .context("Saved Azure DevOps PAT is not valid UTF-8")?;
+        Ok(Some(pat))
+    })
+}
+
+pub fn save_azure_pat(organization: &str, pat: &str) -> Result<()> {
+    future::block_on(async {
+        let keyring = open_keyring().await?;
+        let attributes = azure_pat_attributes(organization);
+        keyring.create_item(
+            "Desk for Jira — Azure DevOps PAT",
+            &attributes,
+            Secret::text(pat),
+            true,
+        ).await.context("Could not save Azure DevOps PAT to the system keyring")?;
+        Ok(())
+    })
+}
+
+pub fn delete_azure_pat(organization: &str) -> Result<()> {
+    future::block_on(async {
+        let keyring = open_keyring().await?;
+        let attributes = azure_pat_attributes(organization);
+        keyring.delete(&attributes).await
+            .context("Could not forget saved Azure DevOps PAT")?;
+        Ok(())
+    })
+}
+
 async fn open_keyring() -> Result<Keyring> {
     let keyring = Keyring::new().await.context("Could not open the system keyring")?;
     keyring.unlock().await.context("Could not unlock the system keyring")?;

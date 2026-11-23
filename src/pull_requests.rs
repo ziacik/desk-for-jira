@@ -166,6 +166,20 @@ impl PullRequestsPanel {
         link.set_child(Some(&label));
         row.append(&link);
 
+        let review = gtk::Button::with_label("Review");
+        review.add_css_class("flat");
+        review.set_tooltip_text(Some("Open this PR in the assisted review explorer"));
+        let root = self.root.clone();
+        let url = request.url.clone();
+        review.connect_clicked(move |_| {
+            if let Some(parent) = root.root()
+                .and_then(|root| root.downcast::<gtk::Window>().ok())
+            {
+                crate::pr_review::show(&parent, Some(&url));
+            }
+        });
+        row.append(&review);
+
         let (name, class) = match request.status.as_str() {
             "OPEN" | "ACTIVE" => ("Open", "ticket-pr-open"),
             "MERGED" | "COMPLETED" => ("Merged", "ticket-pr-merged"),
