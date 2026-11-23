@@ -833,7 +833,7 @@ fn build_ui(app: &adw::Application) {
         &window, &toast, &worktree_more,
         Rc::new(move || { let _ = activity_events.send(Event::ActivityChanged); }),
     );
-    let pull_requests = pull_requests::PullRequestsPanel::new();
+    let pull_requests = pull_requests::PullRequestsPanel::new(&tabs);
 
     let ui = Ui {
         window, toast, header_title, spinner, status, projects_label, sidebar_projects,
