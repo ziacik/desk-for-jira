@@ -22,6 +22,7 @@ struct TabHandle {
     url: gtk::Entry,
     loaded_url: Rc<RefCell<Option<String>>>,
     cancelled: Arc<AtomicBool>,
+    closed: Arc<AtomicBool>,
 }
 thread_local! {
     static PR_TABS: RefCell<Vec<TabHandle>> = const { RefCell::new(Vec::new()) };
@@ -52,7 +53,9 @@ pub fn forget_page(page: &adw::TabPage) {
     PR_TABS.with(|slot| {
         let mut open = slot.borrow_mut();
         if let Some(index) = open.iter().position(|tab| &tab.page == page) {
-            open.remove(index).cancelled.store(true, Ordering::Relaxed);
+            let removed = open.remove(index);
+            removed.closed.store(true, Ordering::Relaxed);
+            removed.cancelled.store(true, Ordering::Relaxed);
         }
     });
     save_open_tabs();
@@ -125,6 +128,7 @@ struct FileRow {
 #[derive(Clone)]
 struct Workspace {
     page: adw::TabPage,
+    closed: Arc<AtomicBool>,
     loaded: Rc<RefCell<Option<Loaded>>>,
     state: Rc<RefCell<ReviewProgress>>,
     selected: Rc<RefCell<Option<String>>>,
@@ -405,7 +409,8 @@ impl Workspace {
     }
 
     fn analyze(&self, requested: Vec<String>, deep: bool) {
-        if self.running.get() || !self.ready() || requested.is_empty() { return; }
+        if self.closed.load(Ordering::Relaxed)
+            || self.running.get() || !self.ready() || requested.is_empty() { return; }
         let Some(loaded) = self.loaded.borrow().clone() else { return };
         self.set_busy(true);
         self.cancelled.store(false, Ordering::Relaxed);
@@ -743,9 +748,11 @@ pub fn show(_parent: &impl IsA<gtk::Window>, tabs: &adw::TabView, initial_url: O
         .unwrap_or_else(|| "New PR review".into()));
     tabs.set_selected_page(&page);
     let loaded_url = Rc::new(RefCell::new(initial_url.map(str::to_owned)));
+    let closed = Arc::new(AtomicBool::new(false));
 
     let screen = Workspace {
         page: page.clone(),
+        closed: closed.clone(),
         loaded: Rc::new(RefCell::new(None)),
         state: Rc::new(RefCell::new(ReviewProgress::default())),
         selected: Rc::new(RefCell::new(None)),
@@ -917,6 +924,9 @@ pub fn show(_parent: &impl IsA<gtk::Window>, tabs: &adw::TabView, initial_url: O
             });
             let screen = screen.clone();
             glib::timeout_add_local(Duration::from_millis(100), move || {
+                if screen.closed.load(Ordering::Relaxed) {
+                    return glib::ControlFlow::Break;
+                }
                 match receiver.try_recv() {
                     Ok(Ok((loaded, _source))) => {
                         page.set_title(&format!("Review #{}", loaded.pr_number));
@@ -1022,7 +1032,7 @@ pub fn show(_parent: &impl IsA<gtk::Window>, tabs: &adw::TabView, initial_url: O
     }
 
     PR_TABS.with(|slot| slot.borrow_mut().push(TabHandle {
-        page, url, loaded_url, cancelled: screen.cancelled.clone(),
+        page, url, loaded_url, cancelled: screen.cancelled.clone(), closed,
     }));
     save_open_tabs();
 }
