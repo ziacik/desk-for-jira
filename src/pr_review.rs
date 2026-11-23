@@ -724,8 +724,8 @@ pub(crate) fn parse_deep_result(response: &str) -> Result<Assessment> {
     })
 }
 
-pub fn show(parent: &impl IsA<gtk::Window>, initial_url: Option<&str>) {
-    crate::pr_review_workspace::show(parent, initial_url);
+pub fn show(parent: &impl IsA<gtk::Window>, tabs: &adw::TabView, initial_url: Option<&str>) {
+    crate::pr_review_workspace::show(parent, tabs, initial_url);
 }
 
 #[cfg(test)]
