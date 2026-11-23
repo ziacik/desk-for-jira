@@ -16,6 +16,7 @@ use crate::jira::{Credentials, JiraClient, PullRequest};
 #[derive(Clone)]
 pub struct PullRequestsPanel {
     root: gtk::Box,
+    tabs: adw::TabView,
     list: gtk::Box,
     count: gtk::Label,
     request: Rc<Cell<u64>>,
@@ -23,7 +24,7 @@ pub struct PullRequestsPanel {
 }
 
 impl PullRequestsPanel {
-    pub fn new() -> Self {
+    pub fn new(tabs: &adw::TabView) -> Self {
         let root = gtk::Box::new(gtk::Orientation::Vertical, 10);
         root.add_css_class("ticket-pr-section");
         root.set_visible(false);
@@ -51,7 +52,7 @@ impl PullRequestsPanel {
         root.append(&list);
 
         let panel = Self {
-            root, list, count,
+            root, tabs: tabs.clone(), list, count,
             request: Rc::new(Cell::new(0)),
             context: Rc::new(RefCell::new(None)),
         };
@@ -170,12 +171,13 @@ impl PullRequestsPanel {
         review.add_css_class("flat");
         review.set_tooltip_text(Some("Open this PR in the assisted review explorer"));
         let root = self.root.clone();
+        let tabs = self.tabs.clone();
         let url = request.url.clone();
         review.connect_clicked(move |_| {
             if let Some(parent) = root.root()
                 .and_then(|root| root.downcast::<gtk::Window>().ok())
             {
-                crate::pr_review::show(&parent, Some(&url));
+                crate::pr_review::show(&parent, &tabs, Some(&url));
             }
         });
         row.append(&review);
