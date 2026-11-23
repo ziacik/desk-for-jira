@@ -979,6 +979,7 @@ fn build_ui(app: &adw::Application) {
         let close_ui = ui.clone();
         let saved_detail_width = ui.saved_detail_width.clone();
         move |window| {
+            crate::pr_review_workspace::begin_shutdown();
             remember_visible_detail_width(&close_ui);
             let mut settings = layout.borrow_mut();
             if window.width() >= 960 && window.height() >= 580 {
