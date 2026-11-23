@@ -25,6 +25,7 @@ struct TabHandle {
 }
 thread_local! {
     static PR_TABS: RefCell<Vec<TabHandle>> = const { RefCell::new(Vec::new()) };
+    static SHUTTING_DOWN: Cell<bool> = const { Cell::new(false) };
 }
 
 /// Keep tab restoration separate from revision-scoped review results.
@@ -39,8 +40,15 @@ fn save_open_tabs() {
     });
 }
 
+/// Preserve all open review tabs when GTK destroys the window at shutdown.
+pub fn begin_shutdown() {
+    save_open_tabs();
+    SHUTTING_DOWN.with(|flag| flag.set(true));
+}
+
 /// Called after a review tab is removed. Other running reviews are unaffected.
 pub fn forget_page(page: &adw::TabPage) {
+    if SHUTTING_DOWN.with(Cell::get) { return; }
     PR_TABS.with(|slot| {
         let mut open = slot.borrow_mut();
         if let Some(index) = open.iter().position(|tab| &tab.page == page) {
@@ -116,6 +124,7 @@ struct FileRow {
 
 #[derive(Clone)]
 struct Workspace {
+    page: adw::TabPage,
     loaded: Rc<RefCell<Option<Loaded>>>,
     state: Rc<RefCell<ReviewProgress>>,
     selected: Rc<RefCell<Option<String>>>,
@@ -184,6 +193,7 @@ impl Workspace {
 
     fn set_busy(&self, active: bool) {
         self.running.set(active);
+        self.page.set_loading(active);
         self.load.set_sensitive(!active);
         self.worktree_button.set_sensitive(!active);
         self.triage.set_sensitive(!active && self.ready());
@@ -735,6 +745,7 @@ pub fn show(_parent: &impl IsA<gtk::Window>, tabs: &adw::TabView, initial_url: O
     let loaded_url = Rc::new(RefCell::new(initial_url.map(str::to_owned)));
 
     let screen = Workspace {
+        page: page.clone(),
         loaded: Rc::new(RefCell::new(None)),
         state: Rc::new(RefCell::new(ReviewProgress::default())),
         selected: Rc::new(RefCell::new(None)),
