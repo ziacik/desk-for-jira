@@ -1015,3 +1015,14 @@ pub fn show(_parent: &impl IsA<gtk::Window>, tabs: &adw::TabView, initial_url: O
     }));
     save_open_tabs();
 }
+
+#[cfg(test)]
+mod tab_tests {
+    use super::review_tab_title;
+
+    #[test]
+    fn restored_review_tabs_have_short_identifiable_titles() {
+        assert_eq!(review_tab_title("https://dev.azure.com/org/proj/_git/repo/pullrequest/1234"), "Review #1234");
+        assert_eq!(review_tab_title("https://example.org/not-a-pr"), "New PR review");
+    }
+}
