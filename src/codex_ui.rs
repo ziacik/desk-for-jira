@@ -517,6 +517,8 @@ pub fn open(
     }
     {
         let keys = gtk::EventControllerKey::new();
+        // Capture image paste before TextView handles its normal text paste binding.
+        keys.set_propagation_phase(gtk::PropagationPhase::Capture);
         let input = input.clone();
         let controller_target = input.clone();
         let images = images.clone();
