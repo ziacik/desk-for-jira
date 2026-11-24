@@ -801,6 +801,11 @@ fn build_ui(app: &adw::Application) {
         crate::pr_review_workspace::forget_page(page);
         crate::codex_ui::forget_page(page);
     });
+    tabs.connect_selected_page_notify(|view| {
+        if let Some(page) = view.selected_page() {
+            page.set_needs_attention(false);
+        }
+    });
     let tab_bar = adw::TabBar::new();
     tab_bar.set_view(Some(&tabs));
     tab_bar.set_autohide(true);
@@ -940,7 +945,9 @@ fn build_ui(app: &adw::Application) {
                 show_command_palette(&command_ui, &command_state, &command_sender);
                 return glib::Propagation::Stop;
             }
-            if close_ui.detail_panel.is_visible()
+            let on_board = close_ui.tabs.selected_page().as_ref()
+                == Some(&close_ui.board_tab);
+            if on_board && close_ui.detail_panel.is_visible()
                 && modifiers.contains(gtk::gdk::ModifierType::ALT_MASK)
                 && !modifiers.intersects(
                     gtk::gdk::ModifierType::CONTROL_MASK
@@ -958,11 +965,12 @@ fn build_ui(app: &adw::Application) {
                 }
             }
             let Some(search) = search.upgrade() else { return glib::Propagation::Proceed };
-            if key == gtk::gdk::Key::Escape && close_ui.detail_panel.is_visible() && !search.has_focus() {
+            if on_board && key == gtk::gdk::Key::Escape
+                && close_ui.detail_panel.is_visible() && !search.has_focus() {
                 dismiss_issue_details(&close_ui);
                 return glib::Propagation::Stop;
             }
-            if key == gtk::gdk::Key::slash
+            if on_board && key == gtk::gdk::Key::slash
                 && !search.has_focus()
                 && !modifiers.intersects(gtk::gdk::ModifierType::CONTROL_MASK | gtk::gdk::ModifierType::ALT_MASK)
             {
