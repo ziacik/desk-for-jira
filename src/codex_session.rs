@@ -107,7 +107,15 @@ fn message_text(item: &Value) -> Option<String> {
         return Some(text.to_owned());
     }
     let content = item["content"].as_array()?;
-    let parts: Vec<_> = content.iter().filter_map(|part| part["text"].as_str()).collect();
+    let parts: Vec<_> = content.iter().filter_map(|part| {
+        if let Some(text) = part["text"].as_str() {
+            Some(text)
+        } else if matches!(part["type"].as_str(), Some("image" | "localImage" | "inputImage")) {
+            Some("[Image attached]")
+        } else {
+            None
+        }
+    }).collect();
     (!parts.is_empty()).then(|| parts.join("\n"))
 }
 
@@ -543,4 +551,11 @@ mod tests {
         assert_eq!(message_text(&json!({"content":[{"type":"text","text":"one"},
             {"type":"text","text":"two"}]})).as_deref(), Some("one\ntwo"));
     }
+    #[test]
+    fn image_only_history_is_visible_without_reprinting_image_data() {
+        assert_eq!(message_text(&json!({"content":[
+            {"type":"image","url":"data:image/png;base64,YWJj"}
+        ]})).as_deref(), Some("[Image attached]"));
+    }
+
 }
