@@ -781,6 +781,7 @@ fn build_ui(app: &adw::Application) {
     // Keep the board/issue inspector alive as the first page. PR reviews get
     // full-width pages, not another narrow dialog or inspector subpanel.
     let tabs = adw::TabView::new();
+    crate::codex_ui::install_tabs(&tabs);
     tabs.set_hexpand(true);
     tabs.set_vexpand(true);
     let board_tab = tabs.append(&inner_split);
@@ -798,6 +799,7 @@ fn build_ui(app: &adw::Application) {
     });
     tabs.connect_page_detached(|_, page, _| {
         crate::pr_review_workspace::forget_page(page);
+        crate::codex_ui::forget_page(page);
     });
     let tab_bar = adw::TabBar::new();
     tab_bar.set_view(Some(&tabs));
@@ -980,6 +982,7 @@ fn build_ui(app: &adw::Application) {
         let saved_detail_width = ui.saved_detail_width.clone();
         move |window| {
             crate::pr_review_workspace::begin_shutdown();
+            crate::codex_ui::shutdown();
             remember_visible_detail_width(&close_ui);
             let mut settings = layout.borrow_mut();
             if window.width() >= 960 && window.height() >= 580 {
