@@ -303,7 +303,7 @@ impl Session<'_> {
                 if self.auto_start {
                     self.auto_start = false;
                     if let Some(prompt) = self.initial_prompt.take() {
-                        self.begin_turn(prompt)?;
+                        self.begin_turn(prompt, Vec::new())?;
                     }
                 } else if should_load_history(was_resuming, value) {
                     self.history_request_id = Some(self.next_request);
