@@ -534,7 +534,7 @@ pub fn open(
                 && modifiers.contains(gdk::ModifierType::CONTROL_MASK)
                 && send.is_sensitive()
             {
-                submit(&input, &images, &strip, &previews,
+                submit(&input, &images, (&strip, &previews),
                     &transcript, &send, &stop, &commands);
                 return glib::Propagation::Stop;
             }
