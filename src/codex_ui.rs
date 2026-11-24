@@ -454,7 +454,10 @@ pub fn open(
                 }
                 Ok(Event::Busy(value)) => {
                     page.set_loading(value);
-                    busy.set(value);
+                    let finished = busy.replace(value) && !value;
+                    if finished && tabs.selected_page().as_ref() != Some(&page) {
+                        page.set_needs_attention(true);
+                    }
                     send.set_sensitive(connected.get() && !value);
                     stop.set_sensitive(value);
                     if value { status.set_text("Codex is working…"); }
@@ -463,10 +466,16 @@ pub fn open(
                 Ok(Event::Status(value)) => status.set_text(&value),
                 Ok(Event::Error(value)) => {
                     page.set_loading(false);
+                    if tabs.selected_page().as_ref() != Some(&page) {
+                        page.set_needs_attention(true);
+                    }
                     status.set_text(&value);
                     transcript.borrow_mut().info(&format!("Codex error: {value}"));
                 }
                 Ok(Event::Approval {request_id, description}) => {
+                    if tabs.selected_page().as_ref() != Some(&page) {
+                        page.set_needs_attention(true);
+                    }
                     let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
                     row.add_css_class("card");
                     let label = gtk::Label::new(Some(&description));
