@@ -543,6 +543,6 @@ mod tab_tests {
         assert_eq!(key, key.clone());
         assert_ne!(key, SessionKey {issue_key: "ART-456".into(), ..key.clone()});
         assert_ne!(key, SessionKey {worktree: PathBuf::from("/other/repo/ART-123"), ..key.clone()});
-        assert_ne!(key, SessionKey {site: "https://other.example".into(), ..key});
+        assert_ne!(key, SessionKey {site: "https://other.example".into(), ..key.clone()});
     }
 }
