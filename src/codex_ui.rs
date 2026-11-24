@@ -3,6 +3,7 @@ use std::{cell::{Cell, RefCell}, path::{Path, PathBuf}, rc::Rc, sync::mpsc::{sel
 
 use adw::prelude::*;
 use gtk::{gdk, glib};
+use gtk::glib::prelude::StaticType;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 
 use crate::{
