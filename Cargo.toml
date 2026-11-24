@@ -15,6 +15,7 @@ serde_json = "1"
 oo7 = { version = "0.6", default-features = false, features = ["async-std", "native_crypto"] }
 futures-lite = "2"
 pulldown-cmark = "0.13"
+base64 = "0.22"
 
 [lints.rust]
 warnings = "deny"
