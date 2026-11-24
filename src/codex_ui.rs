@@ -2,7 +2,9 @@
 use std::{cell::{Cell, RefCell}, path::{Path, PathBuf}, rc::Rc, sync::mpsc::{self, TryRecvError}, thread, time::Duration};
 
 use adw::prelude::*;
-use gtk::glib;
+use gtk::{gdk, glib};
+use gtk::glib::prelude::StaticType;
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 
 use crate::{
     codex, codex_markdown, codex_session::{self, Control, Event, TranscriptItem},
@@ -255,14 +257,94 @@ impl Transcript {
     }
 }
 
-fn submit(input: &gtk::TextView, transcript: &Rc<RefCell<Transcript>>, send: &gtk::Button,
-          stop: &gtk::Button, commands: &mpsc::Sender<Control>) {
+
+#[derive(Clone)]
+struct PendingImage {
+    input: codex_session::ImageInput,
+    preview: gdk::Texture,
+    name: String,
+}
+
+/// Keep images separate from the text buffer so screenshots are genuine
+/// multimodal Codex inputs rather than image paths pasted into the prompt.
+fn refresh_image_previews(
+    images: &Rc<RefCell<Vec<PendingImage>>>, strip: &gtk::ScrolledWindow, previews: &gtk::Box,
+) {
+    clear(previews);
+    strip.set_visible(!images.borrow().is_empty());
+    for (index, image) in images.borrow().iter().enumerate() {
+        let tile = gtk::Box::new(gtk::Orientation::Vertical, 3);
+        let overlay = gtk::Overlay::new();
+        let picture = gtk::Picture::for_paintable(&image.preview);
+        picture.set_content_fit(gtk::ContentFit::Contain);
+        picture.set_size_request(92, 72);
+        overlay.set_child(Some(&picture));
+
+        let remove = gtk::Button::from_icon_name("window-close-symbolic");
+        remove.add_css_class("flat");
+        remove.add_css_class("circular");
+        remove.set_halign(gtk::Align::End);
+        remove.set_valign(gtk::Align::Start);
+        remove.set_tooltip_text(Some("Remove image"));
+        overlay.add_overlay(&remove);
+        tile.append(&overlay);
+
+        let label = gtk::Label::new(Some(&image.name));
+        label.set_max_width_chars(14);
+        label.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
+        label.set_tooltip_text(Some(&image.name));
+        tile.append(&label);
+        previews.append(&tile);
+
+        // The remove button lives below 'previews': only capture weak widget
+        // refs to avoid a widget/closure reference cycle.
+        let previews_weak = previews.downgrade();
+        let strip_weak = strip.downgrade();
+        let images = images.clone();
+        remove.connect_clicked(move |_| {
+            images.borrow_mut().remove(index);
+            if let (Some(strip), Some(previews)) =
+                (strip_weak.upgrade(), previews_weak.upgrade())
+            {
+                refresh_image_previews(&images, &strip, &previews);
+            }
+        });
+    }
+}
+
+fn append_image(
+    images: &Rc<RefCell<Vec<PendingImage>>>, strip: &gtk::ScrolledWindow,
+    previews: &gtk::Box, input: codex_session::ImageInput,
+    preview: gdk::Texture, name: String,
+) {
+    images.borrow_mut().push(PendingImage { input, preview, name });
+    refresh_image_previews(images, strip, previews);
+}
+
+fn submit(
+    input: &gtk::TextView, images: &Rc<RefCell<Vec<PendingImage>>>,
+    preview_widgets: (&gtk::ScrolledWindow, &gtk::Box),
+    transcript: &Rc<RefCell<Transcript>>, send: &gtk::Button,
+    stop: &gtk::Button, commands: &mpsc::Sender<Control>,
+) {
     let buffer = input.buffer();
     let message = buffer.text(&buffer.start_iter(), &buffer.end_iter(), false).to_string();
-    if message.trim().is_empty() { return; }
-    if commands.send(Control::Send(message.clone())).is_err() { return; }
-    transcript.borrow_mut().user(message.trim());
+    let attachments: Vec<_> = images.borrow().iter()
+        .map(|image| image.input.clone()).collect();
+    let count = attachments.len();
+    if message.trim().is_empty() && count == 0 { return; }
+    if commands.send(Control::Send { text: message.clone(), images: attachments }).is_err() {
+        return;
+    }
+    let mut display = message.trim().to_owned();
+    if count != 0 {
+        if !display.is_empty() { display.push('\n'); }
+        display.push_str(&format!("[{count} image{} attached]", if count == 1 { "" } else { "s" }));
+    }
+    transcript.borrow_mut().user(&display);
     buffer.set_text("");
+    images.borrow_mut().clear();
+    refresh_image_previews(images, preview_widgets.0, preview_widgets.1);
     send.set_sensitive(false);
     stop.set_sensitive(true);
 }
@@ -328,7 +410,21 @@ pub fn open(
     status.set_wrap(true);
     body.append(&status);
 
+    let images: Rc<RefCell<Vec<PendingImage>>> = Rc::new(RefCell::new(Vec::new()));
+    let attachment_strip = gtk::ScrolledWindow::new();
+    attachment_strip.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Never);
+    attachment_strip.set_min_content_height(112);
+    attachment_strip.set_visible(false);
+    let attachment_previews = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    attachment_previews.set_margin_top(5);
+    attachment_previews.set_margin_bottom(5);
+    attachment_strip.set_child(Some(&attachment_previews));
+    body.append(&attachment_strip);
+
     let composer = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let attach = gtk::Button::from_icon_name("mail-attachment-symbolic");
+    attach.set_tooltip_text(Some("Attach image files"));
+    composer.append(&attach);
     let input_frame = gtk::ScrolledWindow::new();
     input_frame.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
     input_frame.set_min_content_height(72);
@@ -361,34 +457,117 @@ pub fn open(
         worktree.to_path_buf(), site.to_owned(), issue.clone(), account.clone(),
     );
 
+    // A native file chooser is an alternative to pasting screenshots. Codex
+    // receives real local image paths, not just their names in the prompt.
+    {
+        let parent = _parent.as_ref().clone();
+        let images = images.clone();
+        let strip = attachment_strip.clone();
+        let previews = attachment_previews.clone();
+        let status = status.clone();
+        attach.connect_clicked(move |_| {
+            let picker = gtk::FileDialog::new();
+            picker.set_title("Attach images");
+            let filter = gtk::FileFilter::new();
+            filter.set_name(Some("Images (PNG, JPEG, TIFF)"));
+            for mime in ["image/png", "image/jpeg", "image/tiff"] {
+                filter.add_mime_type(mime);
+            }
+            let filters = gtk::gio::ListStore::new::<gtk::FileFilter>();
+            filters.append(&filter);
+            picker.set_filters(Some(&filters));
+
+            let parent = parent.clone();
+            let images = images.clone();
+            let strip = strip.clone();
+            let previews = previews.clone();
+            let status = status.clone();
+            glib::MainContext::default().spawn_local(async move {
+                if let Ok(files) = picker.open_multiple_future(Some(&parent)).await {
+                    for file in files.iter::<gtk::gio::File>().flatten() {
+                        let Some(path) = file.path() else { continue };
+                        match gdk::Texture::from_filename(&path) {
+                            Ok(preview) => {
+                                let name = path.file_name()
+                                    .map(|name| name.to_string_lossy().into_owned())
+                                    .unwrap_or_else(|| "Image".to_owned());
+                                append_image(&images, &strip, &previews,
+                                    codex_session::ImageInput::Local(path), preview, name);
+                            }
+                            Err(error) => status.set_text(&format!("Cannot attach image: {error}")),
+                        }
+                    }
+                }
+            });
+        });
+    }
     {
         let input = input.clone();
+        let images = images.clone();
+        let strip = attachment_strip.clone();
+        let previews = attachment_previews.clone();
         let transcript = transcript.clone();
         let send_button = send.clone();
         let stop_button = stop.clone();
         let commands = commands.clone();
         send.connect_clicked(move |_| {
-            submit(&input, &transcript, &send_button, &stop_button, &commands);
+            submit(&input, &images, (&strip, &previews),
+                &transcript, &send_button, &stop_button, &commands);
         });
     }
     {
         let keys = gtk::EventControllerKey::new();
+        // Capture image paste before TextView handles its normal text paste binding.
+        keys.set_propagation_phase(gtk::PropagationPhase::Capture);
         let input = input.clone();
         let controller_target = input.clone();
+        let images = images.clone();
+        let strip = attachment_strip.clone();
+        let previews = attachment_previews.clone();
+        let status = status.clone();
         let transcript = transcript.clone();
         let send = send.clone();
         let stop = stop.clone();
         let commands = commands.clone();
         keys.connect_key_pressed(move |_, key, _, modifiers| {
-            if key == gtk::gdk::Key::Return
-                && modifiers.contains(gtk::gdk::ModifierType::CONTROL_MASK)
+            if key == gdk::Key::Return
+                && modifiers.contains(gdk::ModifierType::CONTROL_MASK)
                 && send.is_sensitive()
             {
-                submit(&input, &transcript, &send, &stop, &commands);
-                glib::Propagation::Stop
-            } else {
-                glib::Propagation::Proceed
+                submit(&input, &images, (&strip, &previews),
+                    &transcript, &send, &stop, &commands);
+                return glib::Propagation::Stop;
             }
+            if matches!(key, gdk::Key::v | gdk::Key::V)
+                && modifiers.contains(gdk::ModifierType::CONTROL_MASK)
+            {
+                let clipboard = input.display().clipboard();
+                let formats = clipboard.formats();
+                let is_image = formats.contains_type(gdk::Texture::static_type())
+                    || ["image/png", "image/jpeg", "image/tiff", "image/webp", "image/bmp"]
+                        .iter().any(|mime| formats.contain_mime_type(mime));
+                if is_image {
+                    let images = images.clone();
+                    let strip = strip.clone();
+                    let previews = previews.clone();
+                    let status = status.clone();
+                    glib::MainContext::default().spawn_local(async move {
+                        match clipboard.read_texture_future().await {
+                            Ok(Some(texture)) => {
+                                let png = texture.save_to_png_bytes();
+                                let url = format!("data:image/png;base64,{}", STANDARD.encode(png.as_ref()));
+                                append_image(&images, &strip, &previews,
+                                    codex_session::ImageInput::InlinePng(url),
+                                    texture, "Pasted image".to_owned());
+                            }
+                            Ok(None) => status.set_text("No image in clipboard"),
+                            Err(error) => status.set_text(&format!("Cannot paste image: {error}")),
+                        }
+                    });
+                    return glib::Propagation::Stop;
+                }
+            }
+            glib::Propagation::Proceed
         });
         controller_target.add_controller(keys);
     }

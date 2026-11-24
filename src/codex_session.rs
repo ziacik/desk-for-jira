@@ -14,8 +14,16 @@ use serde_json::{Value, json};
 
 use crate::{codex::{self, CodexMode}, git, jira::{Credentials, Issue, JiraClient}, preferences};
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ImageInput {
+    /// PNG copied from the clipboard, encoded as a data URL.
+    InlinePng(String),
+    /// An existing local image chosen by the user.
+    Local(PathBuf),
+}
+
 pub enum Control {
-    Send(String),
+    Send { text: String, images: Vec<ImageInput> },
     Interrupt,
     Decide { request_id: Value, allow: bool },
     Quit,
@@ -62,8 +70,18 @@ fn send(stdin: &mut ChildStdin, value: Value) -> Result<()> {
     Ok(())
 }
 
-fn input(text: String) -> Value {
-    json!([{ "type": "text", "text": text }])
+fn input(text: String, images: Vec<ImageInput>) -> Value {
+    let mut items = Vec::new();
+    if !text.trim().is_empty() {
+        items.push(json!({ "type": "text", "text": text }));
+    }
+    for image in images {
+        items.push(match image {
+            ImageInput::InlinePng(url) => json!({ "type": "image", "url": url }),
+            ImageInput::Local(path) => json!({ "type": "localImage", "path": path }),
+        });
+    }
+    Value::Array(items)
 }
 
 fn item_description(item: &Value) -> Option<TranscriptItem> {
@@ -89,7 +107,15 @@ fn message_text(item: &Value) -> Option<String> {
         return Some(text.to_owned());
     }
     let content = item["content"].as_array()?;
-    let parts: Vec<_> = content.iter().filter_map(|part| part["text"].as_str()).collect();
+    let parts: Vec<_> = content.iter().filter_map(|part| {
+        if let Some(text) = part["text"].as_str() {
+            Some(text)
+        } else if matches!(part["type"].as_str(), Some("image" | "localImage" | "inputImage")) {
+            Some("[Image attached]")
+        } else {
+            None
+        }
+    }).collect();
     (!parts.is_empty()).then(|| parts.join("\n"))
 }
 
@@ -172,7 +198,7 @@ impl Session<'_> {
         send(&mut self.stdin, json!({"id": id, "method": method, "params": params}))
     }
 
-    fn begin_turn(&mut self, text: String) -> Result<()> {
+    fn begin_turn(&mut self, text: String, images: Vec<ImageInput>) -> Result<()> {
         let Some(thread_id) = self.thread_id.clone() else { return Ok(()) };
         let text = if let Some(context) = self.initial_prompt.take() {
             format!("{context}\n\nUser's next instruction:\n{text}")
@@ -181,7 +207,7 @@ impl Session<'_> {
         };
         self.request("turn/start", json!({
             "threadId": thread_id,
-            "input": input(text),
+            "input": input(text, images),
             "cwd": self.worktree,
             "approvalPolicy": if self.yolo { "never" } else { "on-request" },
             "sandboxPolicy": {"type": if self.yolo { "dangerFullAccess" } else { "workspaceWrite" }},
@@ -277,7 +303,7 @@ impl Session<'_> {
                 if self.auto_start {
                     self.auto_start = false;
                     if let Some(prompt) = self.initial_prompt.take() {
-                        self.begin_turn(prompt)?;
+                        self.begin_turn(prompt, Vec::new())?;
                     }
                 } else if should_load_history(was_resuming, value) {
                     self.history_request_id = Some(self.next_request);
@@ -406,9 +432,9 @@ fn run(
     loop {
         match commands.try_recv() {
             Ok(Control::Quit) => break,
-            Ok(Control::Send(message)) => {
-                if !message.trim().is_empty() {
-                    session.begin_turn(message)?;
+            Ok(Control::Send { text, images }) => {
+                if !text.trim().is_empty() || !images.is_empty() {
+                    session.begin_turn(text, images)?;
                 }
             }
             Ok(Control::Interrupt) => {
@@ -496,9 +522,40 @@ mod tests {
         ]);
     }
 
+
+    #[test]
+    fn image_inputs_use_native_codex_app_server_items() {
+        let result = input("Inspect these".into(), vec![
+            ImageInput::InlinePng("data:image/png;base64,YWJj".into()),
+            ImageInput::Local(PathBuf::from("/tmp/screenshot.png")),
+        ]);
+        assert_eq!(result, json!([
+            {"type": "text", "text": "Inspect these"},
+            {"type": "image", "url": "data:image/png;base64,YWJj"},
+            {"type": "localImage", "path": "/tmp/screenshot.png"}
+        ]));
+    }
+
+    #[test]
+    fn image_only_message_does_not_require_text() {
+        let result = input("   ".into(), vec![
+            ImageInput::Local(PathBuf::from("/tmp/screenshot.png")),
+        ]);
+        assert_eq!(result, json!([
+            {"type": "localImage", "path": "/tmp/screenshot.png"}
+        ]));
+    }
+
     #[test]
     fn message_contents_are_extracted_from_text_parts() {
         assert_eq!(message_text(&json!({"content":[{"type":"text","text":"one"},
             {"type":"text","text":"two"}]})).as_deref(), Some("one\ntwo"));
     }
+    #[test]
+    fn image_only_history_is_visible_without_reprinting_image_data() {
+        assert_eq!(message_text(&json!({"content":[
+            {"type":"image","url":"data:image/png;base64,YWJj"}
+        ]})).as_deref(), Some("[Image attached]"));
+    }
+
 }
