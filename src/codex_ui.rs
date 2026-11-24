@@ -323,7 +323,7 @@ fn append_image(
 
 fn submit(
     input: &gtk::TextView, images: &Rc<RefCell<Vec<PendingImage>>>,
-    strip: &gtk::ScrolledWindow, previews: &gtk::Box,
+    preview_widgets: (&gtk::ScrolledWindow, &gtk::Box),
     transcript: &Rc<RefCell<Transcript>>, send: &gtk::Button,
     stop: &gtk::Button, commands: &mpsc::Sender<Control>,
 ) {
@@ -344,7 +344,7 @@ fn submit(
     transcript.borrow_mut().user(&display);
     buffer.set_text("");
     images.borrow_mut().clear();
-    refresh_image_previews(images, strip, previews);
+    refresh_image_previews(images, preview_widgets.0, preview_widgets.1);
     send.set_sensitive(false);
     stop.set_sensitive(true);
 }
@@ -511,7 +511,7 @@ pub fn open(
         let stop_button = stop.clone();
         let commands = commands.clone();
         send.connect_clicked(move |_| {
-            submit(&input, &images, &strip, &previews,
+            submit(&input, &images, (&strip, &previews),
                 &transcript, &send_button, &stop_button, &commands);
         });
     }
