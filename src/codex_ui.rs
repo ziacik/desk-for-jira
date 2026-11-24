@@ -270,10 +270,10 @@ fn submit(input: &gtk::TextView, transcript: &Rc<RefCell<Transcript>>, send: &gt
 pub fn open(
     _parent: &impl IsA<gtk::Window>, worktree: &Path, site: &str,
     issue: &Issue, account: Option<Credentials>,
-) {
+) -> bool {
     let Some(tabs) = TAB_VIEW.with(|slot| slot.borrow().clone()) else {
         eprintln!("Cannot open Codex: main tab view is not installed");
-        return;
+        return false;
     };
     let key = SessionKey {
         site: site.to_owned(), issue_key: issue.key.clone(),
@@ -283,7 +283,7 @@ pub fn open(
         .find(|tab| tab.key == key).map(|tab| tab.page.clone()));
     if let Some(page) = existing {
         tabs.set_selected_page(&page);
-        return;
+        return true;
     }
     let body = gtk::Box::new(gtk::Orientation::Vertical, 10);
     body.set_margin_top(15);
@@ -516,6 +516,7 @@ pub fn open(
         transcript.borrow_mut().flush_agent();
         glib::ControlFlow::Continue
     });
+    true
 }
 
 #[cfg(test)]
