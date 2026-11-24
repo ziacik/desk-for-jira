@@ -1040,7 +1040,10 @@ pub fn show(
                 report(&view.info, "No Jira issue context available");
                 return;
             };
-            codex_ui::open(&view.dialog, &tree.path, &site, issue, account.clone());
+            if codex_ui::open(&view.dialog, &tree.path, &site, issue, account.clone()) {
+                // This is a modal worktree dialog; dismiss it to reveal the Codex tab.
+                view.dialog.close();
+            }
         });
     }
     {

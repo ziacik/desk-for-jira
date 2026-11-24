@@ -17,12 +17,57 @@ use crate::{
     pr_review_state::{self, Assessment, ReviewProgress, Verdict},
 };
 
-struct WindowHandle {
-    window: gtk::Window,
+struct TabHandle {
+    page: adw::TabPage,
     url: gtk::Entry,
+    loaded_url: Rc<RefCell<Option<String>>>,
+    cancelled: Arc<AtomicBool>,
+    closed: Arc<AtomicBool>,
 }
 thread_local! {
-    static PR_WINDOW: RefCell<Option<WindowHandle>> = const { RefCell::new(None) };
+    static PR_TABS: RefCell<Vec<TabHandle>> = const { RefCell::new(Vec::new()) };
+    static SHUTTING_DOWN: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Keep tab restoration separate from revision-scoped review results.
+fn save_open_tabs() {
+    PR_TABS.with(|slot| {
+        let urls = slot.borrow().iter()
+            .filter_map(|tab| tab.loaded_url.borrow().clone())
+            .collect::<Vec<_>>();
+        if let Err(error) = pr_review_state::save_open_review_urls(&urls) {
+            eprintln!("Cannot save open PR review tabs: {error}");
+        }
+    });
+}
+
+/// Preserve all open review tabs when GTK destroys the window at shutdown.
+pub fn begin_shutdown() {
+    save_open_tabs();
+    SHUTTING_DOWN.with(|flag| flag.set(true));
+}
+
+/// Called after a review tab is removed. Other running reviews are unaffected.
+pub fn forget_page(page: &adw::TabPage) {
+    if SHUTTING_DOWN.with(Cell::get) { return; }
+    PR_TABS.with(|slot| {
+        let mut open = slot.borrow_mut();
+        if let Some(index) = open.iter().position(|tab| &tab.page == page) {
+            let removed = open.remove(index);
+            removed.closed.store(true, Ordering::Relaxed);
+            removed.cancelled.store(true, Ordering::Relaxed);
+        }
+    });
+    save_open_tabs();
+}
+
+fn review_tab_title(url: &str) -> String {
+    let number = url.trim_end_matches('/').rsplit('/').next().unwrap_or("");
+    if number.chars().all(|ch| ch.is_ascii_digit()) && !number.is_empty() {
+        format!("Review #{number}")
+    } else {
+        "New PR review".into()
+    }
 }
 
 const FILES_PER_BATCH: usize = 20;
@@ -82,6 +127,8 @@ struct FileRow {
 
 #[derive(Clone)]
 struct Workspace {
+    page: adw::TabPage,
+    closed: Arc<AtomicBool>,
     loaded: Rc<RefCell<Option<Loaded>>>,
     state: Rc<RefCell<ReviewProgress>>,
     selected: Rc<RefCell<Option<String>>>,
@@ -150,6 +197,7 @@ impl Workspace {
 
     fn set_busy(&self, active: bool) {
         self.running.set(active);
+        self.page.set_loading(active);
         self.load.set_sensitive(!active);
         self.worktree_button.set_sensitive(!active);
         self.triage.set_sensitive(!active && self.ready());
@@ -361,7 +409,8 @@ impl Workspace {
     }
 
     fn analyze(&self, requested: Vec<String>, deep: bool) {
-        if self.running.get() || !self.ready() || requested.is_empty() { return; }
+        if self.closed.load(Ordering::Relaxed)
+            || self.running.get() || !self.ready() || requested.is_empty() { return; }
         let Some(loaded) = self.loaded.borrow().clone() else { return };
         self.set_busy(true);
         self.cancelled.store(false, Ordering::Relaxed);
@@ -495,16 +544,20 @@ impl Workspace {
     }
 }
 
-pub fn show(parent: &impl IsA<gtk::Window>, initial_url: Option<&str>) {
-    if PR_WINDOW.with(|slot| {
-        if let Some(window) = slot.borrow().as_ref() {
-            if let Some(url) = initial_url { window.url.set_text(url); }
-            window.window.present();
-            true
-        } else { false }
-    }) { return; }
+pub fn show(_parent: &impl IsA<gtk::Window>, tabs: &adw::TabView, initial_url: Option<&str>) {
+    // Restore the requested PR or reuse the blank editor; never replace a live review.
+    let existing = PR_TABS.with(|slot| {
+        slot.borrow().iter().find(|tab| match initial_url {
+            Some(address) => tab.loaded_url.borrow().as_deref() == Some(address.trim())
+                || tab.url.text().as_str() == address.trim(),
+            None => tab.loaded_url.borrow().is_none() && tab.url.text().is_empty(),
+        }).map(|tab| tab.page.clone())
+    });
+    if let Some(page) = existing {
+        tabs.set_selected_page(&page);
+        return;
+    }
 
-    let parent: &gtk::Window = parent.as_ref();
     let settings = match preferences::load_git() {
         Ok(settings) => settings,
         Err(error) => {
@@ -512,15 +565,6 @@ pub fn show(parent: &impl IsA<gtk::Window>, initial_url: Option<&str>) {
             return;
         }
     };
-
-    let window = gtk::Window::builder()
-        .title("PR Review")
-        .transient_for(parent)
-        .modal(false)
-        .default_width((parent.width() * 90 / 100).max(1100))
-        .default_height((parent.height() * 90 / 100).max(730))
-        .build();
-    window.set_hide_on_close(true);
 
     let root = gtk::Box::new(gtk::Orientation::Vertical, 8);
     root.set_margin_start(12);
@@ -696,12 +740,19 @@ pub fn show(parent: &impl IsA<gtk::Window>, initial_url: Option<&str>) {
     paned.set_end_child(Some(&detail));
     root.append(&paned);
 
-    let status = label("Review progress is saved per PR commit. Closing this window does not stop Codex.");
+    let status = label("Review progress is saved per PR commit. You can switch tabs while Codex runs.");
     status.add_css_class("dim-label");
     root.append(&status);
-    window.set_child(Some(&root));
+    let page = tabs.append(&root);
+    page.set_title(&initial_url.map(review_tab_title)
+        .unwrap_or_else(|| "New PR review".into()));
+    tabs.set_selected_page(&page);
+    let loaded_url = Rc::new(RefCell::new(initial_url.map(str::to_owned)));
+    let closed = Arc::new(AtomicBool::new(false));
 
     let screen = Workspace {
+        page: page.clone(),
+        closed: closed.clone(),
         loaded: Rc::new(RefCell::new(None)),
         state: Rc::new(RefCell::new(ReviewProgress::default())),
         selected: Rc::new(RefCell::new(None)),
@@ -830,6 +881,8 @@ pub fn show(parent: &impl IsA<gtk::Window>, initial_url: Option<&str>) {
     }
     {
         let screen = screen.clone();
+        let page = page.clone();
+        let loaded_url = loaded_url.clone();
         let repo_settings = settings.repositories;
         let root = git_ui::expand_home(&settings.worktree_root);
         let url = url.clone();
@@ -855,6 +908,9 @@ pub fn show(parent: &impl IsA<gtk::Window>, initial_url: Option<&str>) {
                 run_setup: configured,
             };
             let address = url.text().to_string();
+            let loaded_address = address.clone();
+            let page = page.clone();
+            let loaded_url = loaded_url.clone();
             let token = pat.text().to_string();
             let remember_token = remember.is_active();
             screen.set_busy(true);
@@ -868,8 +924,14 @@ pub fn show(parent: &impl IsA<gtk::Window>, initial_url: Option<&str>) {
             });
             let screen = screen.clone();
             glib::timeout_add_local(Duration::from_millis(100), move || {
+                if screen.closed.load(Ordering::Relaxed) {
+                    return glib::ControlFlow::Break;
+                }
                 match receiver.try_recv() {
                     Ok(Ok((loaded, _source))) => {
+                        page.set_title(&format!("Review #{}", loaded.pr_number));
+                        *loaded_url.borrow_mut() = Some(loaded_address.clone());
+                        save_open_tabs();
                         screen.show_files(loaded);
                         if screen.ready() { screen.triage_pending(); }
                         glib::ControlFlow::Break
@@ -969,9 +1031,19 @@ pub fn show(parent: &impl IsA<gtk::Window>, initial_url: Option<&str>) {
         });
     }
 
-    PR_WINDOW.with(|slot| *slot.borrow_mut() = Some(WindowHandle {
-        window: window.clone(),
-        url: url.clone(),
+    PR_TABS.with(|slot| slot.borrow_mut().push(TabHandle {
+        page, url, loaded_url, cancelled: screen.cancelled.clone(), closed,
     }));
-    window.present();
+    save_open_tabs();
+}
+
+#[cfg(test)]
+mod tab_tests {
+    use super::review_tab_title;
+
+    #[test]
+    fn restored_review_tabs_have_short_identifiable_titles() {
+        assert_eq!(review_tab_title("https://dev.azure.com/org/proj/_git/repo/pullrequest/1234"), "Review #1234");
+        assert_eq!(review_tab_title("https://example.org/not-a-pr"), "New PR review");
+    }
 }

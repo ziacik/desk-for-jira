@@ -1,13 +1,56 @@
-//! Native Codex conversation window, deliberately separate from VS Code and terminals.
-use std::{cell::{Cell, RefCell}, path::Path, rc::Rc, sync::mpsc::{self, TryRecvError}, thread, time::Duration};
+//! Native Codex conversation workspace, hosted in the main window's tabs.
+use std::{cell::{Cell, RefCell}, path::{Path, PathBuf}, rc::Rc, sync::mpsc::{self, TryRecvError}, thread, time::Duration};
 
 use adw::prelude::*;
 use gtk::glib;
 
 use crate::{
-    codex, codex_markdown, codex_session::{self, Control, Event, TranscriptItem}, dialog,
+    codex, codex_markdown, codex_session::{self, Control, Event, TranscriptItem},
     jira::{Credentials, Issue, JiraClient},
 };
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SessionKey {
+    site: String,
+    issue_key: String,
+    worktree: PathBuf,
+}
+
+struct CodexTab {
+    key: SessionKey,
+    page: adw::TabPage,
+    commands: mpsc::Sender<Control>,
+}
+
+thread_local! {
+    static TAB_VIEW: RefCell<Option<adw::TabView>> = const { RefCell::new(None) };
+    static CODEX_TABS: RefCell<Vec<CodexTab>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Install the main application's tab view once; all Codex launch points use it.
+pub fn install_tabs(tabs: &adw::TabView) {
+    TAB_VIEW.with(|slot| *slot.borrow_mut() = Some(tabs.clone()));
+}
+
+/// Called by the main tab view when a Codex page is closed.
+pub fn forget_page(page: &adw::TabPage) {
+    CODEX_TABS.with(|slot| {
+        let mut sessions = slot.borrow_mut();
+        if let Some(index) = sessions.iter().position(|session| &session.page == page) {
+            let session = sessions.remove(index);
+            let _ = session.commands.send(Control::Quit);
+        }
+    });
+}
+
+/// Close transports cleanly when Desk for Jira is exiting.
+pub fn shutdown() {
+    CODEX_TABS.with(|slot| {
+        for session in slot.borrow().iter() {
+            let _ = session.commands.send(Control::Quit);
+        }
+    });
+}
 
 fn clear(container: &gtk::Box) {
     while let Some(child) = container.first_child() {
@@ -225,15 +268,23 @@ fn submit(input: &gtk::TextView, transcript: &Rc<RefCell<Transcript>>, send: &gt
 }
 
 pub fn open(
-    parent: &impl IsA<gtk::Window>, worktree: &Path, site: &str,
+    _parent: &impl IsA<gtk::Window>, worktree: &Path, site: &str,
     issue: &Issue, account: Option<Credentials>,
-) {
-    let window = gtk::Window::builder()
-        .title(format!("Codex · {}", issue.key))
-        .transient_for(parent)
-        .default_width(820).default_height(620)
-        .build();
-    dialog::close_on_escape(&window);
+) -> bool {
+    let Some(tabs) = TAB_VIEW.with(|slot| slot.borrow().clone()) else {
+        eprintln!("Cannot open Codex: main tab view is not installed");
+        return false;
+    };
+    let key = SessionKey {
+        site: site.to_owned(), issue_key: issue.key.clone(),
+        worktree: worktree.to_path_buf(),
+    };
+    let existing = CODEX_TABS.with(|slot| slot.borrow().iter()
+        .find(|tab| tab.key == key).map(|tab| tab.page.clone()));
+    if let Some(page) = existing {
+        tabs.set_selected_page(&page);
+        return true;
+    }
     let body = gtk::Box::new(gtk::Orientation::Vertical, 10);
     body.set_margin_top(15);
     body.set_margin_bottom(15);
@@ -301,7 +352,10 @@ pub fn open(
     stop.set_sensitive(false);
     composer.append(&stop);
     body.append(&composer);
-    window.set_child(Some(&body));
+    let page = tabs.append(&body);
+    page.set_title(&format!("Codex · {}", issue.key));
+    page.set_loading(true);
+    tabs.set_selected_page(&page);
 
     let (commands, events) = codex_session::spawn(
         worktree.to_path_buf(), site.to_owned(), issue.clone(), account.clone(),
@@ -345,13 +399,6 @@ pub fn open(
         });
     }
     {
-        let commands = commands.clone();
-        window.connect_close_request(move |_| {
-            let _ = commands.send(Control::Quit);
-            glib::Propagation::Proceed
-        });
-    }
-    {
         let worktree = worktree.to_path_buf();
         let site = site.to_owned();
         let issue = issue.clone();
@@ -391,18 +438,26 @@ pub fn open(
         });
     }
 
+    CODEX_TABS.with(|slot| slot.borrow_mut().push(CodexTab {
+        key, page: page.clone(), commands: commands.clone(),
+    }));
     let connected = Rc::new(Cell::new(false));
     let busy = Rc::new(Cell::new(false));
     glib::timeout_add_local(Duration::from_millis(55), move || {
         for _ in 0..100 {
             match events.try_recv() {
                 Ok(Event::Ready) => {
+                    page.set_loading(false);
                     connected.set(true);
                     send.set_sensitive(!busy.get());
                     status.set_text("Ready");
                 }
                 Ok(Event::Busy(value)) => {
-                    busy.set(value);
+                    page.set_loading(value);
+                    let finished = busy.replace(value) && !value;
+                    if finished && tabs.selected_page().as_ref() != Some(&page) {
+                        page.set_needs_attention(true);
+                    }
                     send.set_sensitive(connected.get() && !value);
                     stop.set_sensitive(value);
                     if value { status.set_text("Codex is working…"); }
@@ -410,10 +465,17 @@ pub fn open(
                 Ok(Event::Output(value)) => transcript.borrow_mut().output(value),
                 Ok(Event::Status(value)) => status.set_text(&value),
                 Ok(Event::Error(value)) => {
+                    page.set_loading(false);
+                    if tabs.selected_page().as_ref() != Some(&page) {
+                        page.set_needs_attention(true);
+                    }
                     status.set_text(&value);
                     transcript.borrow_mut().info(&format!("Codex error: {value}"));
                 }
                 Ok(Event::Approval {request_id, description}) => {
+                    if tabs.selected_page().as_ref() != Some(&page) {
+                        page.set_needs_attention(true);
+                    }
                     let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
                     row.add_css_class("card");
                     let label = gtk::Label::new(Some(&description));
@@ -448,16 +510,39 @@ pub fn open(
                     approvals.append(&row);
                 }
                 Ok(Event::Closed) => {
+                    page.set_loading(false);
                     send.set_sensitive(false);
                     stop.set_sensitive(false);
                     return glib::ControlFlow::Break;
                 }
                 Err(TryRecvError::Empty) => break,
-                Err(TryRecvError::Disconnected) => return glib::ControlFlow::Break,
+                Err(TryRecvError::Disconnected) => {
+                    page.set_loading(false);
+                    return glib::ControlFlow::Break;
+                },
             }
         }
         transcript.borrow_mut().flush_agent();
         glib::ControlFlow::Continue
     });
-    window.present();
+    true
+}
+
+#[cfg(test)]
+mod tab_tests {
+    use super::SessionKey;
+    use std::path::PathBuf;
+
+    #[test]
+    fn sessions_are_unique_per_site_issue_and_worktree() {
+        let key = SessionKey {
+            site: "https://jira.example".into(),
+            issue_key: "ART-123".into(),
+            worktree: PathBuf::from("/worktrees/repo/ART-123"),
+        };
+        assert_eq!(key, key.clone());
+        assert_ne!(key, SessionKey {issue_key: "ART-456".into(), ..key.clone()});
+        assert_ne!(key, SessionKey {worktree: PathBuf::from("/other/repo/ART-123"), ..key.clone()});
+        assert_ne!(key, SessionKey {site: "https://other.example".into(), ..key.clone()});
+    }
 }

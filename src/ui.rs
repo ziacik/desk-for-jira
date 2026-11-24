@@ -90,6 +90,8 @@ struct Ui {
     layout: Rc<RefCell<UiLayout>>,
     layout_save_timer: Rc<RefCell<Option<glib::SourceId>>>,
     inner_split: gtk::Paned,
+    tabs: adw::TabView,
+    board_tab: adw::TabPage,
     image_slots: Rc<RefCell<issue_detail::ImageSlots>>,
     events: Sender<Event>,
     selected_issue: Rc<RefCell<Option<String>>>,
@@ -775,7 +777,61 @@ fn build_ui(app: &adw::Application) {
     inner_split.set_shrink_start_child(true);
     inner_split.set_shrink_end_child(true);
     inner_split.set_hexpand(true);
-    workspace_split.set_end_child(Some(&inner_split));
+
+    // Keep the board/issue inspector alive as the first page. PR reviews get
+    // full-width pages, not another narrow dialog or inspector subpanel.
+    let tabs = adw::TabView::new();
+    crate::codex_ui::install_tabs(&tabs);
+    tabs.set_hexpand(true);
+    tabs.set_vexpand(true);
+    let board_tab = tabs.append(&inner_split);
+    board_tab.set_title("Board");
+    tabs.connect_close_page({
+        let board_tab = board_tab.clone();
+        move |view, page| {
+            if page == &board_tab {
+                view.close_page_finish(page, false);
+                glib::Propagation::Stop
+            } else {
+                glib::Propagation::Proceed
+            }
+        }
+    });
+    tabs.connect_page_detached(|_, page, _| {
+        crate::pr_review_workspace::forget_page(page);
+        crate::codex_ui::forget_page(page);
+    });
+    tabs.connect_selected_page_notify(|view| {
+        if let Some(page) = view.selected_page() {
+            page.set_needs_attention(false);
+        }
+    });
+    let tab_bar = adw::TabBar::new();
+    tab_bar.set_view(Some(&tabs));
+    tab_bar.set_autohide(true);
+    tab_bar.set_hexpand(true);
+    let new_review = gtk::Button::from_icon_name("list-add-symbolic");
+    new_review.add_css_class("flat");
+    new_review.set_tooltip_text(Some("New PR review"));
+    new_review.set_visible(false);
+    new_review.connect_clicked({
+        let tabs = tabs.clone();
+        let window = window.clone();
+        move |_| pr_review::show(&window, &tabs, None)
+    });
+    tabs.connect_notify_local(Some("n-pages"), {
+        let new_review = new_review.clone();
+        move |view, _| new_review.set_visible(view.n_pages() > 1)
+    });
+    let tab_header = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+    tab_header.append(&tab_bar);
+    tab_header.append(&new_review);
+    let tabbed_workspace = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    tabbed_workspace.set_hexpand(true);
+    tabbed_workspace.set_vexpand(true);
+    tabbed_workspace.append(&tab_header);
+    tabbed_workspace.append(&tabs);
+    workspace_split.set_end_child(Some(&tabbed_workspace));
     let toast = adw::ToastOverlay::new();
     toast.set_child(Some(&workspace_split));
     window.set_content(Some(&toast));
@@ -784,7 +840,7 @@ fn build_ui(app: &adw::Application) {
         &window, &toast, &worktree_more,
         Rc::new(move || { let _ = activity_events.send(Event::ActivityChanged); }),
     );
-    let pull_requests = pull_requests::PullRequestsPanel::new();
+    let pull_requests = pull_requests::PullRequestsPanel::new(&tabs);
 
     let ui = Ui {
         window, toast, header_title, spinner, status, projects_label, sidebar_projects,
@@ -806,6 +862,7 @@ fn build_ui(app: &adw::Application) {
         detail_actions, detail_panel, detail_heading, history_back, history_forward,
         issue_history: Rc::new(RefCell::new(IssueHistory::default())),
         open_in_jira, pin_detail, inner_split,
+        tabs, board_tab,
         state: state.clone(),
         detail_request: Rc::new(Cell::new(0)),
         transition_busy: Rc::new(Cell::new(false)),
@@ -888,7 +945,9 @@ fn build_ui(app: &adw::Application) {
                 show_command_palette(&command_ui, &command_state, &command_sender);
                 return glib::Propagation::Stop;
             }
-            if close_ui.detail_panel.is_visible()
+            let on_board = close_ui.tabs.selected_page().as_ref()
+                == Some(&close_ui.board_tab);
+            if on_board && close_ui.detail_panel.is_visible()
                 && modifiers.contains(gtk::gdk::ModifierType::ALT_MASK)
                 && !modifiers.intersects(
                     gtk::gdk::ModifierType::CONTROL_MASK
@@ -906,11 +965,12 @@ fn build_ui(app: &adw::Application) {
                 }
             }
             let Some(search) = search.upgrade() else { return glib::Propagation::Proceed };
-            if key == gtk::gdk::Key::Escape && close_ui.detail_panel.is_visible() && !search.has_focus() {
+            if on_board && key == gtk::gdk::Key::Escape
+                && close_ui.detail_panel.is_visible() && !search.has_focus() {
                 dismiss_issue_details(&close_ui);
                 return glib::Propagation::Stop;
             }
-            if key == gtk::gdk::Key::slash
+            if on_board && key == gtk::gdk::Key::slash
                 && !search.has_focus()
                 && !modifiers.intersects(gtk::gdk::ModifierType::CONTROL_MASK | gtk::gdk::ModifierType::ALT_MASK)
             {
@@ -929,6 +989,8 @@ fn build_ui(app: &adw::Application) {
         let close_ui = ui.clone();
         let saved_detail_width = ui.saved_detail_width.clone();
         move |window| {
+            crate::pr_review_workspace::begin_shutdown();
+            crate::codex_ui::shutdown();
             remember_visible_detail_width(&close_ui);
             let mut settings = layout.borrow_mut();
             if window.width() >= 960 && window.height() >= 580 {
@@ -955,6 +1017,16 @@ fn build_ui(app: &adw::Application) {
     update_project_label(&ui, &state);
     show_empty(&ui.board_box, "Connect to Jira", "Your unified project board will appear here.");
     wire_actions(&ui, &state, &sender);
+    // Restore tabs without doing network work until the user reloads a PR.
+    // Per-file decisions are restored by show_files for the exact revision.
+    match crate::pr_review_state::open_review_urls() {
+        Ok(urls) => {
+            for url in &urls {
+                pr_review::show(&ui.window, &ui.tabs, Some(url));
+            }
+        }
+        Err(error) => eprintln!("Cannot restore PR review tabs: {error}"),
+    }
     {
         let ui = ui.clone();
         glib::timeout_add_local(Duration::from_secs(120), move || {
@@ -1262,7 +1334,9 @@ fn is_command_palette_shortcut(key: gtk::gdk::Key, modifiers: gtk::gdk::Modifier
 fn wire_actions(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>) {
     {
         let ui = ui.clone();
-        ui.pr_review_button.clone().connect_clicked(move |_| pr_review::show(&ui.window, None));
+        ui.pr_review_button.clone().connect_clicked(move |_| {
+            pr_review::show(&ui.window, &ui.tabs, None);
+        });
     }
     {
         let ui = ui.clone();
@@ -4138,6 +4212,8 @@ fn issue_link_handler(ui: &Ui) -> issue_detail::OpenIssueLink {
 }
 
 fn open_issue(ui: &Ui, issue: &Issue, source_button: Option<&gtk::Button>) {
+    // A Jira navigation action should always reveal the board inspector.
+    ui.tabs.set_selected_page(&ui.board_tab);
     ui.pending_direct_issue.borrow_mut().take();
     let previous_form = ui.transition_form.borrow_mut().take();
     if let Some(form) = previous_form {

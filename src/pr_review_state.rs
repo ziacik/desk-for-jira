@@ -71,6 +71,8 @@ impl ReviewProgress {
 struct Store {
     #[serde(default)]
     by_revision: HashMap<String, ReviewProgress>,
+    #[serde(default)]
+    open_review_urls: Vec<String>,
 }
 
 /// Scope by Git directory, PR number and immutable source commit. New revisions
@@ -119,9 +121,40 @@ pub fn save(key: &str, progress: &ReviewProgress) -> Result<()> {
     write_store(&path, &store)
 }
 
+/// Previously open PR tabs. Review decisions themselves remain scoped to the
+/// exact commit and are restored separately after loading a PR.
+pub fn open_review_urls() -> Result<Vec<String>> {
+    Ok(read_store(&storage_path()?)?.open_review_urls)
+}
+
+pub fn save_open_review_urls(urls: &[String]) -> Result<()> {
+    let path = storage_path()?;
+    let mut store = read_store(&path)?;
+    store.open_review_urls.clear();
+    for url in urls {
+        let url = url.trim();
+        if !url.is_empty() && !store.open_review_urls.iter().any(|saved| saved == url) {
+            store.open_review_urls.push(url.to_owned());
+        }
+    }
+    write_store(&path, &store)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn open_tab_metadata_is_backward_compatible() {
+        let legacy: Store = serde_json::from_str(r#"{"by_revision":{}}"#).unwrap();
+        assert!(legacy.open_review_urls.is_empty());
+
+        let restored: Store = serde_json::from_str(
+            r#"{"open_review_urls":["https://dev.azure.com/org/proj/_git/repo/pullrequest/42"]}"#,
+        ).unwrap();
+        assert_eq!(restored.open_review_urls.len(), 1);
+        assert!(restored.by_revision.is_empty());
+    }
 
     #[test]
     fn ai_cleared_and_manual_review_are_separate() {
