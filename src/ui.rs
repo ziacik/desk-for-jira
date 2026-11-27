@@ -42,6 +42,7 @@ struct Ui {
     status: gtk::Label,
     projects_label: gtk::Label,
     sidebar_projects: gtk::Box,
+    sidebar_dashboards: gtk::Box,
     project_filter: Rc<RefCell<Option<String>>>,
     connect_button: gtk::Button,
     disconnect_button: gtk::Button,
@@ -688,17 +689,8 @@ fn build_ui(app: &adw::Application) {
     let sidebar_projects = gtk::Box::new(gtk::Orientation::Vertical, 2);
     sidebar_projects.add_css_class("sidebar-projects");
     sidebar_content.append(&sidebar_projects);
-    let dashboards_button = gtk::Button::new();
-    dashboards_button.add_css_class("flat");
-    dashboards_button.add_css_class("sidebar-action");
-    let dashboards_row = gtk::Box::new(gtk::Orientation::Horizontal, 9);
-    dashboards_row.append(&gtk::Image::from_icon_name("view-grid-symbolic"));
-    let dashboards_label = gtk::Label::new(Some("Dashboards"));
-    dashboards_label.set_xalign(0.0);
-    dashboards_label.set_hexpand(true);
-    dashboards_row.append(&dashboards_label);
-    dashboards_button.set_child(Some(&dashboards_row));
-    sidebar_content.append(&dashboards_button);
+    let sidebar_dashboards = gtk::Box::new(gtk::Orientation::Vertical, 2);
+    sidebar_content.append(&sidebar_dashboards);
 
     let board_popover = gtk::Popover::new();
     let settings_actions = gtk::Box::new(gtk::Orientation::Vertical, 5);
@@ -854,7 +846,7 @@ fn build_ui(app: &adw::Application) {
     let pull_requests = pull_requests::PullRequestsPanel::new(&tabs);
 
     let ui = Ui {
-        window, toast, header_title, spinner, status, projects_label, sidebar_projects,
+        window, toast, header_title, spinner, status, projects_label, sidebar_projects, sidebar_dashboards,
         project_filter: Rc::new(RefCell::new(None)),
         connect_button, disconnect_button, refresh_button,
         manage_projects_button, manage_columns_button, manage_worktree_visibility_button,
@@ -889,27 +881,6 @@ fn build_ui(app: &adw::Application) {
         selected_button: Rc::new(RefCell::new(None)),
         collapsed_columns: Rc::new(RefCell::new(HashSet::new())),
     };
-    {
-        let ui = ui.clone();
-        dashboards_button.connect_clicked(move |_| {
-            let (account, projects, generation) = {
-                let state = ui.state.borrow();
-                (state.account.clone(), state.projects.iter().map(|p| p.key.clone()).collect::<Vec<_>>(), state.generation)
-            };
-            let Some(account) = account else { show_error(&ui, "Connect to Jira to view dashboards"); return; };
-            if account.mode != crate::jira::AuthMode::Cloud {
-                show_error(&ui, "Dashboard import currently supports Jira Cloud only");
-                return;
-            }
-            let state = ui.state.clone();
-            let events = ui.events.clone();
-            crate::dashboard_ui::show(&ui.tabs, account, projects, Rc::new(move |key| {
-                if state.borrow().generation == generation {
-                    let _ = events.send(Event::OpenLinkedIssue(key.to_owned()));
-                }
-            }));
-        });
-    }
     watch_detail_resize(&ui);
     install_issue_swipe(&ui);
     install_mouse_history_buttons(&ui);
@@ -1509,6 +1480,7 @@ fn wire_actions(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>) {
                 s.generation
             };
             crate::dashboard_ui::close(&ui.tabs);
+            clear_box(&ui.sidebar_dashboards);
             ui.restoring_view.set(true);
             set_busy(&ui, &state, false);
             ui.transition_busy.set(false);
@@ -1727,6 +1699,7 @@ fn handle_event(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>, eve
                     ui.manage_worktree_visibility_button.set_sensitive(false);
                     ui.header_title.set_subtitle(&loaded.user);
                     update_project_label(ui, state);
+                    render_dashboard_sidebar(ui);
                     update_inbox_count(ui);
                     ui.inbox_polling.set(false);
                     ui.restoring_view.set(false);
@@ -2094,6 +2067,7 @@ fn handle_event(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>, eve
 
 fn start_refresh(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>, account: Credentials, save: bool) {
     crate::dashboard_ui::close(&ui.tabs);
+    clear_box(&ui.sidebar_dashboards);
     ui.transition_busy.set(false);
     let id = {
         let mut s = state.borrow_mut();
@@ -2243,6 +2217,135 @@ fn start_board_load(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>)
         })().map_err(|err| err.to_string());
         let _ = sender.send(Event::BoardLoaded(id, key, result));
     });
+}
+
+fn open_saved_dashboard(ui: &Ui, dashboard: crate::dashboards::Dashboard) {
+    let (account, projects, generation) = {
+        let state = ui.state.borrow();
+        (state.account.clone(), state.projects.iter().map(|p| p.key.clone()).collect::<Vec<_>>(), state.generation)
+    };
+    let Some(account) = account else { return; };
+    let state = ui.state.clone();
+    let events = ui.events.clone();
+    crate::dashboard_ui::show(&ui.tabs, account, projects, dashboard, Rc::new(move |key| {
+        if state.borrow().generation == generation {
+            let _ = events.send(Event::OpenLinkedIssue(key.to_owned()));
+        }
+    }));
+}
+
+fn render_dashboard_sidebar(ui: &Ui) {
+    clear_box(&ui.sidebar_dashboards);
+    let (account, generation) = {
+        let state = ui.state.borrow();
+        (state.account.clone(), state.generation)
+    };
+    let Some(account) = account.filter(|a| a.mode == AuthMode::Cloud) else { return; };
+    let saved = match preferences::load_dashboards(&account.base_url) {
+        Ok(saved) => saved,
+        Err(error) => { show_error(ui, &format!("Could not load dashboards: {error}")); return; }
+    };
+    let header = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+    let title = gtk::Label::new(Some("DASHBOARDS"));
+    title.add_css_class("sidebar-eyebrow");
+    title.set_xalign(0.0);
+    title.set_hexpand(true);
+    let add = gtk::Button::from_icon_name("list-add-symbolic");
+    add.add_css_class("flat");
+    add.set_tooltip_text(Some("Add dashboard"));
+    header.append(&title);
+    header.append(&add);
+    ui.sidebar_dashboards.append(&header);
+
+    for dashboard in &saved {
+        let row = gtk::Box::new(gtk::Orientation::Horizontal, 2);
+        let button = gtk::Button::new();
+        button.add_css_class("flat");
+        button.add_css_class("sidebar-action");
+        button.set_hexpand(true);
+        button.set_tooltip_text(Some(&dashboard.name));
+        let content = gtk::Box::new(gtk::Orientation::Horizontal, 7);
+        content.append(&gtk::Image::from_icon_name("view-grid-symbolic"));
+        let name = gtk::Label::new(Some(&dashboard.name));
+        name.set_xalign(0.0);
+        name.set_hexpand(true);
+        name.set_ellipsize(gtk::pango::EllipsizeMode::End);
+        content.append(&name);
+        button.set_child(Some(&content));
+        let remove = gtk::Button::from_icon_name("list-remove-symbolic");
+        remove.add_css_class("flat");
+        remove.set_tooltip_text(Some("Remove saved dashboard (locally only)"));
+        {
+            let ui = ui.clone();
+            let site = account.base_url.clone();
+            let id = dashboard.id.clone();
+            button.connect_clicked(move |_| {
+                if ui.state.borrow().generation != generation { return; }
+                match preferences::load_dashboards(&site) {
+                    Ok(saved) => if let Some(dashboard) = saved.into_iter().find(|d| d.id == id) {
+                        open_saved_dashboard(&ui, dashboard);
+                    },
+                    Err(error) => show_error(&ui, &error.to_string()),
+                }
+            });
+        }
+        {
+            let ui = ui.clone();
+            let site = account.base_url.clone();
+            let id = dashboard.id.clone();
+            remove.connect_clicked(move |_| {
+                if ui.state.borrow().generation != generation { return; }
+                let result = preferences::load_dashboards(&site).and_then(|mut saved| {
+                    saved.retain(|d| d.id != id);
+                    preferences::save_dashboards(&site, &saved)
+                });
+                match result {
+                    Ok(()) => {
+                        crate::dashboard_ui::close_one(&ui.tabs, &id);
+                        render_dashboard_sidebar(&ui);
+                    }
+                    Err(error) => show_error(&ui, &error.to_string()),
+                }
+            });
+        }
+        row.append(&button);
+        row.append(&remove);
+        ui.sidebar_dashboards.append(&row);
+    }
+    {
+        let ui = ui.clone();
+        add.connect_clicked(move |_| {
+            if ui.state.borrow().generation != generation { return; }
+            let site = account.base_url.clone();
+            let saved = match preferences::load_dashboards(&site) {
+                Ok(saved) => saved,
+                Err(error) => { show_error(&ui, &error.to_string()); return; }
+            };
+            let callback_ui = ui.clone();
+            crate::dashboard_ui::add_dialog(&ui.window, account.clone(), saved, Rc::new(move |dashboard| {
+                if callback_ui.state.borrow().generation != generation { return false; }
+                let result = preferences::load_dashboards(&site).and_then(|mut saved| {
+                    if let Some(existing) = saved.iter().find(|d| d.id == dashboard.id) {
+                        return Ok(existing.clone());
+                    }
+                    saved.push(dashboard.clone());
+                    preferences::save_dashboards(&site, &saved)?;
+                    Ok(dashboard)
+                });
+                match result {
+                    Ok(dashboard) => {
+                        render_dashboard_sidebar(&callback_ui);
+                        open_saved_dashboard(&callback_ui, dashboard);
+                        true
+                    }
+                    Err(error) => {
+                        show_error(&callback_ui, &error.to_string());
+                        false
+                    }
+                }
+            }));
+        });
+    }
 }
 
 fn update_project_label(ui: &Ui, state: &Rc<RefCell<State>>) {
