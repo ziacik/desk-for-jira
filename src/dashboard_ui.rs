@@ -118,6 +118,7 @@ impl View {
 
         let header = gtk::Box::new(gtk::Orientation::Horizontal, 8);
         let title = heading(&dashboard.name);
+        title.remove_css_class("title-3");
         title.add_css_class("title-1");
         title.set_hexpand(true);
         header.append(&title);
@@ -247,7 +248,8 @@ impl View {
 
 fn widget_card() -> gtk::Box {
     let group = gtk::Box::new(gtk::Orientation::Vertical, 8);
-    group.add_css_class("dashboard-widget");
+    group.add_css_class("card");
+    group.set_margin_bottom(4);
     group
 }
 
