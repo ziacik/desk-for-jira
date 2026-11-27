@@ -5,6 +5,8 @@ mod codex_ui;
 mod codex_markdown;
 mod command_palette;
 mod dialog;
+mod dashboards;
+mod dashboard_ui;
 mod issue_detail;
 mod issue_links;
 mod jira;
