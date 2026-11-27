@@ -3,7 +3,7 @@ use adw::prelude::*;
 use gtk::glib;
 use crate::{dashboards::{self, Dashboard, Gadget, Release}, jira::{Credentials, Issue, JiraClient}, preferences};
 
-const PAGE_NAME: &str = "jira-dashboards";
+const PAGE_PREFIX: &str = "jira-dashboard-";
 type OpenIssue = Rc<dyn Fn(&str)>;
 
 fn background<T: Send + 'static>(
@@ -69,143 +69,132 @@ fn issues(container: &gtk::Box, items: &[Issue], open: &OpenIssue) {
     container.append(&list);
 }
 
+
+fn page_name(id: &str) -> String { format!("{PAGE_PREFIX}{id}") }
+
+fn existing(tabs: &adw::TabView, id: &str) -> Option<adw::TabPage> {
+    let name = page_name(id);
+    (0..tabs.n_pages()).map(|i| tabs.nth_page(i))
+        .find(|page| page.child().widget_name() == name.as_str())
+}
+
+pub fn close_one(tabs: &adw::TabView, id: &str) {
+    if let Some(page) = existing(tabs, id) { tabs.close_page(&page); }
+}
+
+pub fn close(tabs: &adw::TabView) {
+    let pages: Vec<_> = (0..tabs.n_pages()).map(|i| tabs.nth_page(i))
+        .filter(|page| page.child().widget_name().starts_with(PAGE_PREFIX)).collect();
+    for page in pages { tabs.close_page(&page); }
+}
+
+fn save_project(site: &str, id: &str, project: &str) -> anyhow::Result<Dashboard> {
+    let mut saved = preferences::load_dashboards(site)?;
+    let dashboard = saved.iter_mut().find(|d| d.id == id)
+        .ok_or_else(|| anyhow::anyhow!("Dashboard is no longer saved"))?;
+    dashboard.project = project.to_owned();
+    let result = dashboard.clone();
+    preferences::save_dashboards(site, &saved)?;
+    Ok(result)
+}
+
 #[derive(Clone)]
 struct View {
     account: Credentials,
     projects: Vec<String>,
-    saved: Rc<RefCell<Vec<Dashboard>>>,
-    selection: Rc<RefCell<Option<String>>>,
-    request: Rc<Cell<u64>>,
-    saved_box: glib::WeakRef<gtk::Box>,
+    dashboard: Rc<RefCell<Dashboard>>,
     body: glib::WeakRef<gtk::Box>,
-    message: glib::WeakRef<gtk::Label>,
     open_issue: OpenIssue,
+    generation: Rc<Cell<u64>>,
 }
 
 impl View {
-    fn message(&self, message: &str) {
-        if let Some(label) = self.message.upgrade() { label.set_text(message); }
-    }
-
-    fn save(&self, dashboards: Vec<Dashboard>) -> bool {
-        match preferences::save_dashboards(&self.account.base_url, &dashboards) {
-            Ok(()) => {
-                *self.saved.borrow_mut() = dashboards;
-                self.message("");
-                true
-            }
-            Err(error) => {
-                self.message(&format!("Could not save dashboards: {error}"));
-                false
-            }
-        }
-    }
-
-    fn add(&self, dashboard: Dashboard) {
-        let mut saved = self.saved.borrow().clone();
-        if !saved.iter().any(|d| d.id == dashboard.id) {
-            saved.push(dashboard.clone());
-            if !self.save(saved) { return; }
-        }
-        self.select(&dashboard.id);
-    }
-
-    fn render_saved(&self) {
-        let Some(container) = self.saved_box.upgrade() else { return; };
-        clear(&container);
-        let selected = self.selection.borrow().clone();
-        for dashboard in self.saved.borrow().iter() {
-            let row = gtk::Box::new(gtk::Orientation::Horizontal, 4);
-            let button = gtk::Button::with_label(&dashboard.name);
-            button.set_hexpand(true);
-            button.add_css_class(if selected.as_deref() == Some(dashboard.id.as_str()) { "suggested-action" } else { "flat" });
-            let remove = gtk::Button::from_icon_name("list-remove-symbolic");
-            remove.add_css_class("flat");
-            remove.set_tooltip_text(Some("Remove saved dashboard (locally only)"));
-            {
-                let view = self.clone();
-                let id = dashboard.id.clone();
-                button.connect_clicked(move |_| view.select(&id));
-            }
-            {
-                let view = self.clone();
-                let id = dashboard.id.clone();
-                remove.connect_clicked(move |_| {
-                    let mut saved = view.saved.borrow().clone();
-                    saved.retain(|d| d.id != id);
-                    if view.save(saved) {
-                        if view.selection.borrow().as_deref() == Some(id.as_str()) {
-                            view.selection.borrow_mut().take();
-                            view.request.set(view.request.get().wrapping_add(1));
-                            if let Some(body) = view.body.upgrade() {
-                                clear(&body);
-                                note(&body, "Choose or add a dashboard.");
-                            }
-                        }
-                        view.render_saved();
-                    }
-                });
-            }
-            row.append(&button);
-            row.append(&remove);
-            container.append(&row);
-        }
-        if self.saved.borrow().is_empty() { note(&container, "No saved dashboards."); }
-    }
-
-    fn select(&self, id: &str) {
-        let Some(dashboard) = self.saved.borrow().iter().find(|d| d.id == id).cloned() else { return; };
+    fn render(&self) {
         let Some(body) = self.body.upgrade() else { return; };
-        *self.selection.borrow_mut() = Some(id.to_owned());
-        self.render_saved();
-        self.request.set(self.request.get().wrapping_add(1));
-        let generation = self.request.get();
+        self.generation.set(self.generation.get().wrapping_add(1));
+        let generation = self.generation.get();
+        let dashboard = self.dashboard.borrow().clone();
         clear(&body);
+
         let header = gtk::Box::new(gtk::Orientation::Horizontal, 8);
         let title = heading(&dashboard.name);
+        title.add_css_class("title-1");
         title.set_hexpand(true);
         header.append(&title);
         let refresh = gtk::Button::from_icon_name("view-refresh-symbolic");
+        refresh.add_css_class("flat");
         refresh.set_tooltip_text(Some("Refresh dashboard"));
+        let settings = gtk::MenuButton::builder().icon_name("emblem-system-symbolic")
+            .tooltip_text("Configure local widgets").build();
+        settings.add_css_class("flat");
         let url = format!("{}/jira/dashboards/{}", self.account.base_url, dashboard.id);
         let browser = gtk::LinkButton::with_label(&url, "Open in Jira");
         header.append(&refresh);
+        header.append(&settings);
         header.append(&browser);
         body.append(&header);
-        {
-            let view = self.clone();
-            let id = dashboard.id.clone();
-            refresh.connect_clicked(move |_| view.select(&id));
-        }
+        let view = self.clone();
+        refresh.connect_clicked(move |_| view.render());
 
-        body.append(&heading("Upcoming releases"));
-        note(&body, "Local release view: select a Jira project to see unreleased versions and their assigned bugs.");
-        let mut names = vec!["Select a project…"];
-        names.extend(self.projects.iter().map(String::as_str));
+        // Release dates are a local optional widget, not part of every Jira
+        // dashboard. An empty project means the widget is disabled.
+        let popover = gtk::Popover::new();
+        let menu = gtk::Box::new(gtk::Orientation::Vertical, 8);
+        menu.set_margin_top(12);
+        menu.set_margin_bottom(12);
+        menu.set_margin_start(12);
+        menu.set_margin_end(12);
+        menu.append(&heading("Local widgets"));
+        menu.append(&label("Upcoming releases"));
+        let mut project_keys = self.projects.clone();
+        if !dashboard.project.is_empty() && !project_keys.contains(&dashboard.project) {
+            project_keys.push(dashboard.project.clone());
+        }
+        let mut names = vec!["Disabled"];
+        names.extend(project_keys.iter().map(String::as_str));
         let project = gtk::DropDown::from_strings(&names);
-        let selected = self.projects.iter().position(|p| p == &dashboard.project).map_or(0, |i| i as u32 + 1);
+        let selected = project_keys.iter().position(|p| p == &dashboard.project)
+            .map_or(0, |i| i as u32 + 1);
         project.set_selected(selected);
-        body.append(&project);
-        let release_box = gtk::Box::new(gtk::Orientation::Vertical, 8);
-        body.append(&release_box);
-        if selected > 0 { load_releases(&release_box, &self.account, &dashboard.project, &self.open_issue); }
+        menu.append(&project);
+        let apply = gtk::Button::with_label("Apply");
+        menu.append(&apply);
+        let error = label("");
+        menu.append(&error);
+        popover.set_child(Some(&menu));
+        settings.set_popover(Some(&popover));
         {
             let view = self.clone();
-            let id = dashboard.id.clone();
-            let release_box = release_box.downgrade();
-            project.connect_selected_notify(move |dropdown| {
-                let Some(release_box) = release_box.upgrade() else { return; };
-                let key = dropdown.selected().checked_sub(1)
-                    .and_then(|i| view.projects.get(i as usize)).cloned().unwrap_or_default();
-                let mut saved = view.saved.borrow().clone();
-                if let Some(d) = saved.iter_mut().find(|d| d.id == id) { d.project = key.clone(); }
-                if view.save(saved) { view.select(&id); }
-                else { clear(&release_box); note(&release_box, "Project selection was not saved."); }
+            let project = project.downgrade();
+            let error = error.downgrade();
+            let popover = popover.downgrade();
+            apply.connect_clicked(move |_| {
+                let Some(project) = project.upgrade() else { return; };
+                let key = project.selected().checked_sub(1)
+                    .and_then(|i| project_keys.get(i as usize)).map(String::as_str).unwrap_or("");
+                let id = view.dashboard.borrow().id.clone();
+                match save_project(&view.account.base_url, &id, key) {
+                    Ok(dashboard) => {
+                        *view.dashboard.borrow_mut() = dashboard;
+                        if let Some(popover) = popover.upgrade() { popover.popdown(); }
+                        view.render();
+                    }
+                    Err(err) => if let Some(error) = error.upgrade() { error.set_text(&err.to_string()); },
+                }
             });
         }
 
-        body.append(&heading("Dashboard gadgets"));
-        let gadgets = gtk::Box::new(gtk::Orientation::Vertical, 10);
+        if !dashboard.project.is_empty() {
+            let group = widget_card();
+            group.append(&heading("Upcoming releases"));
+            note(&group, &format!("{} · Local widget", dashboard.project));
+            let release_box = gtk::Box::new(gtk::Orientation::Vertical, 8);
+            group.append(&release_box);
+            body.append(&group);
+            load_releases(&release_box, &self.account, &dashboard.project, &self.open_issue);
+        }
+
+        let gadgets = gtk::Box::new(gtk::Orientation::Vertical, 12);
         body.append(&gadgets);
         note(&gadgets, "Loading Jira gadgets…");
         let account = self.account.clone();
@@ -213,26 +202,176 @@ impl View {
         let view = self.clone();
         let gadgets = gadgets.downgrade();
         background(move || dashboards::gadgets(&JiraClient::new(account)?, &id), move |result| {
-            if view.request.get() != generation { return; }
+            if view.generation.get() != generation { return; }
             let Some(container) = gadgets.upgrade() else { return; };
             clear(&container);
             match result {
                 Ok(items) if items.is_empty() => note(&container, "No dashboard gadgets returned by Jira."),
-                Ok(items) => for Gadget { title, data } in items {
-                    let group = gtk::Box::new(gtk::Orientation::Vertical, 6);
-                    group.append(&heading(&title));
-                    match data {
-                        Ok(items) => issues(&group, &items, &view.open_issue),
-                        Err(error) => note(&group, &error),
+                Ok(items) => {
+                    let mut unsupported = Vec::new();
+                    let mut rendered = false;
+                    for Gadget { title, data } in items {
+                        match data {
+                            Ok(items) => {
+                                let group = widget_card();
+                                group.append(&heading(&title));
+                                issues(&group, &items, &view.open_issue);
+                                container.append(&group);
+                                rendered = true;
+                            }
+                            Err(error) => unsupported.push((title, error)),
+                        }
                     }
-                    container.append(&group);
-                },
+                    if !rendered && !unsupported.is_empty() {
+                        note(&container, "No gadgets on this dashboard can currently be displayed in Desk for Jira. Open in Jira to view the original dashboard.");
+                    }
+                    if !unsupported.is_empty() {
+                        let expander = gtk::Expander::new(Some(&format!("Unavailable gadgets ({})", unsupported.len())));
+                        let details = gtk::Box::new(gtk::Orientation::Vertical, 8);
+                        details.set_margin_top(8);
+                        for (title, error) in unsupported {
+                            let line = label(&title);
+                            line.add_css_class("heading");
+                            details.append(&line);
+                            note(&details, &error);
+                        }
+                        expander.set_child(Some(&details));
+                        container.append(&expander);
+                    }
+                }
                 Err(error) => note(&container, &format!("Could not load gadgets: {error}")),
             }
         });
     }
 }
 
+fn widget_card() -> gtk::Box {
+    let group = gtk::Box::new(gtk::Orientation::Vertical, 8);
+    group.add_css_class("dashboard-widget");
+    group
+}
+
+pub fn show(tabs: &adw::TabView, account: Credentials, mut projects: Vec<String>, dashboard: Dashboard, open_issue: OpenIssue) {
+    if let Some(page) = existing(tabs, &dashboard.id) {
+        tabs.set_selected_page(&page);
+        return;
+    }
+    projects.sort();
+    projects.dedup();
+    let body = gtk::Box::new(gtk::Orientation::Vertical, 14);
+    body.set_margin_top(20);
+    body.set_margin_start(24);
+    body.set_margin_end(24);
+    body.set_margin_bottom(20);
+    body.set_hexpand(true);
+    let scroll = gtk::ScrolledWindow::builder().hexpand(true).vexpand(true)
+        .hscrollbar_policy(gtk::PolicyType::Never).child(&body).build();
+    scroll.set_widget_name(&page_name(&dashboard.id));
+    let page = tabs.append(&scroll);
+    page.set_title(&dashboard.name);
+    tabs.set_selected_page(&page);
+    let view = View {
+        account, projects, dashboard: Rc::new(RefCell::new(dashboard)),
+        body: body.downgrade(), open_issue, generation: Rc::new(Cell::new(0)),
+    };
+    view.render();
+}
+
+pub fn add_dialog(parent: &impl IsA<gtk::Window>, account: Credentials, saved: Vec<Dashboard>, add_dashboard: Rc<dyn Fn(Dashboard) -> bool>) {
+    let window = gtk::Window::builder().title("Add dashboard").transient_for(parent)
+        .modal(true).default_width(440).resizable(false).build();
+    crate::dialog::close_on_escape(&window);
+    let content = gtk::Box::new(gtk::Orientation::Vertical, 10);
+    content.set_margin_top(16);
+    content.set_margin_bottom(16);
+    content.set_margin_start(16);
+    content.set_margin_end(16);
+    content.append(&label("Choose a Jira dashboard"));
+    let chooser = gtk::DropDown::from_strings(&["Loading dashboards…"]);
+    chooser.set_sensitive(false);
+    content.append(&chooser);
+    let add = gtk::Button::with_label("Add dashboard");
+    add.set_sensitive(false);
+    content.append(&add);
+    content.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
+    content.append(&label("Or paste a dashboard URL or ID"));
+    let entry = gtk::Entry::builder().placeholder_text("Dashboard URL or ID").build();
+    content.append(&entry);
+    let add_url = gtk::Button::with_label("Add from URL");
+    content.append(&add_url);
+    let message = label("");
+    content.append(&message);
+    window.set_child(Some(&content));
+
+    let available = Rc::new(RefCell::new(Vec::<Dashboard>::new()));
+    {
+        let available = available.clone();
+        let chooser = chooser.downgrade();
+        let window = window.downgrade();
+        let callback = add_dashboard.clone();
+        add.connect_clicked(move |_| {
+            let Some(chooser) = chooser.upgrade() else { return; };
+            let selected = available.borrow().get(chooser.selected() as usize).cloned();
+            if let Some(dashboard) = selected && callback(dashboard)
+                && let Some(window) = window.upgrade() { window.close(); }
+        });
+    }
+    {
+        let entry = entry.downgrade();
+        let message = message.downgrade();
+        let window = window.downgrade();
+        let account = account.clone();
+        let callback = add_dashboard;
+        add_url.connect_clicked(move |button| {
+            let Some(entry) = entry.upgrade() else { return; };
+            let id = match dashboards::parse_dashboard_id(&entry.text(), &account.base_url) {
+                Ok(id) => id,
+                Err(error) => {
+                    if let Some(message) = message.upgrade() { message.set_text(&error.to_string()); }
+                    return;
+                }
+            };
+            button.set_sensitive(false);
+            let button = button.downgrade();
+            let account = account.clone();
+            let callback = callback.clone();
+            let message = message.clone();
+            let window = window.clone();
+            background(move || dashboards::by_id(&JiraClient::new(account)?, &id), move |result| {
+                let Some(window) = window.upgrade() else { return; };
+                if !window.is_visible() { return; }
+                if let Some(button) = button.upgrade() { button.set_sensitive(true); }
+                match result {
+                    Ok(dashboard) => if callback(dashboard) { window.close(); },
+                    Err(error) => if let Some(message) = message.upgrade() { message.set_text(&error); },
+                }
+            });
+        });
+    }
+    let chooser = chooser.downgrade();
+    let add = add.downgrade();
+    let message = message.downgrade();
+    background(move || dashboards::list(&JiraClient::new(account)?), move |result| {
+        let (Some(chooser), Some(add), Some(message)) = (chooser.upgrade(), add.upgrade(), message.upgrade()) else { return; };
+        match result {
+            Ok(items) => {
+                let items: Vec<_> = items.into_iter().filter(|d| !saved.iter().any(|s| s.id == d.id)).collect();
+                if items.is_empty() {
+                    chooser.set_model(Some(&gtk::StringList::new(&["No more dashboards"])));
+                    return;
+                }
+                let names: Vec<_> = items.iter().map(|d| d.name.as_str()).collect();
+                chooser.set_model(Some(&gtk::StringList::new(&names)));
+                chooser.set_selected(0);
+                chooser.set_sensitive(true);
+                add.set_sensitive(true);
+                *available.borrow_mut() = items;
+            }
+            Err(error) => message.set_text(&format!("Could not list dashboards: {error}")),
+        }
+    });
+    window.present();
+}
 fn load_releases(container: &gtk::Box, account: &Credentials, project: &str, open: &OpenIssue) {
     clear(container);
     note(container, "Loading releases…");
@@ -298,131 +437,3 @@ fn load_releases(container: &gtk::Box, account: &Credentials, project: &str, ope
     });
 }
 
-fn existing(tabs: &adw::TabView) -> Option<adw::TabPage> {
-    (0..tabs.n_pages()).map(|i| tabs.nth_page(i))
-        .find(|page| page.child().widget_name() == PAGE_NAME)
-}
-
-pub fn close(tabs: &adw::TabView) {
-    if let Some(page) = existing(tabs) { tabs.close_page(&page); }
-}
-
-pub fn show(tabs: &adw::TabView, account: Credentials, mut projects: Vec<String>, open_issue: OpenIssue) {
-    if let Some(page) = existing(tabs) {
-        tabs.set_selected_page(&page);
-        return;
-    }
-    projects.sort();
-    projects.dedup();
-    let root = gtk::Box::new(gtk::Orientation::Horizontal, 16);
-    root.set_widget_name(PAGE_NAME);
-    let sidebar = gtk::Box::new(gtk::Orientation::Vertical, 10);
-    sidebar.set_width_request(240);
-    sidebar.set_margin_top(16);
-    sidebar.set_margin_start(16);
-    sidebar.set_margin_bottom(16);
-    sidebar.append(&heading("Saved dashboards"));
-    let saved_box = gtk::Box::new(gtk::Orientation::Vertical, 4);
-    sidebar.append(&saved_box);
-    sidebar.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
-    sidebar.append(&heading("Add dashboard"));
-    let chooser = gtk::DropDown::from_strings(&["Loading dashboards…"]);
-    chooser.set_sensitive(false);
-    sidebar.append(&chooser);
-    let add = gtk::Button::with_label("Add selected dashboard");
-    add.set_sensitive(false);
-    sidebar.append(&add);
-    let entry = gtk::Entry::builder().placeholder_text("Dashboard URL or ID").build();
-    sidebar.append(&entry);
-    let add_url = gtk::Button::with_label("Add from URL or ID");
-    sidebar.append(&add_url);
-    let message = label("");
-    sidebar.append(&message);
-
-    let body = gtk::Box::new(gtk::Orientation::Vertical, 14);
-    body.set_margin_top(16);
-    body.set_margin_end(16);
-    body.set_margin_bottom(16);
-    body.set_hexpand(true);
-    let scroll = gtk::ScrolledWindow::builder().hexpand(true).vexpand(true)
-        .hscrollbar_policy(gtk::PolicyType::Never).child(&body).build();
-    let sidebar_scroll = gtk::ScrolledWindow::builder().vexpand(true)
-        .hscrollbar_policy(gtk::PolicyType::Never).child(&sidebar).build();
-    root.append(&sidebar_scroll);
-    root.append(&gtk::Separator::new(gtk::Orientation::Vertical));
-    root.append(&scroll);
-    let page = tabs.append(&root);
-    page.set_title("Dashboards");
-    tabs.set_selected_page(&page);
-
-    let saved = match preferences::load_dashboards(&account.base_url) {
-        Ok(saved) => saved,
-        Err(error) => {
-            note(&body, &format!("Could not load saved dashboards: {error}"));
-            sidebar.set_sensitive(false);
-            return;
-        }
-    };
-    let view = View {
-        account, projects, saved: Rc::new(RefCell::new(saved)), selection: Rc::new(RefCell::new(None)),
-        request: Rc::new(Cell::new(0)), saved_box: saved_box.downgrade(), body: body.downgrade(),
-        message: message.downgrade(), open_issue,
-    };
-    view.render_saved();
-    let first = view.saved.borrow().first().map(|d| d.id.clone());
-    if let Some(id) = first { view.select(&id); }
-    else { note(&body, "Choose or add a dashboard."); }
-
-    let available = Rc::new(RefCell::new(Vec::<Dashboard>::new()));
-    {
-        let view = view.clone();
-        let available = available.clone();
-        let chooser = chooser.downgrade();
-        add.connect_clicked(move |_| {
-            let Some(chooser) = chooser.upgrade() else { return; };
-            let selected = available.borrow().get(chooser.selected() as usize).cloned();
-            if let Some(dashboard) = selected { view.add(dashboard); }
-        });
-    }
-    {
-        let view = view.clone();
-        let entry = entry.downgrade();
-        add_url.connect_clicked(move |button| {
-            let Some(entry) = entry.upgrade() else { return; };
-            let id = match dashboards::parse_dashboard_id(&entry.text(), &view.account.base_url) {
-                Ok(id) => id,
-                Err(error) => { view.message(&error.to_string()); return; }
-            };
-            button.set_sensitive(false);
-            let button = button.downgrade();
-            let account = view.account.clone();
-            let view = view.clone();
-            background(move || dashboards::by_id(&JiraClient::new(account)?, &id), move |result| {
-                let Some(button) = button.upgrade() else { return; };
-                button.set_sensitive(true);
-                match result {
-                    Ok(dashboard) => view.add(dashboard),
-                    Err(error) => view.message(&format!("Could not add dashboard: {error}")),
-                }
-            });
-        });
-    }
-    let account = view.account.clone();
-    let chooser = chooser.downgrade();
-    let add = add.downgrade();
-    background(move || dashboards::list(&JiraClient::new(account)?), move |result| {
-        let (Some(chooser), Some(add)) = (chooser.upgrade(), add.upgrade()) else { return; };
-        match result {
-            Ok(items) if !items.is_empty() => {
-                let names: Vec<_> = items.iter().map(|d| d.name.as_str()).collect();
-                chooser.set_model(Some(&gtk::StringList::new(&names)));
-                chooser.set_selected(0);
-                chooser.set_sensitive(true);
-                add.set_sensitive(true);
-                *available.borrow_mut() = items;
-            }
-            Ok(_) => view.message("No accessible dashboards. You can also try adding a URL."),
-            Err(error) => view.message(&format!("Could not list dashboards: {error}")),
-        }
-    });
-}
