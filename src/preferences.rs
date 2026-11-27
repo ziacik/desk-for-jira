@@ -466,6 +466,8 @@ struct Preferences {
     #[serde(default)]
     jira_inbox_by_site: HashMap<String, jira_inbox::Feed>,
     #[serde(default)]
+    dashboards_by_site: HashMap<String, Vec<crate::dashboards::Dashboard>>,
+    #[serde(default)]
     board_by_site: HashMap<String, BoardSettings>,
     #[serde(default)]
     view_by_site: HashMap<String, ViewSettings>,
@@ -491,6 +493,17 @@ const ACTIVITY_LIMIT: usize = 300;
 fn push_activity(entries: &mut Vec<ActivityEntry>, entry: ActivityEntry) {
     entries.insert(0, entry);
     entries.truncate(ACTIVITY_LIMIT);
+}
+
+pub fn load_dashboards(site: &str) -> Result<Vec<crate::dashboards::Dashboard>> {
+    Ok(read_preferences(&preferences_path()?)?.dashboards_by_site.get(site).cloned().unwrap_or_default())
+}
+
+pub fn save_dashboards(site: &str, dashboards: &[crate::dashboards::Dashboard]) -> Result<()> {
+    let path = preferences_path()?;
+    let mut prefs = read_preferences(&path)?;
+    prefs.dashboards_by_site.insert(site.to_owned(), dashboards.to_vec());
+    write_preferences(&path, &prefs)
 }
 
 pub fn load_jira_inbox(site: &str) -> Result<jira_inbox::Feed> {
