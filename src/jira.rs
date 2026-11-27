@@ -498,6 +498,11 @@ impl JiraClient {
 
 
 
+    pub(crate) fn dashboard_get(&self, path: &str, query: &[(&str, usize)]) -> Result<Value> {
+        ensure!(self.account.mode == AuthMode::Cloud, "Dashboard import currently supports Jira Cloud only");
+        self.read_json(self.http.get(self.url(path)).query(query))
+    }
+
     /// Read PR URLs reported by Jira's Development panel. Jira does not expose
     /// a supported read API for this information. The private dev-status API
     /// works with the same basic email/token login as the Cloud REST client,
