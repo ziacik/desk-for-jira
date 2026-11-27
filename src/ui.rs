@@ -666,11 +666,17 @@ fn build_ui(app: &adw::Application) {
     sidebar.append(&sidebar_toolbar);
     let board_nav = gtk::Box::new(gtk::Orientation::Horizontal, 10);
     board_nav.add_css_class("sidebar-current");
-    board_nav.append(&gtk::Image::from_icon_name("view-grid-symbolic"));
+    let board_button = gtk::Button::new();
+    board_button.add_css_class("flat");
+    board_button.set_hexpand(true);
+    let board_button_content = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    board_button_content.append(&gtk::Image::from_icon_name("view-grid-symbolic"));
     let nav_label = gtk::Label::new(Some("Unified board"));
     nav_label.set_xalign(0.0);
     nav_label.set_hexpand(true);
-    board_nav.append(&nav_label);
+    board_button_content.append(&nav_label);
+    board_button.set_child(Some(&board_button_content));
+    board_nav.append(&board_button);
     // All board-level settings live in one contextual menu next to Unified board.
     let board_menu = gtk::MenuButton::new();
     board_menu.set_icon_name("emblem-system-symbolic");
@@ -789,6 +795,24 @@ fn build_ui(app: &adw::Application) {
     tabs.set_vexpand(true);
     let board_tab = tabs.append(&inner_split);
     board_tab.set_title("Board");
+    {
+        let tabs = tabs.clone();
+        let board_tab = board_tab.clone();
+        board_button.connect_clicked(move |_| tabs.set_selected_page(&board_tab));
+    }
+    {
+        let board_nav = board_nav.downgrade();
+        let board_tab = board_tab.clone();
+        tabs.connect_selected_page_notify(move |tabs| {
+            if let Some(board_nav) = board_nav.upgrade() {
+                if tabs.selected_page().as_ref() == Some(&board_tab) {
+                    board_nav.add_css_class("sidebar-current");
+                } else {
+                    board_nav.remove_css_class("sidebar-current");
+                }
+            }
+        });
+    }
     tabs.connect_close_page({
         let board_tab = board_tab.clone();
         move |view, page| {
@@ -2398,6 +2422,11 @@ fn update_project_label(ui: &Ui, state: &Rc<RefCell<State>>) {
             }
         });
     }
+    {
+        let tabs = ui.tabs.clone();
+        let board_tab = ui.board_tab.clone();
+        all_button.connect_clicked(move |_| tabs.set_selected_page(&board_tab));
+    }
     ui.sidebar_projects.append(&all_button);
 
     for project in projects {
@@ -2426,6 +2455,11 @@ fn update_project_label(ui: &Ui, state: &Rc<RefCell<State>>) {
                     render_board(&ui, &state.borrow());
                 }
             });
+        }
+        {
+            let tabs = ui.tabs.clone();
+            let board_tab = ui.board_tab.clone();
+            button.connect_clicked(move |_| tabs.set_selected_page(&board_tab));
         }
         ui.sidebar_projects.append(&button);
     }
