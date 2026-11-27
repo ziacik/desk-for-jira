@@ -688,6 +688,17 @@ fn build_ui(app: &adw::Application) {
     let sidebar_projects = gtk::Box::new(gtk::Orientation::Vertical, 2);
     sidebar_projects.add_css_class("sidebar-projects");
     sidebar_content.append(&sidebar_projects);
+    let dashboards_button = gtk::Button::new();
+    dashboards_button.add_css_class("flat");
+    dashboards_button.add_css_class("sidebar-action");
+    let dashboards_row = gtk::Box::new(gtk::Orientation::Horizontal, 9);
+    dashboards_row.append(&gtk::Image::from_icon_name("view-grid-symbolic"));
+    let dashboards_label = gtk::Label::new(Some("Dashboards"));
+    dashboards_label.set_xalign(0.0);
+    dashboards_label.set_hexpand(true);
+    dashboards_row.append(&dashboards_label);
+    dashboards_button.set_child(Some(&dashboards_row));
+    sidebar_content.append(&dashboards_button);
 
     let board_popover = gtk::Popover::new();
     let settings_actions = gtk::Box::new(gtk::Orientation::Vertical, 5);
@@ -878,6 +889,27 @@ fn build_ui(app: &adw::Application) {
         selected_button: Rc::new(RefCell::new(None)),
         collapsed_columns: Rc::new(RefCell::new(HashSet::new())),
     };
+    {
+        let ui = ui.clone();
+        dashboards_button.connect_clicked(move |_| {
+            let (account, projects, generation) = {
+                let state = ui.state.borrow();
+                (state.account.clone(), state.projects.iter().map(|p| p.key.clone()).collect::<Vec<_>>(), state.generation)
+            };
+            let Some(account) = account else { show_error(&ui, "Connect to Jira to view dashboards"); return; };
+            if account.mode != crate::jira::AuthMode::Cloud {
+                show_error(&ui, "Dashboard import currently supports Jira Cloud only");
+                return;
+            }
+            let state = ui.state.clone();
+            let events = ui.events.clone();
+            crate::dashboard_ui::show(&ui.tabs, account, projects, Rc::new(move |key| {
+                if state.borrow().generation == generation {
+                    let _ = events.send(Event::OpenLinkedIssue(key.to_owned()));
+                }
+            }));
+        });
+    }
     watch_detail_resize(&ui);
     install_issue_swipe(&ui);
     install_mouse_history_buttons(&ui);
@@ -1476,6 +1508,7 @@ fn wire_actions(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>) {
                 s.active_sprint_only = false;
                 s.generation
             };
+            crate::dashboard_ui::close(&ui.tabs);
             ui.restoring_view.set(true);
             set_busy(&ui, &state, false);
             ui.transition_busy.set(false);
@@ -2060,6 +2093,7 @@ fn handle_event(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>, eve
 }
 
 fn start_refresh(ui: &Ui, state: &Rc<RefCell<State>>, sender: &Sender<Event>, account: Credentials, save: bool) {
+    crate::dashboard_ui::close(&ui.tabs);
     ui.transition_busy.set(false);
     let id = {
         let mut s = state.borrow_mut();
